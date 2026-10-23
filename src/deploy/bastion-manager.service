@@ -1,0 +1,37 @@
+[Unit]
+Description=堡垒机管理服务（管理面：认证、资产、策略、工单、审计）
+Documentation=https://example.internal/bastion
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bastion
+# 敏感配置放这里（JWT 密钥、服务间密钥、数据库口令），权限 0600
+EnvironmentFile=/opt/bastion/etc/manager.env
+ExecStart=/opt/bastion/bin/manager
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+
+# ---- 资源与权限收敛 ----
+# 内存上限：异常时宁可本服务被 OOM 杀掉，也不要拖垮宿主机
+MemoryMax=1G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# ReadWritePaths 列出服务需要写入的目录。
+#
+# 为什么要单独放开 /etc/sysconfig/network-scripts：
+# ProtectSystem=full 会把 /etc 挂成只读，而网络配置功能需要改写 ifcfg 文件。
+# 这是"安全加固"与"功能需求"的直接冲突，处理原则是**精确放开最小路径**，
+# 而不是把 ProtectSystem 降级为 strict/no —— 后者会让整个 /etc 可写，
+# 服务一旦被控就能改 /etc/passwd、sudoers 等敏感文件。
+#
+# 只放开网络配置目录：即便服务被控，影响面也限于网卡配置（可见、可恢复）。
+ReadWritePaths=/opt/bastion/data /opt/bastion/client /var/log/bastion /etc/sysconfig/network-scripts
+
+[Install]
+WantedBy=multi-user.target

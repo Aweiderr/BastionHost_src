@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "bastion-desktop",
+  "outputfilename": "bastion-desktop",
+  "frontend:install": "npm install --registry=https://registry.npmmirror.com",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "信息安全与基础架构部",
+    "email": ""
+  },
+  "info": {
+    "companyName": "信息安全与基础架构部",
+    "productName": "堡垒机运维客户端",
+    "productVersion": "0.1.0",
+    "copyright": "内部使用",
+    "comments": "堡垒机（运维安全审计系统）桌面客户端"
+  }
+}

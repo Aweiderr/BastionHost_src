@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UKey 中间件连通性测试</title>
+<style>
+  body { font-family: "Microsoft YaHei", system-ui, sans-serif; margin: 24px; line-height: 1.6; color: #222; }
+  h2 { margin: 0 0 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+  fieldset { border: 1px solid #ddd; border-radius: 6px; margin-bottom: 14px; padding: 12px; }
+  legend { padding: 0 6px; color: #444; }
+  label { display: inline-block; min-width: 120px; }
+  input[type=text], input[type=password] { padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; width: 320px; }
+  button { padding: 8px 18px; border: 0; border-radius: 5px; background: #2563eb; color: #fff; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #9ca3af; cursor: not-allowed; }
+  pre { background: #0f172a; color: #a5f3fc; padding: 14px; border-radius: 6px; overflow: auto; max-height: 460px; font-size: 12.5px; }
+  .ok { color: #16a34a; font-weight: 600; }
+  .bad { color: #dc2626; font-weight: 600; }
+  .warn { color: #d97706; font-weight: 600; }
+  code { background: #f1f5f9; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h2>UKey 中间件连通性测试</h2>
+<div class="sub">
+  用于验证「堡垒机页面 → 本机 UKey 中间件」这条跨域链路是否可用。<br>
+  当前页面 Origin：<code id="pageOrigin"></code> ｜ 将要访问的中间件地址：<code id="target"></code>
+</div>
+
+<fieldset>
+  <legend>参数</legend>
+  <div><label>签名证书类型</label><input type="text" id="iKeyType" value="2"></div>
+  <div style="margin-top:6px"><label>PIN 码</label><input type="password" id="pin" value="" placeholder="请输入 UKey PIN"></div>
+  <div style="margin-top:6px"><label>CSP 名称</label><input type="text" id="provName" value="Longmai mToken GM3000 CSP V1.1"></div>
+  <div style="margin-top:6px"><label>容器名</label><input type="text" id="contName" value="CCITCont1"></div>
+  <div style="margin-top:6px"><label>待签原文</label><input type="text" id="signText" value="bastion-ukey-login|admin|NONCE123|1700000000"></div>
+</fieldset>
+
+<p><button id="runBtn" onclick="runAll()">开始测试</button></p>
+<pre id="log">等待开始……</pre>
+
+<script>
+// ============================================================================
+// 与参考实现（svs-universal/js/ccit/zwPlugin.js）保持一致的关键点：
+//
+// 1. 请求必须使用 application/x-www-form-urlencoded，body 为 "json=" + 原始JSON。
+//    这是浏览器的「简单请求」，不会触发 CORS 预检。若改成 application/json，
+//    浏览器会先发 OPTIONS 预检，而中间件的预检响应只带 Access-Control-Allow-Origin，
+//    缺少 Access-Control-Allow-Methods / Allow-Headers，请求会被浏览器拦下。
+// 2. body 里的 JSON **不做 URL 编码**，中间件按原始字符串解析。
+// 3. HTTPS 页面下必须走 https://127.0.0.1:8199，否则 http://127.0.0.1:8198
+//    会被浏览器的混合内容（Mixed Content）策略拦截。
+// ============================================================================
+
+var logEl = document.getElementById('log');
+function log(msg, cls) {
+  var line = cls ? '<span class="' + cls + '">' + msg + '</span>' : msg;
+  logEl.innerHTML += '\n' + line;
+}
+function reset() { logEl.innerHTML = ''; }
+
+var MIDDLEWARE = (location.protocol === 'https:')
+  ? 'https://127.0.0.1:8199'
+  : 'http://127.0.0.1:8198';
+document.getElementById('pageOrigin').textContent = location.origin;
+document.getElementById('target').textContent = MIDDLEWARE;
+
+/** 调用中间件。异步回调，避免使用已被浏览器废弃的同步 XHR。 */
+function call(jsonObj, cb) {
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', MIDDLEWARE, true);
+  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  xhr.onload = function () {
+    if (xhr.status !== 200) { cb(new Error('HTTP ' + xhr.status), null); return; }
+    try { cb(null, JSON.parse(xhr.responseText)); }
+    catch (e) { cb(new Error('响应不是合法 JSON：' + xhr.responseText), null); }
+  };
+  xhr.onerror = function () {
+    cb(new Error('网络错误：中间件未运行、被 CORS 拦截、或被浏览器拦截（混合内容 / 私有网络访问策略）'), null);
+  };
+  xhr.send('json=' + JSON.stringify(jsonObj));
+}
+
+function b64encodeUtf8(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+function runAll() {
+  var btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  reset();
+  log('中间件地址：' + MIDDLEWARE);
+  log('页面 Origin：' + location.origin);
+  log('');
+
+  var iKeyType = parseInt(document.getElementById('iKeyType').value, 10) || 2;
+  var pin = document.getElementById('pin').value;
+  var provName = document.getElementById('provName').value;
+  var contName = document.getElementById('contName').value;
+  var signText = document.getElementById('signText').value;
+
+  step1(provName, contName, iKeyType, pin, signText, function () { btn.disabled = false; });
+}
+
+function step1(provName, contName, iKeyType, pin, signText, done) {
+  log('[1/6] checkComSetup ……');
+  call({ method: 'checkComSetup' }, function (err, res) {
+    if (err) { log('  ✗ ' + err.message, 'bad'); return done(); }
+    if (res.errcode !== 0 || res.resultMSG !== 0) {
+      log('  ✗ 中间件未就绪：' + JSON.stringify(res), 'bad'); return done();
+    }
+    log('  ✓ 中间件已安装且可用', 'ok');
+    step2(provName, contName, iKeyType, pin, signText, done);
+  });
+}
+
+function step2(provName, contName, iKeyType, pin, signText, done) {
+  log('[2/6] EnumProvider ……');
+  call({ method: 'EnumProvider', iType: 1 }, function (err, res) {
+    if (err) { log('  ✗ ' + err.message, 'bad'); return done(); }
+    var names = String(res.resultMSG || '').split('#');
+    log('  ✓ 提供者列表：' + names.join(' | '));
+    if (names.indexOf(provName) === -1) {
+      log('  ! 未在列表中找到 "' + provName + '"，InitProvider 可能失败', 'warn');
+    }
+    step3(provName, contName, iKeyType, pin, signText, done);
+  });
+}
+
+function step3(provName, contName, iKeyType, pin, signText, done) {
+  log('[3/6] InitProvider ……');
+  call({ method: 'InitProvider', provName: provName, contName: contName }, function (err, res) {
+    if (err) { log('  ✗ ' + err.message, 'bad'); return done(); }
+    if (res.errcode !== 0 || res.resultMSG !== 0) {
+      log('  ✗ 初始化失败：' + JSON.stringify(res), 'bad'); return done();
+    }
+    log('  ✓ 初始化成功', 'ok');
+    step4(provName, contName, iKeyType, pin, signText, done);
+  });
+}
+
+function step4(provName, contName, iKeyType, pin, signText, done) {
+  if (!pin) {
+    log('[4/6] VerifyPin …… 跳过（未填写 PIN）', 'warn');
+    return step5(provName, contName, iKeyType, signText, done);
+  }
+  log('[4/6] VerifyPin ……');
+  call({ method: 'VerifyPin', usrPin: pin }, function (err, res) {
+    if (err) { log('  ✗ ' + err.message, 'bad'); return done(); }
+    if (res.errcode !== 0 || res.resultMSG !== 0) {
+      log('  ✗ PIN 校验失败：' + (res.errMsg || '') + ' ' + JSON.stringify(res), 'bad'); return done();
+    }
+    log('  ✓ PIN 校验通过', 'ok');
+    step5(provName, contName, iKeyType, signText, done);
+  });
+}
+
+function step5(provName, contName, iKeyType, signText, done) {
+  log('[5/6] getCertByContName(iKeyType=' + iKeyType + ') ……');
+  call({ method: 'getCertByContName', containerName: contName, iKeyType: iKeyType }, function (err, res) {
+    if (err) { log('  ✗ ' + err.message, 'bad'); return done(); }
+    if (res.errcode !== 0 || !res.resultMSG) {
+      log('  ✗ 读取证书失败：' + JSON.stringify(res), 'bad'); return done();
+    }
+    var certB64 = res.resultMSG;
+    log('  ✓ 读到证书，长度 ' + certB64.length + ' 字符', 'ok');
+    log('    证书 base64 前 60 字符：' + certB64.substring(0, 60) + '…');
+    step6(provName, contName, iKeyType, signText, certB64, done);
+  });
+}
+
+function step6(provName, contName, iKeyType, signText, certB64, done) {
+  var srcData = b64encodeUtf8(signText);
+  log('[6/6] sign(srcData, AlgType=3 SM2WithSM3) ……');
+  log('    待签原文：' + signText);
+  log('    srcData（base64）：' + srcData);
+  log('    注意：中间件签的是上面这串 base64 字符串本身，不做解码；服务端验签对象也是它。', 'warn');
+  call({ method: 'sign', srcData: srcData, AlgType: 3 }, function (err, res) {
+    if (err) { log('  ✗ ' + err.message, 'bad'); return done(); }
+    if (res.errcode !== 0 || !res.resultMSG) {
+      log('  ✗ 签名失败：' + JSON.stringify(res), 'bad'); return done();
+    }
+    log('  ✓ 签名成功，长度 ' + res.resultMSG.length + ' 字符', 'ok');
+    log('    签名值（base64）：' + res.resultMSG);
+    log('');
+    log('=== 可供服务端验签的完整样本（JSON）===', 'ok');
+    log(JSON.stringify({
+      msg_text: signText,
+      msg_b64: srcData,
+      cert_b64: certB64,
+      sig_b64: res.resultMSG
+    }, null, 2));
+    log('');
+    log('把上面这段 JSON 交给服务端，用 sm2.VerifyASN1WithSM2(公钥, nil, []byte(msg_b64), 签名) 即可验证通过。', 'ok');
+    done();
+  });
+}
+</script>
+</body>
+</html>

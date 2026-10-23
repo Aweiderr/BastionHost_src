@@ -1,0 +1,26 @@
+[Unit]
+Description=堡垒机服务端（数据面：协议代理、会话编排、命令管控、录像）
+Documentation=https://example.internal/bastion
+After=network-online.target bastion-manager.service
+Wants=network-online.target
+# 依赖管理服务：管理面不可用时不该放行运维流量
+Requires=bastion-manager.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bastion
+EnvironmentFile=/opt/bastion/etc/server.env
+ExecStart=/opt/bastion/bin/server
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+
+MemoryMax=1G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/bastion/data /var/log/bastion
+
+[Install]
+WantedBy=multi-user.target

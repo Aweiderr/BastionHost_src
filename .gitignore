@@ -1,0 +1,10 @@
+# 部署口令与密钥材料
+account.txt
+src/data/
+
+# 依赖与 Office 临时文件
+node_modules/
+~$*
+
+.DS_Store
+Thumbs.db

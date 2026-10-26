@@ -223,6 +223,11 @@ export interface UserItem {
   status: string
   roles: string[]
   must_change_password?: boolean
+  /**
+   * 口令有效期（天）。
+   * 过期判断里 ≤0 视为不过期，但创建接口会把 ≤0 改写成 90，不会按「永不过期」落库。
+   */
+  password_expire_days?: number
   mfa_enabled?: boolean
   /** 第二因子类型：none / totp / sms / ukey */
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey'
@@ -239,6 +244,11 @@ export interface UserPayload {
   phone: string
   roles: string[]
   remark: string
+  /**
+   * 口令有效期（天）。
+   * 创建时缺省或 ≤0 由服务端按 90 天写入；更新时仅 >0 会覆盖原值。
+   */
+  password_expire_days?: number
   /** 第二因子类型；创建时可选，更新时为空表示不修改 */
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey'
 }

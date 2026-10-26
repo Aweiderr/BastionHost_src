@@ -121,10 +121,21 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const editing = ref<UserItem | null>(null)
 
+/** 与创建用户服务端缺省值一致：未填写或 ≤0 时落库为 90 天 */
+const PASSWORD_EXPIRE_DAYS_DEFAULT = 90
+/**
+ * 口令有效期上限。
+ * 服务端按「天数 × 24h」与 time.Duration 比较，过大的整数会溢出；
+ * 36500 天（约 100 年）远低于该上限，也够日常策略使用。
+ */
+const PASSWORD_EXPIRE_DAYS_MAX = 36500
+
 const form = reactive({
   username: '',
   display_name: '',
   password: '',
+  /** 口令有效期（天）。创建与编辑共用；默认 90 */
+  password_expire_days: PASSWORD_EXPIRE_DAYS_DEFAULT,
   email: '',
   phone: '',
   roles: [] as string[],
@@ -152,6 +163,11 @@ function openDialog(user?: UserItem): void {
   form.username = user?.username ?? ''
   form.display_name = user?.display_name ?? ''
   form.password = ''
+  const days = user?.password_expire_days
+  form.password_expire_days =
+    typeof days === 'number' && Number.isInteger(days) && days >= 1
+      ? days
+      : PASSWORD_EXPIRE_DAYS_DEFAULT
   form.email = user?.email ?? ''
   form.phone = user?.phone ?? ''
   form.mfa_type = (user?.mfa_type as typeof form.mfa_type) ?? 'none'
@@ -224,6 +240,12 @@ async function submit(): Promise<void> {
     app.error('新建用户需设置不少于 8 位的初始口令')
     return
   }
+  // 创建接口把 ≤0 改写成 90，不会存成「永不过期」；这里只接受正整数，与落库语义一致。
+  const expireDays = Number(form.password_expire_days)
+  if (!Number.isInteger(expireDays) || expireDays < 1 || expireDays > PASSWORD_EXPIRE_DAYS_MAX) {
+    app.error(`口令有效期须为 1～${PASSWORD_EXPIRE_DAYS_MAX} 的正整数（天）`)
+    return
+  }
   if (!form.roles.length) {
     app.error('请至少分配一个角色')
     return
@@ -238,6 +260,7 @@ async function submit(): Promise<void> {
         roles: form.roles,
         remark: form.remark,
         mfa_type: form.mfa_type,
+        password_expire_days: expireDays,
       })
       app.success('用户已更新')
     } else {
@@ -250,6 +273,7 @@ async function submit(): Promise<void> {
         roles: form.roles,
         remark: form.remark,
         mfa_type: form.mfa_type,
+        password_expire_days: expireDays,
       })
       app.success('用户创建成功')
     }
@@ -451,6 +475,19 @@ async function openPermissions(): Promise<void> {
           <input v-model="form.password" class="input" type="password" autocomplete="new-password" />
           <span class="form-hint">长度不少于 8 位，用户首次登录后建议立即修改</span>
         </div>
+        <div class="form-item span-2">
+          <label class="form-label">口令有效期（天）<span class="required">*</span></label>
+          <input
+            v-model.number="form.password_expire_days"
+            class="input expire-days-input"
+            type="number"
+            min="1"
+            :max="PASSWORD_EXPIRE_DAYS_MAX"
+            step="1"
+            inputmode="numeric"
+          />
+          <span class="form-hint">正整数，默认 90 天。超过该天数未修改口令时需更换</span>
+        </div>
         <div class="form-item">
           <label class="form-label">邮箱</label>
           <input v-model.trim="form.email" class="input" />
@@ -629,6 +666,10 @@ async function openPermissions(): Promise<void> {
 </template>
 
 <style scoped>
+.expire-days-input {
+  max-width: 220px;
+}
+
 .role-picker {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));

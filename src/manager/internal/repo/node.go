@@ -36,6 +36,12 @@ type HeartbeatInput struct {
 	CPUPercent     float64 `json:"cpu_percent"`
 	MemPercent     float64 `json:"mem_percent"`
 	LastError      string  `json:"last_error"`
+	// LiveSessionIDs 是代理节点上报的在途会话 ID。
+	//
+	// nil（字段缺失或 JSON null）表示旧版代理没报清单，对账时必须跳过。
+	// 空切片表示节点在线，并且当前没有任何在途会话 —— 库里仍为 active、
+	// 且已经超过宽限的会话就是孤儿。
+	LiveSessionIDs []int64 `json:"live_session_ids"`
 	// LocalIPs 是节点上报的本机 IPv4 列表。
 	//
 	// 用途：按 IP 反查"这台设备是否被运维录入了某个集群"。

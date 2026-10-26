@@ -135,6 +135,7 @@ func main() {
 		// 心跳：向管理服务上报负载，并取回"是否允许接收新会话"。
 		// 先于监听启动，让节点一上线就在集群界面可见。
 		beater = nodebeat.New(mc, cfg, sshSrv.ActiveSessions)
+		beater.SetLiveSessionIDs(sshSrv.ListLiveSessionIDs)
 		beater.Start(ctx)
 		// 维护状态（draining）下拒绝新会话，存量会话继续跑完
 		sshSrv.SetAdmissionCheck(beater.Allowed)

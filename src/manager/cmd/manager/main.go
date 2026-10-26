@@ -304,11 +304,18 @@ func main() {
 		// 节点自注册仍保留：它负责上报进程负载，并按设备 IP 取回
 		// "是否允许接收新会话"（集群页把某台置为维护后，由这里生效）
 		nodeSvc = service.NewNodeService(repo.NewNodeRepo(pool), clusterRepo, configRepo)
+		// 在途会话清单只活在内存里：它是节点这一拍心跳的运行事实，
+		// 落库会在管理服务重启后变成过期结论。巡检启动前会先等心跳重新报上来。
+		liveSessions := service.NewLiveSessionRegistry()
+		nodeSvc.SetLiveSessions(liveSessions)
 
-		// 僵尸会话巡检：数据面进程被强杀（SIGKILL / OOM / 断电）时不会有
-		// 任何归档动作，会话会永远停在 active、录像没有封存尾。
-		// 服务端侧的优雅关闭覆盖正常重启，这里按"节点心跳超时"兜住剩下的。
-		service.NewSessionReconciler(sessionRepo, configRepo).Start(ctx)
+		// 僵尸会话巡检有两条路径：
+		//   - 节点心跳超时：进程被强杀（SIGKILL / OOM / 断电），来不及归档；
+		//   - 节点在线但在途清单里没有这条会话：优雅重启漏了 finish、
+		//     结束上报失败，或连接已经不在了。正常还活着的会话在清单里，不会被收掉。
+		recon := service.NewSessionReconciler(sessionRepo, configRepo)
+		recon.SetLiveSessions(liveSessions)
+		recon.Start(ctx)
 
 		// 访问授权（acl:grant:*）：安全管理员给运维人员直接分配资产。
 		// 这组权限点与 acl_grant / acl_grant_rule / acl_grant_log 三张表

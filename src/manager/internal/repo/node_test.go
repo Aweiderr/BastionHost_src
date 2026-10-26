@@ -53,4 +53,36 @@ func TestHeartbeatInputUnmarshal(t *testing.T) {
 	if in.LastError != "密码机不可达" {
 		t.Errorf("last_error 未解析：%q", in.LastError)
 	}
+	if in.LiveSessionIDs != nil {
+		t.Errorf("未上报 live_session_ids 时必须是 nil，实际 %#v", in.LiveSessionIDs)
+	}
+}
+
+func TestHeartbeatLiveSessionIDsNilVersusEmpty(t *testing.T) {
+	var omitted HeartbeatInput
+	if err := json.Unmarshal([]byte(`{"active_sessions":0}`), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	if omitted.LiveSessionIDs != nil {
+		t.Fatal("omitted live_session_ids must be nil")
+	}
+
+	var empty HeartbeatInput
+	if err := json.Unmarshal([]byte(`{"active_sessions":0,"live_session_ids":[]}`), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.LiveSessionIDs == nil {
+		t.Fatal("empty array must be a non-nil slice so reconciliation can run")
+	}
+	if len(empty.LiveSessionIDs) != 0 {
+		t.Fatalf("empty array length = %d", len(empty.LiveSessionIDs))
+	}
+
+	var listed HeartbeatInput
+	if err := json.Unmarshal([]byte(`{"live_session_ids":[40,41]}`), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.LiveSessionIDs) != 2 || listed.LiveSessionIDs[0] != 40 || listed.LiveSessionIDs[1] != 41 {
+		t.Fatalf("ids = %#v", listed.LiveSessionIDs)
+	}
 }

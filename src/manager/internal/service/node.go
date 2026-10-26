@@ -23,6 +23,7 @@ type NodeService struct {
 	nodes    *repo.NodeRepo
 	clusters *repo.ClusterRepo
 	configs  *repo.ConfigRepo
+	lives    *LiveSessionRegistry
 }
 
 // 配置缺失时的默认值，与迁移中的出厂配置保持一致。
@@ -39,6 +40,15 @@ const (
 // 这样运维在集群页点"置为维护"才真的生效，而不只是界面上的一个标签。
 func NewNodeService(nodes *repo.NodeRepo, clusters *repo.ClusterRepo, configs *repo.ConfigRepo) *NodeService {
 	return &NodeService{nodes: nodes, clusters: clusters, configs: configs}
+}
+
+// SetLiveSessions 注入在途会话登记表。心跳成功后把节点上报的清单记在这里，
+// 供僵尸会话巡检与库内 active 行对账。不注入时行为与以前一致。
+func (s *NodeService) SetLiveSessions(reg *LiveSessionRegistry) {
+	if s == nil {
+		return
+	}
+	s.lives = reg
 }
 
 // HeartbeatAck 是心跳的应答。
@@ -72,6 +82,11 @@ func (s *NodeService) Heartbeat(ctx context.Context, in repo.HeartbeatInput) (*H
 	node, err := s.nodes.Upsert(ctx, in)
 	if err != nil {
 		return nil, err
+	}
+	if s.lives != nil {
+		// 只在心跳落库成功后记清单。reported=false（字段缺失）表示旧版代理，
+		// 巡检不能凭"没报"就把会话收掉。
+		s.lives.Observe(in.NodeID, in.LiveSessionIDs, in.LiveSessionIDs != nil)
 	}
 
 	interval := s.HeartbeatInterval(ctx)

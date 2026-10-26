@@ -3,6 +3,7 @@ import type {
   PageResult,
   Permission,
   Role,
+  ResetUserPasswordResult,
   UserItem,
   UserPayload,
   UserQuery,
@@ -45,9 +46,23 @@ export function deleteUser(id: number) {
   return request<Record<string, unknown>>(`/users/${id}`, { method: 'DELETE' })
 }
 
-/** 重置用户口令 */
+/**
+ * 从重置口令响应里取出要展示的临时口令。
+ * 优先 temporary_password；没有时回退到旧字段 password。
+ */
+export function temporaryPasswordFromReset(
+  result: ResetUserPasswordResult | null | undefined,
+): string {
+  if (!result || typeof result !== 'object') return ''
+  for (const value of [result.temporary_password, result.password]) {
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return ''
+}
+
+/** 重置用户口令，返回一次性临时口令（服务端生成，调用方只负责展示） */
 export function resetUserPassword(id: number, password?: string) {
-  return request<{ password?: string } | Record<string, unknown>>(`/users/${id}/password/reset`, {
+  return request<ResetUserPasswordResult>(`/users/${id}/password/reset`, {
     method: 'POST',
     body: password ? { password } : {},
   })

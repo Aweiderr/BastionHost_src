@@ -259,6 +259,20 @@ export interface UserQuery extends PageQuery {
   role_code?: string
 }
 
+/**
+ * 管理员重置用户口令的返回。
+ *
+ * 服务端当前下发 temporary_password（形如 Bastion@ 加随机字符），
+ * 并置 must_change_password。password 只兼容更早的字段名。
+ */
+export interface ResetUserPasswordResult {
+  user_id?: number
+  temporary_password?: string
+  password?: string
+  must_change_password?: boolean
+  warning?: string
+}
+
 export interface Role {
   role_id: number
   role_code: string

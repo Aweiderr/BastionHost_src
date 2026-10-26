@@ -359,6 +359,13 @@ type HeartbeatPayload struct {
 	CPUPercent     float64  `json:"cpu_percent"`
 	MemPercent     float64  `json:"mem_percent"`
 	LastError      string   `json:"last_error,omitempty"`
+	// LiveSessionIDs 本节点在途运维会话（管理面 session_id）。
+	//
+	// 不要加 omitempty。空数组表示"节点在线且没有在途会话"；
+	// 字段缺失或 null 表示旧版代理根本没报清单，管理面不能据此
+	// 把库里的 active 行收掉。active_sessions 与这份清单同源，
+	// 避免整数是 0、清单里却还有会话（或相反）。
+	LiveSessionIDs []int64 `json:"live_session_ids"`
 	// LocalIPs 本机 IPv4 列表：管理服务据此把本节点关联到
 	// 运维在集群页录入的设备 IP，从而下发"是否接收新会话"。
 	LocalIPs []string `json:"local_ips,omitempty"`

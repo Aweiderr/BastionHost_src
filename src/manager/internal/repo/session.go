@@ -139,7 +139,40 @@ func (r *SessionRepo) Terminate(ctx context.Context, sessionID int64, reason str
 	return err
 }
 
+// CloseActive 结束一条仍为 active 的会话，写入 end_time 与 duration_sec。
+//
+// 用于"节点在线，但这条会话已经不在它的在途清单里"：连接丢了、
+// 进程重启没走到 finish、或结束上报失败。只更新 status=active 的行，
+// 因此和正在进行的 finish 并发是安全的 —— 谁后写都不把一条已结束的
+// 会话重新标成进行中。返回值表示这次是否真的改到了行。
+func (r *SessionRepo) CloseActive(ctx context.Context, sessionID int64, endReason string) (bool, error) {
+	if sessionID <= 0 {
+		return false, nil
+	}
+	if endReason == "" {
+		endReason = "no_live_conn"
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE ops_session SET
+		   status = 'closed',
+		   end_reason = $2,
+		   end_time = COALESCE(end_time, now()),
+		   duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (now() - start_time))::int),
+		   record_status = CASE WHEN record_status = 'recording' THEN 'failed'
+		                        ELSE record_status END
+		 WHERE session_id = $1 AND status = 'active'`,
+		sessionID, endReason)
+	if err != nil {
+		return false, fmt.Errorf("收尾无连接会话失败: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // CloseStale 收尾"所属代理节点已离线"的在途会话。
+//
+// 节点还在心跳、但这条会话已经不在节点的在途清单里时，这里不会命中。
+// 那种孤儿由 SessionReconciler 按心跳上报的 live_session_ids 收尾
+// （end_reason=no_live_conn）。
 //
 // 为什么需要它：进程被强制杀死（SIGKILL / OOM / 断电）时没有任何机会
 // 写归档，会话会永远停在 active —— 审计页显示"进行中"、活跃会话统计
@@ -415,7 +448,7 @@ func (r *SessionRepo) Stats(ctx context.Context, tenantID int64) (map[string]any
 
 	return map[string]any{
 		"total": total, "today": today,
-		"active": byStatus[model.SessionStatusActive],
+		"active":    byStatus[model.SessionStatusActive],
 		"by_status": byStatus, "blocked_commands": blocked,
 	}, nil
 }

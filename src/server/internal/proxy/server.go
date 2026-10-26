@@ -70,7 +70,7 @@ type Server struct {
 	active   int
 	shutdown bool
 
-	// conns 是在途连接集合，wg 是**在途会话**的等待组。
+	// conns 是在途 TCP 连接集合，wg 是**在途会话**的等待组。
 	//
 	// 存在的理由：会话主循环阻塞在目标 pty 的读上，进程收到停止信号时
 	// 它不会自己返回 —— 库里的会话记录会永远停在 active，录像因为没有
@@ -82,6 +82,14 @@ type Server struct {
 	// 只等连接关闭会提前放行（连接早就退了，会话还在归档）。
 	conns map[net.Conn]struct{}
 	wg    sync.WaitGroup
+
+	// extraClosers 是进不了 conns 的在途连接，目前是 WebSSH 的 WebSocket。
+	//
+	// WebSocket 升级时被 Hijack，http.Server.Shutdown 不会关闭它，
+	// 它也不是 SSH 监听上的 net.Conn。若只遍历 conns，一次只有浏览器
+	// 会话的重启会看到空集合然后直接返回，finish 不会执行，
+	// ops_session 就停在 active。
+	extraClosers []io.Closer
 
 	// lives 按管理面 session_id 登记在途会话，供管理员强制中断。
 	lives map[int64]*liveSession
@@ -113,11 +121,16 @@ type identity struct {
 	AssetHint   string   `json:"asset_hint"`
 }
 
-// ActiveSessions 返回当前活跃会话数。
+// ActiveSessions 返回已在管理面建档、且本进程仍持有的运维会话数。
+//
+// 以 lives 为准，而不是 SSH 监听上的 TCP 接入数：WebSSH 不走那条监听，
+// 只计 s.active 时浏览器会话在心跳里永远是 0，管理面无法把它和库里的
+// active 行对上。还没选定资产的 SSH 连接没有 session_id，不在这里计数；
+// 接入上限仍由 s.active 在 acquire 里把关。
 func (s *Server) ActiveSessions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.active
+	return len(s.lives)
 }
 
 // SetAdmissionCheck 注入新会话准入检查。
@@ -313,6 +326,95 @@ func (s *Server) untrackConn(c net.Conn) {
 	s.mu.Unlock()
 }
 
+// beginExtraSession 把一条 WebSocket 会话同时记入关闭清单和等待组。
+//
+// 两步必须在同一把锁里完成。若先登记连接、再 wg.Add，Shutdown 可能
+// 插在中间把等待组等完并返回，进程退出时 finish 还没跑。
+func (s *Server) beginExtraSession(c io.Closer) bool {
+	if c == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shutdown {
+		return false
+	}
+	s.extraClosers = append(s.extraClosers, c)
+	s.wg.Add(1)
+	return true
+}
+
+// trackExtra 登记一条 Shutdown 必须主动关掉的非 TCP 连接（WebSocket）。
+// 已进入关闭流程时返回 false，调用方应直接拒绝这次接入。
+func (s *Server) trackExtra(c io.Closer) bool {
+	if c == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shutdown {
+		return false
+	}
+	s.extraClosers = append(s.extraClosers, c)
+	return true
+}
+
+// untrackExtra 注销额外连接。按指针识别，因此不能把函数值本身塞进来。
+func (s *Server) untrackExtra(c io.Closer) {
+	if c == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, x := range s.extraClosers {
+		if x == c {
+			s.extraClosers = append(s.extraClosers[:i], s.extraClosers[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *Server) trackedExtraCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.extraClosers)
+}
+
+// connCloser 把带关闭原因的函数适配成可按指针比较的 io.Closer。
+//
+// 函数值放进接口后再做相等比较会 panic（函数不可比较）。
+// Shutdown 要按身份注销，所以这里用结构体指针。
+type connCloser struct {
+	close func() error
+}
+
+func (c *connCloser) Close() error {
+	if c == nil || c.close == nil {
+		return nil
+	}
+	return c.close()
+}
+
+func (s *Server) shuttingDown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdown
+}
+
+// archiveReason 在进程正在退出时把结束原因统一成 gateway_shutdown。
+//
+// 连接是被 Shutdown 主动掐断的，若仍记成 client_disconnect，
+// 审计上看起来像用户自己关掉了终端。
+func (s *Server) archiveReason(endReason string) string {
+	if s.shuttingDown() {
+		return endGatewayShutdown
+	}
+	if endReason == "" {
+		return endRemoteClosed
+	}
+	return endReason
+}
+
 // tryTrackSession 登记一次运维会话；已进入关闭流程时返回 false。
 //
 // 只有真正会走归档（finish）的路径才计入 wg —— 记连接是不够的，
@@ -329,14 +431,17 @@ func (s *Server) tryTrackSession() bool {
 
 // Shutdown 停止接收新会话、断开在途连接，并等待它们完成归档。
 //
-// 为什么不只是"停止监听"：会话主循环阻塞在目标 pty 的读上，
+// 为什么不只是"停止监听"：会话主循环阻塞在目标 pty 或 WebSocket 的读上，
 // 关掉监听不影响已建立的连接 —— 进程退出时它们直接消失，于是留下
 // 永久 active 的会话记录、没有封存尾的录像、以及缺失的 session_end。
-// 断开客户端连接后，读循环会依次返回，runShell 自然走到它的归档逻辑
-// （封存录像 + 上报管理面）：这条路径本来就有，只是缺一个触发者。
+// 断开客户端连接后，读循环会依次返回，runShell / handleWebSSH 自然走到
+// 归档逻辑（封存录像 + 上报管理面）：这条路径本来就有，只是缺一个触发者。
+//
+// WebSSH 不在 conns 里。连接数为 0 时不能直接返回，否则浏览器会话
+// 在重启时被跳过，库里的 active 行就无人收尾。
 //
 // 等待上限由调用方通过 ctx 控制：超时不再阻塞进程退出，
-// 未完成的会话由管理面侧的僵尸会话巡检兜底。
+// 未完成的会话由管理面按心跳清单对账兜底。
 func (s *Server) Shutdown(ctx context.Context) {
 	s.mu.Lock()
 	s.shutdown = true
@@ -344,14 +449,27 @@ func (s *Server) Shutdown(ctx context.Context) {
 	for c := range s.conns {
 		conns = append(conns, c)
 	}
+	extras := append([]io.Closer(nil), s.extraClosers...)
+	lives := make([]*liveSession, 0, len(s.lives))
+	for _, ls := range s.lives {
+		lives = append(lives, ls)
+	}
 	s.mu.Unlock()
 
-	if len(conns) == 0 {
-		return
+	pending := len(conns) + len(extras) + len(lives)
+	if pending > 0 {
+		slog.Warn("正在断开会话连接以完成收尾",
+			"connections", len(conns), "websockets", len(extras), "sessions", len(lives))
 	}
-	slog.Warn("正在断开会话连接以完成收尾", "connections", len(conns))
 	for _, c := range conns {
 		_ = c.Close()
+	}
+	for _, c := range extras {
+		_ = c.Close()
+	}
+	// lives 再关一次：口令输入或目标读循环可能没堵在刚才那条客户端连接上。
+	for _, ls := range lives {
+		_ = ls.kill(endGatewayShutdown)
 	}
 
 	done := make(chan struct{})
@@ -361,7 +479,9 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}()
 	select {
 	case <-done:
-		slog.Info("在途会话已全部收尾")
+		if pending > 0 {
+			slog.Info("在途会话已全部收尾")
+		}
 	case <-ctx.Done():
 		slog.Warn("等待会话收尾超时，未完成的会话将由管理面巡检收尾")
 	}
@@ -491,6 +611,17 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 		return
 	}
 
+	// 库里已经有 active 行，必须马上登记。等到目标拨号成功才登记的话，
+	// 手动输入口令的那几分钟里心跳清单没有这条会话，管理面会当成孤儿收掉；
+	// Shutdown 也掐不断还堵在口令读取上的通道。
+	live := &liveSession{
+		SessionID: sess.SessionID, SessionNo: sess.SessionNo,
+		UserID: ident.UserID, Username: ident.Username, AssetID: asset.AssetID,
+	}
+	live.addCloser(ch)
+	s.registerLive(live)
+	defer s.unregisterLive(sess.SessionID)
+
 	// ---- 5. 开始录像 ----
 	var rec *record.Writer
 	recStatus := recordNone
@@ -544,16 +675,8 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 	write("\r\n已连接 %s（%s@%s），会话号 %s\r\n\r\n", asset.AssetName, cred.AccountName, cred.Host, sess.SessionNo)
 	defer targetClient.Close()
 	defer targetSess.Close()
-
-	live := &liveSession{
-		SessionID: sess.SessionID, SessionNo: sess.SessionNo,
-		UserID: ident.UserID, Username: ident.Username, AssetID: asset.AssetID,
-	}
 	live.addCloser(targetSess)
 	live.addCloser(targetClient)
-	live.addCloser(ch) // 掐断客户端通道，促使会话主循环退出
-	s.registerLive(live)
-	defer s.unregisterLive(sess.SessionID)
 
 	// ---- 7. 命令截获与留痕 ----
 	cmdCh := make(chan managerclient.SessionCommandPayload, 256)
@@ -678,6 +801,7 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 // 无论哪种模式，口令本身都不会出现在任何归档里。
 func (s *Server) finish(ctx context.Context, sessionID int64, endReason string,
 	cmdCount, blockCount int, recStatus string, rec *record.Writer, credMode string) {
+	endReason = s.archiveReason(endReason)
 	if credMode == "" {
 		credMode = "managed"
 	}
@@ -824,9 +948,9 @@ func (s *Server) dialTarget(cred *managerclient.Credential, pty *ptyRequest) (
 
 // ptyRequest 是 pty-req 的解析结果。
 type ptyRequest struct {
-	Term              string
-	Cols, Rows        int
-	Width, Height     int
+	Term          string
+	Cols, Rows    int
+	Width, Height int
 }
 
 func parsePtyRequest(payload []byte) (*ptyRequest, error) {

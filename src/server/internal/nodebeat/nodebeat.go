@@ -30,6 +30,9 @@ type Beater struct {
 	client         *managerclient.Client
 	cfg            *config.Config
 	activeSessions func() int
+	// liveSessionIDs 返回本节点在途运维会话的管理面 ID。
+	// 必须在 Start 之前设置。为空时心跳只报整数，管理面不会按清单对账。
+	liveSessionIDs func() []int64
 	// address 供集群界面展示"这个节点在哪"，取不到时留空
 	address string
 
@@ -110,6 +113,14 @@ func advertiseAddress(listen string) string {
 	return host
 }
 
+// SetLiveSessionIDs 注入在途会话清单。必须在 Start 之前调用。
+func (b *Beater) SetLiveSessionIDs(fn func() []int64) {
+	if b == nil {
+		return
+	}
+	b.liveSessionIDs = fn
+}
+
 // Start 启动心跳循环（非阻塞）。
 func (b *Beater) Start(ctx context.Context) {
 	go func() {
@@ -178,20 +189,45 @@ func (b *Beater) currentInterval() time.Duration {
 	return b.interval
 }
 
+// applyLiveSessions 把在途会话清单写进心跳，并让 active_sessions 与清单等长。
+//
+// lives 为 nil：旧的调用方式，只报整数，清单保持 nil（序列化成 null），
+// 管理面据此知道"这份心跳不能用来判断某条会话是否还活着"。
+// lives 非 nil：即使函数返回 nil，也要写成空切片。空数组和字段缺失
+// 在管理面是两种结论，混用会把还在手动输入口令的会话收掉，
+// 或者让重启后的孤儿永远停在 active。
+func applyLiveSessions(payload *managerclient.HeartbeatPayload, active func() int, lives func() []int64) {
+	if payload == nil {
+		return
+	}
+	if lives != nil {
+		ids := lives()
+		if ids == nil {
+			ids = []int64{}
+		}
+		payload.LiveSessionIDs = ids
+		payload.ActiveSessions = len(ids)
+		return
+	}
+	if active != nil {
+		payload.ActiveSessions = active()
+	}
+}
+
 // beat 执行一次上报。
 func (b *Beater) beat(ctx context.Context) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	payload := managerclient.HeartbeatPayload{
-		NodeName:       b.cfg.Node.Name,
-		NodeRole:       "proxy",
-		Address:        b.address,
-		Version:        config.Version,
-		ActiveSessions: b.activeSessions(),
-		MaxSessions:    b.cfg.Proxy.MaxSessionsPerNode,
-		LocalIPs:       b.LocalIPs(),
+		NodeName:    b.cfg.Node.Name,
+		NodeRole:    "proxy",
+		Address:     b.address,
+		Version:     config.Version,
+		MaxSessions: b.cfg.Proxy.MaxSessionsPerNode,
+		LocalIPs:    b.LocalIPs(),
 	}
+	applyLiveSessions(&payload, b.activeSessions, b.liveSessionIDs)
 	if m := sysinfo.Collect(); m != nil && m.Available {
 		payload.CPUPercent = m.CPUPercent
 		payload.MemPercent = m.MemPercent

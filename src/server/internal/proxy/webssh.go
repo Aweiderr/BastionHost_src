@@ -76,6 +76,21 @@ func (s *Server) WebSSHHandler() http.HandlerFunc {
 			return
 		}
 		defer c.CloseNow()
+
+		// WebSocket 被 Hijack 后，既不在 SSH 的 conns 里，
+		// http.Server.Shutdown 也不会关掉它。不登记的话，进程重启时
+		// 这条浏览器会话不会走到 finish，ops_session 一直停在 active。
+		holder := &connCloser{close: func() error {
+			// CloseNow 而不是带握手的 Close：对端可能已经没了，
+			// 握手会把整个进程退出卡在这一条连接上。
+			return c.CloseNow()
+		}}
+		if !s.beginExtraSession(holder) {
+			return
+		}
+		defer s.untrackExtra(holder)
+		defer s.wg.Done()
+
 		s.handleWebSSH(r.Context(), c, hostOf(r.RemoteAddr))
 	}
 }
@@ -154,6 +169,17 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 		return
 	}
 
+	// 管理面已经写下 active 行。立刻登记，而不是等目标拨号成功：
+	// 手动口令可能要等好几分钟，这段时间心跳必须能看见这条会话，
+	// Shutdown 也必须能掐断还堵在 WebSocket 读上的连接。
+	live := &liveSession{
+		SessionID: sess.SessionID, SessionNo: sess.SessionNo,
+		UserID: ident.UserID, Username: ident.Username, AssetID: auth.AssetID,
+	}
+	live.addCloser(closeFunc(func() error { return c.Close(websocket.StatusGoingAway, "killed") }))
+	s.registerLive(live)
+	defer s.unregisterLive(sess.SessionID)
+
 	var rec *record.Writer
 	recStatus := recordNone
 	if s.cfg.Record.Driver == "local" && s.recordKeyID != "" {
@@ -209,17 +235,8 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 	}
 	defer targetClient.Close()
 	defer targetSess.Close()
-
-	live := &liveSession{
-		SessionID: sess.SessionID, SessionNo: sess.SessionNo,
-		UserID: ident.UserID, Username: ident.Username, AssetID: cred.AssetID,
-	}
 	live.addCloser(targetSess)
 	live.addCloser(targetClient)
-	live.addCloser(closeFunc(func() error { return c.Close(websocket.StatusGoingAway, "killed") }))
-	s.registerLive(live)
-	defer s.unregisterLive(sess.SessionID)
-
 
 	writeText(map[string]any{
 		"type": "ready", "session_no": sess.SessionNo,

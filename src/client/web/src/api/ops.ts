@@ -40,6 +40,8 @@ export interface OpsAsset {
   ticket_id?: number
   valid_to?: string
   can_file?: boolean
+  /** 资产是否同时开放 SFTP；列表未下发时缺省 */
+  sftp_enabled?: boolean
   /** 已绑定但访问需要审批：应提示"提交工单申请" */
   need_approval?: boolean
 }

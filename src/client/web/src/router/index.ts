@@ -83,6 +83,14 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        // 运维视角的「已授权资源」列表。Web 终端本身只承载会话标签，
+        // 资源从本页点「连接」带 asset/connect 打开。operator 看不到资产管理台账。
+        path: 'resources',
+        name: 'resources',
+        component: () => import('@/views/OpsResourcesView.vue'),
+        meta: { title: '我的资源', permission: ['ops:session:connect'] },
+      },
+      {
         path: 'terminal',
         name: 'terminal',
         component: () => import('@/views/TerminalView.vue'),
@@ -246,6 +254,14 @@ export const MENU_GROUPS: MenuGroup[] = [
         // 与路由 meta 保持一致：运维看 Web 终端里的授权视图，审批人保留权限
         // 但不把台账作为日常入口（紧急放行在工单流程里指定资产）
         hideForRoles: ['operator', 'approver'],
+      },
+      {
+        title: '我的资源',
+        path: '/resources',
+        icon: ICONS.asset,
+        // 与 Web 终端同一运维权限：列表来自 /ops/assets（按授权过滤），
+        // 不是资产台账。放在终端前面，使 firstAllowedPath 优先落到资源列表。
+        permission: ['ops:session:connect'],
       },
       {
         title: 'Web 终端',

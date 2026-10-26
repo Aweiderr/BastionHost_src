@@ -9,6 +9,7 @@ import {
   listUsers,
   resetUserPassword,
   setUserStatus,
+  temporaryPasswordFromReset,
   updateUser,
 } from '@/api/users'
 import type { Permission, Role, UserItem } from '@/api/types'
@@ -362,18 +363,24 @@ async function confirmStatus(): Promise<void> {
 
 const resetTarget = ref<UserItem | null>(null)
 const resetResult = ref('')
+const resetUserLabel = ref('')
+const resetMustChange = ref(false)
+const resetWarning = ref('')
 const resetVisible = ref(false)
 const resetSubmitting = ref(false)
 
 async function confirmReset(): Promise<void> {
   if (!resetTarget.value) return
+  const target = resetTarget.value
   resetSubmitting.value = true
   try {
-    const result = await resetUserPassword(resetTarget.value.user_id)
-    resetResult.value =
-      result && typeof result === 'object' && 'password' in result && result.password
-        ? String(result.password)
-        : ''
+    const result = await resetUserPassword(target.user_id)
+    resetResult.value = temporaryPasswordFromReset(result)
+    resetMustChange.value = Boolean(result?.must_change_password)
+    resetWarning.value = typeof result?.warning === 'string' ? result.warning : ''
+    resetUserLabel.value = target.display_name
+      ? `${target.display_name}（${target.username}）`
+      : target.username
     resetTarget.value = null
     resetVisible.value = true
     app.success('口令已重置')
@@ -381,6 +388,16 @@ async function confirmReset(): Promise<void> {
     /* 已提示 */
   } finally {
     resetSubmitting.value = false
+  }
+}
+
+async function copyResetPassword(): Promise<void> {
+  if (!resetResult.value) return
+  try {
+    await navigator.clipboard.writeText(resetResult.value)
+    app.success('临时口令已复制到剪贴板')
+  } catch {
+    app.error('浏览器拒绝了剪贴板访问，请手动复制')
   }
 }
 
@@ -678,14 +695,21 @@ async function openPermissions(): Promise<void> {
     </ConfirmDialog>
 
     <Modal v-model="resetVisible" title="口令重置结果" size="sm">
-      <div v-if="resetResult" class="result-panel text-mono" style="word-break: break-all">
-        {{ resetResult }}
-      </div>
+      <template v-if="resetResult">
+        <p class="reset-lead">
+          用户「{{ resetUserLabel }}」的临时口令如下。请通过安全渠道转交，关闭本窗口后无法再次查看。
+        </p>
+        <div class="form-label">临时口令</div>
+        <div class="result-panel text-mono reset-password">{{ resetResult }}</div>
+        <p v-if="resetMustChange" class="form-hint reset-note">该用户下次登录必须修改口令。</p>
+        <p v-if="resetWarning" class="form-hint reset-note">{{ resetWarning }}</p>
+      </template>
       <div v-else class="text-secondary">
         后端未返回新口令，请通知该用户使用系统默认策略登录或由其自行重置。
       </div>
       <template #footer>
-        <button class="btn btn-primary" @click="resetVisible = false">知道了</button>
+        <button v-if="resetResult" class="btn" type="button" @click="copyResetPassword">复制口令</button>
+        <button class="btn btn-primary" type="button" @click="resetVisible = false">知道了</button>
       </template>
     </Modal>
 
@@ -753,6 +777,26 @@ async function openPermissions(): Promise<void> {
 <style scoped>
 .expire-days-input {
   max-width: 220px;
+}
+
+.reset-lead {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.reset-password {
+  margin-top: 6px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  word-break: break-all;
+  user-select: all;
+}
+
+.reset-note {
+  margin: 8px 0 0;
 }
 
 .role-picker {

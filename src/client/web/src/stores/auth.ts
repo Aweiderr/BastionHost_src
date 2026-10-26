@@ -30,6 +30,7 @@ function readPersisted(): PersistedSession {
 /**
  * 认证状态：令牌、当前用户、权限点。
  * 会话持久化到 localStorage，刷新页面后免登录（令牌失效由 401 钩子兜底清理）。
+ * AUTH_4008（口令过期 / 须改密）不是令牌失效，不走这条清理路径。
  */
 export const useAuthStore = defineStore('auth', () => {
   const persisted = readPersisted()
@@ -38,8 +39,19 @@ export const useAuthStore = defineStore('auth', () => {
   const refreshToken = ref<string>(persisted.refreshToken)
   const user = ref<CurrentUser | null>(persisted.user)
   const loading = ref(false)
+  /** 「账户」弹窗。登录后须改密时由布局自动打开，顶栏按钮也可打开。 */
+  const accountDialogOpen = ref(false)
+  /**
+   * 本次页面生命周期里是否已经提示过「请先改口令」。
+   * 仪表盘会并行打多笔被拦截的请求，没有这个闩，每笔都会弹一次。
+   */
+  const passwordChangeNoted = ref(false)
 
   const isAuthenticated = computed(() => Boolean(accessToken.value))
+  /** 临时口令或口令过期：令牌有效，但业务接口会被拒绝，必须先改密。 */
+  const passwordChangeRequired = computed(
+    () => Boolean(user.value?.must_change_password || user.value?.password_expired),
+  )
   const permissions = computed<string[]>(() => user.value?.permissions ?? [])
   const roles = computed<string[]>(() => user.value?.roles ?? [])
   const displayName = computed(() => user.value?.display_name || user.value?.username || '未登录')
@@ -76,11 +88,38 @@ export const useAuthStore = defineStore('auth', () => {
     accessToken.value = ''
     refreshToken.value = ''
     user.value = null
+    accountDialogOpen.value = false
+    passwordChangeNoted.value = false
     try {
       window.localStorage.removeItem(STORAGE_KEY)
     } catch {
       /* 忽略 */
     }
+  }
+
+  function openAccountDialog(): void {
+    accountDialogOpen.value = true
+  }
+
+  function setAccountDialogOpen(open: boolean): void {
+    accountDialogOpen.value = open
+  }
+
+  /**
+   * 标记「必须先改口令」，并返回这次是不是第一次被告知。
+   *
+   * 登录响应里本来就带了标志时，只负责闩住重复提示；
+   * 若是业务接口突然返回 AUTH_4008（本地会话里还没有标志），则补上标志并持久化，
+   * 这样刷新页面后仍会停在改密页，而不是再进一次会被拒绝的业务页。
+   */
+  function notePasswordExpired(): boolean {
+    if (user.value && !user.value.must_change_password && !user.value.password_expired) {
+      user.value = { ...user.value, must_change_password: true }
+      persist()
+    }
+    const first = !passwordChangeNoted.value
+    passwordChangeNoted.value = true
+    return first
   }
 
   /** 把登录结果写入会话（口令登录与短信登录共用） */
@@ -94,6 +133,7 @@ export const useAuthStore = defineStore('auth', () => {
       roles: result.roles ?? [],
       permissions: result.permissions ?? [],
       must_change_password: result.must_change_password,
+      password_expired: Boolean(result.password_expired),
       mfa_enabled: result.mfa_enabled,
     }
     persist()
@@ -182,6 +222,11 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     loading,
     isAuthenticated,
+    passwordChangeRequired,
+    accountDialogOpen,
+    openAccountDialog,
+    setAccountDialogOpen,
+    notePasswordExpired,
     permissions,
     roles,
     displayName,

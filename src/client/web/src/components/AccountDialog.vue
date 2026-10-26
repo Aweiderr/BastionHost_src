@@ -14,6 +14,7 @@ const auth = useAuthStore()
 const app = useAppStore()
 
 const tab = ref<'password' | 'totp'>('password')
+const mustChange = computed(() => auth.passwordChangeRequired)
 
 /* ------------------------------------------------------------ 修改口令 */
 const pwdForm = ref({ old_password: '', new_password: '', confirm: '' })
@@ -28,6 +29,12 @@ const canSubmitPwd = computed(
 
 function resetPwdForm(): void {
   pwdForm.value = { old_password: '', new_password: '', confirm: '' }
+}
+
+async function logoutNow(): Promise<void> {
+  close()
+  await auth.logout()
+  void router.replace('/login')
 }
 
 async function submitPassword(): Promise<void> {
@@ -118,14 +125,27 @@ watch(
   },
 )
 
+watch(mustChange, (required) => {
+  if (required) tab.value = 'password'
+})
+
 function close(): void {
   emit('update:modelValue', false)
 }
 </script>
 
 <template>
-  <Modal :model-value="modelValue" title="账户设置" @update:model-value="emit('update:modelValue', $event)">
-    <div class="tabs">
+  <Modal
+    :model-value="modelValue"
+    :title="mustChange ? '修改口令' : '账户设置'"
+    :close-on-mask="!mustChange"
+    @update:model-value="emit('update:modelValue', $event)"
+  >
+    <div v-if="mustChange" class="text-danger" style="margin-bottom: 12px; font-size: 13px">
+      口令已过期，请先修改口令。完成修改前，其它功能暂不可用。
+    </div>
+
+    <div v-if="!mustChange" class="tabs">
       <button class="tab" :class="{ active: tab === 'password' }" @click="tab = 'password'">
         修改口令
       </button>
@@ -134,7 +154,7 @@ function close(): void {
       </button>
     </div>
 
-    <div v-if="tab === 'password'" class="form-grid single">
+    <div v-if="mustChange || tab === 'password'" class="form-grid single">
       <div class="form-item">
         <label class="form-label">当前口令<span class="required">*</span></label>
         <input v-model="pwdForm.old_password" class="input" type="password" autocomplete="off" />
@@ -210,8 +230,9 @@ function close(): void {
     </div>
 
     <template #footer>
+      <button v-if="mustChange" class="btn" type="button" @click="logoutNow">退出登录</button>
       <button class="btn" type="button" @click="close">关闭</button>
-      <template v-if="tab === 'password'">
+      <template v-if="mustChange || tab === 'password'">
         <button class="btn btn-primary" :disabled="pwdLoading || !canSubmitPwd" @click="submitPassword">
           <span v-if="pwdLoading" class="spinner light" />
           保存

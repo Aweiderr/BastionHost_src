@@ -29,6 +29,15 @@ configureHttp({
       void router.replace({ path: '/login', query: { redirect: current.fullPath } })
     }
   },
+  onPasswordExpired: (message: string) => {
+    // 令牌仍然有效。清会话会把「刚用临时口令登录成功」变成「立刻被踢出」。
+    const first = auth.notePasswordExpired()
+    auth.openAccountDialog()
+    if (first) appStore.error(message || '口令已过期，请先修改口令')
+    if (router.currentRoute.value.path !== '/account') {
+      void router.replace('/account')
+    }
+  },
   onForbidden: (message: string) => appStore.error(message || '无权执行该操作'),
   onError: (message: string) => appStore.error(message),
 })

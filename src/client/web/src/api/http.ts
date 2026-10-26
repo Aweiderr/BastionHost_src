@@ -21,12 +21,28 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 口令过期 / 须修改临时口令。
+ *
+ * 与令牌失效不是同一件事：登录已经成功，访问令牌仍然有效，
+ * 只是业务接口被拒绝，直到用户改完口令。错误码见 errcode.ErrPasswordExpired。
+ */
+export const PASSWORD_EXPIRED_CODE = 'AUTH_4008'
+
+/** 与后端 MessageOf(ErrPasswordExpired) 保持一致，响应体没有 message 时用它 */
+export const PASSWORD_EXPIRED_MESSAGE = '口令已过期，请先修改口令'
+
 interface HttpHooks {
   /** 读取当前访问令牌 */
   getToken: () => string | null
-  /** 401：令牌失效，需清理会话并跳转登录 */
+  /** 401 且不是口令过期：令牌失效，需清理会话并跳转登录 */
   onUnauthorized: () => void
-  /** 403：无权限 */
+  /**
+   * AUTH_4008：口令过期或须修改临时口令。
+   * 禁止清理会话；应提示真实原因并打开修改口令。
+   */
+  onPasswordExpired: (message: string) => void
+  /** 403：无权限（不含口令过期） */
   onForbidden: (message: string) => void
   /** 其它错误提示 */
   onError: (message: string) => void
@@ -35,6 +51,7 @@ interface HttpHooks {
 let hooks: HttpHooks = {
   getToken: () => null,
   onUnauthorized: () => {},
+  onPasswordExpired: () => {},
   onForbidden: () => {},
   onError: () => {},
 }
@@ -91,6 +108,41 @@ function resolveToken(options: RequestOptions): string | null {
   return hooks.getToken()
 }
 
+function isPasswordExpiredCode(code: string | undefined): boolean {
+  return code === PASSWORD_EXPIRED_CODE
+}
+
+/**
+ * 只有令牌失效才清会话。
+ *
+ * AUTH_4008 即使仍以 HTTP 401 返回（旧服务端）也不算会话失效：
+ * 令牌是刚签发的，清掉它用户就会在登录成功后立刻被踢出。
+ */
+export function shouldClearSession(status: number, code: string | undefined): boolean {
+  if (isPasswordExpiredCode(code)) return false
+  return status === 401
+}
+
+async function readPayload<T>(response: Response): Promise<Envelope<T> | null> {
+  const text = await response.text()
+  if (!text) return null
+  try {
+    return JSON.parse(text) as Envelope<T>
+  } catch {
+    return null
+  }
+}
+
+/** 口令过期时抛出业务错误，且不清理会话。其它错误码直接返回。 */
+function throwIfPasswordExpired(payload: Envelope<unknown> | null, status: number): void {
+  if (!isPasswordExpiredCode(payload?.code)) return
+  const message = payload?.message || PASSWORD_EXPIRED_MESSAGE
+  // 即使请求是 silent 也要通知：仪表盘等页面会静默拉数，
+  // 若这里也静默，用户只会看到空数据，不知道必须先改口令。
+  hooks.onPasswordExpired(message)
+  throw new ApiError(PASSWORD_EXPIRED_CODE, message, status)
+}
+
 /**
  * 发起请求并解包 data 字段。
  * 任何失败（网络异常 / HTTP 非 2xx / code !== 'OK'）都会抛出 ApiError。
@@ -115,19 +167,15 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     throw err
   }
 
-  if (response.status === 401) {
+  // 必须先读响应体再决定是不是会话失效。
+  // AUTH_4008 曾经映射成 HTTP 401，和令牌无效用同一个状态码；
+  // 若在解析 body 之前就 onUnauthorized，临时口令登录成功后会被立刻踢出。
+  const payload = await readPayload<T>(response)
+  throwIfPasswordExpired(payload, response.status)
+
+  if (shouldClearSession(response.status, payload?.code)) {
     hooks.onUnauthorized()
     throw new ApiError('UNAUTHORIZED', '登录状态已失效，请重新登录', 401)
-  }
-
-  let payload: Envelope<T> | null = null
-  const text = await response.text()
-  if (text) {
-    try {
-      payload = JSON.parse(text) as Envelope<T>
-    } catch {
-      payload = null
-    }
   }
 
   if (response.status === 403) {
@@ -163,30 +211,33 @@ export async function requestText(path: string, options: RequestOptions = {}): P
     throw err
   }
 
-  if (response.status === 401) {
+  // 成功时正文就是录像文本；失败时同一份正文里可能是 JSON 错误信封。
+  // 只能读一次，所以先取出再分支。
+  const text = await response.text()
+  if (response.ok) return text
+
+  // 必须读响应体里的业务错误：后端已经把真实原因放在 message 里
+  // （"录像未正常封存" / "录像完整性校验失败" / "无权执行该操作"），
+  // 一律替换成"录像不可回放"会把可诊断的信息整个丢掉 ——
+  // 这正是当初排查跨域问题时绕弯路的同一类问题：
+  // 前端只有一句笼统提示，排障只能靠猜。
+  let code = `HTTP_${response.status}`
+  let message = STATUS_MESSAGE[response.status] || '录像不可回放'
+  let payload: Envelope<unknown> | null = null
+  if (text) {
+    try {
+      payload = JSON.parse(text) as Envelope<unknown>
+      if (payload?.code) code = payload.code
+      if (payload?.message) message = payload.message
+    } catch {
+      /* 非 JSON 响应体：保留兜底提示 */
+    }
+  }
+  throwIfPasswordExpired(payload, response.status)
+  if (shouldClearSession(response.status, payload?.code)) {
     hooks.onUnauthorized()
     throw new ApiError('UNAUTHORIZED', '登录状态已失效，请重新登录', 401)
   }
-  if (!response.ok) {
-    // 必须读响应体里的业务错误：后端已经把真实原因放在 message 里
-    // （"录像未正常封存" / "录像完整性校验失败" / "无权执行该操作"），
-    // 一律替换成"录像不可回放"会把可诊断的信息整个丢掉 ——
-    // 这正是当初排查跨域问题时绕弯路的同一类问题：
-    // 前端只有一句笼统提示，排障只能靠猜。
-    let code = `HTTP_${response.status}`
-    let message = STATUS_MESSAGE[response.status] || '录像不可回放'
-    const text = await response.text()
-    if (text) {
-      try {
-        const payload = JSON.parse(text) as Envelope<unknown>
-        if (payload?.code) code = payload.code
-        if (payload?.message) message = payload.message
-      } catch {
-        /* 非 JSON 响应体：保留兜底提示 */
-      }
-    }
-    if (!silent) hooks.onError(message)
-    throw new ApiError(code, message, response.status)
-  }
-  return response.text()
+  if (!silent) hooks.onError(message)
+  throw new ApiError(code, message, response.status)
 }

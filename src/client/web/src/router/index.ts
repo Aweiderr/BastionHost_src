@@ -49,6 +49,15 @@ const routes: RouteRecordRaw[] = [
     // 因此交给 beforeEach 处理。
     children: [
       {
+        // 不进侧边栏。口令过期 / 临时口令须修改时的落点：
+        // 此页不请求业务接口。改密白名单只有 /auth/me、/auth/password、
+        // /auth/logout、/auth/refresh；若仍跳到仪表盘，首个数据请求就会被拒绝。
+        path: 'account',
+        name: 'account',
+        component: () => import('@/views/AccountView.vue'),
+        meta: { title: '修改口令' },
+      },
+      {
         path: 'dashboard',
         name: 'dashboard',
         component: () => import('@/views/DashboardView.vue'),
@@ -406,6 +415,8 @@ router.onError((error, to) => {
  */
 export function firstAllowedPath(): string {
   const auth = useAuthStore()
+  // 须改密时业务页一挂载就会打出被拒绝的请求，落点只能是改密页。
+  if (auth.passwordChangeRequired) return '/account'
   for (const group of MENU_GROUPS) {
     for (const item of group.items) {
       if (item.hideForRoles?.some((r) => auth.roles.includes(r))) continue
@@ -435,6 +446,8 @@ export function canAccessPath(path: string): boolean {
   }
   if (!resolved.meta) return false
   if (resolved.meta.publicPage || PUBLIC_PATHS.has(resolved.path)) return true
+  // 须改密时只有改密页能进。否则 ?redirect=/dashboard 会在改密完成前把业务请求打出去。
+  if (auth.passwordChangeRequired && resolved.path !== '/account') return false
   const hidden = resolved.meta.hideForRoles
   if (hidden && hidden.some((r: string) => auth.roles.includes(r))) return false
   const required = resolved.meta.permission
@@ -489,6 +502,14 @@ router.beforeEach(async (to) => {
       auth.clear()
       return { path: '/login', query: { redirect: to.fullPath } }
     }
+  }
+
+  // 临时口令 / 口令过期：令牌有效，但除改密白名单外的接口都会被拒绝。
+  // 必须挡在页面组件挂载之前，否则仪表盘的 onMounted 会先把请求发出去。
+  if (auth.passwordChangeRequired && to.path !== '/account') {
+    app.info('口令已过期，请先修改口令')
+    auth.openAccountDialog()
+    return { path: '/account' }
   }
 
   // 角色排除：必须与菜单过滤用同一套规则，

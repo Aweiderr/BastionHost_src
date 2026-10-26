@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "build:only": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test src/api/http.passwordExpired.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

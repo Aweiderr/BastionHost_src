@@ -120,6 +120,8 @@ export interface CurrentUser {
   roles: string[]
   permissions: string[]
   must_change_password?: boolean
+  /** 口令已超过有效期。与 must_change_password 一样，改完之前不能进业务页 */
+  password_expired?: boolean
   mfa_enabled?: boolean
 }
 

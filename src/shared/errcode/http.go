@@ -11,9 +11,12 @@ func ErrToStatus(code Code) int {
 		ErrPermitRequired, ErrPermitExpired, ErrPermitRevoked, ErrDeviceMismatch,
 		ErrOperatorRequired, ErrAccountNoCredential:
 		return http.StatusBadRequest
-	case ErrUnauthorized, ErrTokenExpired, ErrTokenInvalid, ErrMFARequired, ErrPasswordExpired:
+	case ErrUnauthorized, ErrTokenExpired, ErrTokenInvalid, ErrMFARequired:
 		return http.StatusUnauthorized
-	case ErrForbidden, ErrNoGrant, ErrStrictModeOnly, ErrAccessModeLoose, ErrAppScopeViolation:
+	// ErrPasswordExpired 与「未登录 / 令牌失效」不是同一件事：令牌有效，
+	// 用户必须先改口令。用 403，避免客户端把 AUTH_4008 当成 401 清会话。
+	case ErrForbidden, ErrNoGrant, ErrStrictModeOnly, ErrAccessModeLoose, ErrAppScopeViolation,
+		ErrPasswordExpired:
 		return http.StatusForbidden
 	case ErrNotFound:
 		return http.StatusNotFound

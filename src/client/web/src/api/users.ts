@@ -29,6 +29,17 @@ export function updateUser(id: number, payload: Partial<UserPayload>) {
   return request<UserItem>(`/users/${id}`, { method: 'PUT', body: payload })
 }
 
+/**
+ * 停用或启用用户（active ↔ disabled）。
+ *
+ * 管理服务没有单独的状态路由，复用「修改用户」：请求体只带 status。
+ * 服务端对空字段视为不修改，因此不会冲掉口令有效期、角色和联系方式。
+ * 锁定账号不走这里，解锁仍用 POST /users/{id}/unlock。
+ */
+export function setUserStatus(id: number, status: 'active' | 'disabled') {
+  return request<UserItem>(`/users/${id}`, { method: 'PUT', body: { status } })
+}
+
 /** 删除用户 */
 export function deleteUser(id: number) {
   return request<Record<string, unknown>>(`/users/${id}`, { method: 'DELETE' })

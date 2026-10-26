@@ -8,6 +8,7 @@ import {
   listRoles,
   listUsers,
   resetUserPassword,
+  setUserStatus,
   updateUser,
 } from '@/api/users'
 import type { Permission, Role, UserItem } from '@/api/types'
@@ -44,12 +45,32 @@ const canViewRole = computed(() => auth.has('system:role:list'))
  */
 const canManageUkey = computed(() => auth.has(UKEY_BIND_PERMISSION))
 
+/**
+ * 行级管理范围。
+ * 超管可管理全部账号；系统管理员只能管理「每个角色都是运维人员或审批员」的账号；
+ * 其它角色只能管理自己。自己不能切换停用开关。
+ */
+function canManageRow(row: UserItem): boolean {
+  if (auth.roles.includes('super_admin')) return true
+  if (auth.roles.includes('sys_admin')) {
+    const codes = row.roles ?? []
+    return codes.length > 0 && codes.every((code) => code === 'operator' || code === 'approver')
+  }
+  return auth.user?.user_id === row.user_id
+}
+
+/** 有更新权限、能管理该行、且不是自己、且状态为正常或停用时，才能用开关切换。 */
+function canToggleStatus(row: UserItem): boolean {
+  if (!canUpdate.value || !canManageRow(row) || auth.user?.user_id === row.user_id) return false
+  return row.status === 'active' || row.status === 'disabled'
+}
+
 const columns: TableColumn[] = [
   { key: 'username', title: '用户名', width: '150px' },
   { key: 'display_name', title: '显示名', width: '130px' },
   { key: 'roles', title: '角色' },
   { key: 'contact', title: '联系方式', width: '200px' },
-  { key: 'status', title: '状态', width: '100px' },
+  { key: 'status', title: '状态', width: '168px' },
   { key: 'last_login_time', title: '最近登录', width: '165px' },
   { key: 'actions', title: '操作', align: 'right' },
 ]
@@ -308,6 +329,35 @@ async function confirmRemove(): Promise<void> {
   }
 }
 
+/* ------------------------------------------------------------- 停用 / 启用 */
+
+const statusTarget = ref<UserItem | null>(null)
+const statusNext = ref<'active' | 'disabled'>('disabled')
+const statusSubmitting = ref(false)
+
+function askStatus(row: UserItem): void {
+  if (statusSubmitting.value) return
+  statusTarget.value = row
+  statusNext.value = row.status === 'active' ? 'disabled' : 'active'
+}
+
+async function confirmStatus(): Promise<void> {
+  const row = statusTarget.value
+  if (!row) return
+  const next = statusNext.value
+  statusSubmitting.value = true
+  try {
+    await setUserStatus(row.user_id, next)
+    row.status = next
+    statusTarget.value = null
+    app.success(next === 'disabled' ? '用户已停用' : '用户已启用')
+  } catch {
+    /* 已提示 */
+  } finally {
+    statusSubmitting.value = false
+  }
+}
+
 /* ------------------------------------------------------------- 重置口令 */
 
 const resetTarget = ref<UserItem | null>(null)
@@ -425,7 +475,25 @@ async function openPermissions(): Promise<void> {
             <div>{{ row.phone || '—' }}</div>
           </td>
           <td>
+            <span
+              v-if="canToggleStatus(row)"
+              class="status-switch"
+              :class="{ 'is-on': row.status === 'active' }"
+            >
+              <span :class="{ 'is-current': row.status !== 'active' }">停用</span>
+              <button
+                type="button"
+                class="switch"
+                :aria-pressed="row.status === 'active'"
+                :disabled="statusSubmitting && statusTarget?.user_id === row.user_id"
+                @click="askStatus(row)"
+              >
+                <span class="knob" />
+              </button>
+              <span :class="{ 'is-current': row.status === 'active' }">开启</span>
+            </span>
             <StatusTag
+              v-else
               :text="dictLabel(USER_STATUS_MAP, row.status)"
               :tone="dictTone(USER_STATUS_MAP, row.status)"
             />
@@ -582,6 +650,23 @@ async function openPermissions(): Promise<void> {
     </ConfirmDialog>
 
     <ConfirmDialog
+      :model-value="statusTarget !== null"
+      :title="statusNext === 'disabled' ? '停用用户' : '启用用户'"
+      :danger="statusNext === 'disabled'"
+      :confirm-text="statusNext === 'disabled' ? '停用' : '启用'"
+      :loading="statusSubmitting"
+      @update:model-value="statusTarget = null"
+      @confirm="confirmStatus"
+    >
+      <div v-if="statusNext === 'disabled'">
+        确定停用用户「{{ statusTarget?.display_name || statusTarget?.username }}」吗？停用后不能登录，账号、证书和角色都会保留。
+      </div>
+      <div v-else>
+        确定启用用户「{{ statusTarget?.display_name || statusTarget?.username }}」吗？启用后可以重新登录。
+      </div>
+    </ConfirmDialog>
+
+    <ConfirmDialog
       :model-value="resetTarget !== null"
       title="重置用户口令"
       confirm-text="重置"
@@ -692,5 +777,59 @@ async function openPermissions(): Promise<void> {
 .role-option small {
   color: var(--color-text-muted);
   font-size: 11.5px;
+}
+
+.status-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.status-switch .is-current {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.status-switch.is-on .is-current {
+  color: var(--color-success);
+}
+
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: #d1d5db;
+  cursor: pointer;
+}
+
+.switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s;
+}
+
+.status-switch.is-on .switch {
+  background: var(--color-success);
+}
+
+.status-switch.is-on .switch .knob {
+  transform: translateX(16px);
+}
+
+.switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 </style>

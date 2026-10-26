@@ -110,7 +110,7 @@ async function onUkeySuccess(result: LoginResult, authMethod: string): Promise<v
     // 保留与短信 bypass 同样的提示：测试模式下并未真正校验签名
     app.info('当前为测试模式，UKey 签名未经真实校验')
   }
-  await afterLoginSuccess(result.display_name || result.username)
+  await afterLoginSuccess(result)
 }
 
 /** 取消 UKey 二次验证：清掉挑战相关状态，要求重新走账密 */
@@ -126,7 +126,12 @@ function onUkeyCancel(): void {
 /**
  * 登录成功后的落点。
  *
- * 两处都必须防越权往返：
+ * 须改密时不能进业务页。临时口令登录本身是成功的（令牌已签发），
+ * 但仪表盘等页面一挂载就会请求被拦截的接口，返回 AUTH_4008。
+ * 若这时再把用户带进那些页面，等于立刻触发一串必然失败的请求。
+ * 改密页只使用白名单接口（查看自身 / 修改口令 / 登出）。
+ *
+ * 口令可用时，两处都必须防越权往返：
  *   1. 没有 ?redirect= 时不再固定跳 /dashboard —— 运维（operator）与审批人
  *      被路由 meta 的 hideForRoles 挡在仪表盘之外，跳过去只会被守卫弹回，
  *      用户看到的是"欢迎回来"紧跟着一条权限提示；
@@ -141,8 +146,15 @@ async function redirectAfterLogin(): Promise<void> {
   await router.replace(dest)
 }
 
-async function afterLoginSuccess(displayName: string): Promise<void> {
-  app.success(`欢迎回来，${displayName}`)
+async function afterLoginSuccess(result: LoginResult): Promise<void> {
+  if (result.must_change_password || result.password_expired) {
+    // 先闩住，避免紧接着的 AUTH_4008 再弹一次同样的话
+    auth.notePasswordExpired()
+    app.info('口令已过期，请先修改口令')
+    await router.replace('/account')
+    return
+  }
+  app.success(`欢迎回来，${result.display_name || result.username}`)
   await redirectAfterLogin()
 }
 
@@ -187,10 +199,7 @@ async function submit(): Promise<void> {
       return
     }
 
-    if (result.must_change_password || result.password_expired) {
-      app.info('当前口令为初始口令或已过期，请在「账户 - 修改口令」中尽快修改')
-    }
-    await afterLoginSuccess(result.display_name || result.username)
+    await afterLoginSuccess(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : '登录失败'
     errorText.value = message
@@ -223,7 +232,7 @@ async function onMfaSubmit(code: string): Promise<void> {
     if (authMethod === 'password+sms_bypass') {
       app.info('当前为测试模式，验证码未经真实校验')
     }
-    await afterLoginSuccess(result.display_name || result.username)
+    await afterLoginSuccess(result)
   } catch (error) {
     // 失败时把原因交回弹窗展示，让用户可直接重试而不必重新输入账密
     const message = error instanceof Error ? error.message : '验证失败'

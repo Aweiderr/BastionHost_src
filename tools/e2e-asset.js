@@ -176,6 +176,28 @@ async function main() {
   r = await api('POST', '/api/v1/auth/login', { username: 'zhangsan', password: tempPwd })
   check('临时口令可登录', r.status === 200, JSON.stringify(r.body).slice(0, 120))
   check('登录响应标记须改口令', r.body?.data?.must_change_password === true)
+  const tempToken = r.body?.data?.access_token
+
+  // 登录成功后令牌仍然有效。业务接口必须拒绝，但拒绝不能是 401，
+  // 否则 Web 客户端会把 AUTH_4008 当成会话失效并清掉刚签发的令牌。
+  r = await api('GET', '/api/v1/auth/me', null, tempToken)
+  check('须改密时仍可查看自身', r.status === 200 && r.body?.code === 'OK', 'status=' + r.status + ' code=' + r.body?.code)
+  r = await api('GET', '/api/v1/users', null, tempToken)
+  check(
+    '须改密时业务接口为 403/AUTH_4008（不是 401 会话失效）',
+    r.status === 403 && r.body?.code === 'AUTH_4008',
+    'status=' + r.status + ' code=' + r.body?.code,
+  )
+  r = await api('GET', '/api/v1/auth/me', null, tempToken)
+  check('业务接口拒绝后令牌仍然有效', r.status === 200 && r.body?.code === 'OK', 'status=' + r.status)
+  r = await api('POST', '/api/v1/auth/password', {
+    old_password: 'not-the-temp-password', new_password: 'New@Bastion2025',
+  }, tempToken)
+  check(
+    '改密接口不走口令过期拦截',
+    r.status !== 401 && r.body?.code !== 'AUTH_4008',
+    'status=' + r.status + ' code=' + r.body?.code,
+  )
 
   // 禁止删除自己
   li = await api('POST', '/api/v1/auth/login', { username: 'sysadmin', password: 'Sys@Bastion2025' })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import logo2x from '@/assets/logo@2x.png'
 import logoUrl from '@/assets/logo.png'
@@ -14,7 +14,14 @@ const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 
-const accountVisible = ref(false)
+// 须改密时一进入改密页就打开弹窗，不等用户自己去找「账户」。
+watch(
+  () => route.path === '/account' && auth.passwordChangeRequired,
+  (shouldOpen) => {
+    if (shouldOpen) auth.openAccountDialog()
+  },
+  { immediate: true },
+)
 
 /**
  * 按权限点与角色过滤菜单：无权限或对当前角色无意义的菜单项直接不渲染。
@@ -142,7 +149,7 @@ async function handleLogout(): Promise<void> {
             <span class="user-name">{{ auth.displayName }}</span>
             <span class="user-role">{{ roleText }}</span>
           </div>
-          <button class="btn btn-sm" type="button" @click="accountVisible = true">账户</button>
+          <button class="btn btn-sm" type="button" @click="auth.openAccountDialog()">账户</button>
           <button class="btn btn-sm" type="button" @click="handleLogout">退出登录</button>
         </div>
       </header>
@@ -152,7 +159,10 @@ async function handleLogout(): Promise<void> {
       </main>
     </div>
 
-    <AccountDialog v-model="accountVisible" />
+    <AccountDialog
+      :model-value="auth.accountDialogOpen"
+      @update:model-value="auth.setAccountDialogOpen"
+    />
   </div>
 </template>
 

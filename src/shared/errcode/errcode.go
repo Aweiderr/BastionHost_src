@@ -29,6 +29,11 @@ const (
 	ErrTokenExpired      Code = "AUTH_4005"
 	ErrTokenInvalid      Code = "AUTH_4006"
 	ErrNoGrant           Code = "AUTH_4007"
+	// ErrPasswordExpired 口令已过期，或管理员重置后必须先修改临时口令。
+	//
+	// HTTP 状态是 403 而不是 401（见 ErrToStatus）：此时访问令牌仍然有效，
+	// 只是除改密 / 登出 / 查看自身外的接口被拒绝。若映射成 401，客户端会把它
+	// 当成会话失效，清掉刚签发的令牌并把用户踢回登录页。
 	ErrPasswordExpired   Code = "AUTH_4008"
 
 	// 402x 段：准入模式（FR-08-13）

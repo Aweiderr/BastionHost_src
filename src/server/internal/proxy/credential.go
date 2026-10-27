@@ -214,11 +214,14 @@ func (s *Server) dialManualCredential(
 // 注意失败时**重发 credential-required 而不是 error**：
 // 前端收到 error 会关闭会话，那样就没有重试机会了；
 // 失败原因通过 reason 带给前端展示。
+//
+// onActivity 在收到用户提交的口令消息时调用，用来重置会话空闲计时；可为 nil。
 func (s *Server) wsDialWithPrompt(
 	ctx context.Context,
 	c *websocket.Conn,
 	cred *managerclient.Credential,
 	pty *ptyRequest,
+	onActivity func(),
 ) (*ssh.Client, *ssh.Session, io.WriteCloser, io.Reader, error) {
 	attempts := s.cfg.CredentialManual.MaxAttempts
 	if attempts <= 0 {
@@ -250,6 +253,9 @@ func (s *Server) wsDialWithPrompt(
 		rctx, rcancel := context.WithTimeout(ctx, timeout)
 		typ, data, rerr := c.Read(rctx)
 		rcancel()
+		if onActivity != nil && rerr == nil {
+			onActivity()
+		}
 		if rerr != nil {
 			return nil, nil, nil, nil, fmt.Errorf("等待口令输入失败：%w", rerr)
 		}
@@ -293,7 +299,7 @@ func (s *Server) wsDialWithPrompt(
 	return nil, nil, nil, nil, fmt.Errorf(
 		"口令验证失败次数过多（%d 次），会话已终止；该尝试已计入审计", attempts)
 }
-//
+
 // 只记录"谁、对哪台资产、第几次、成功与否"，**绝不记录口令本身**。
 // 失败尝试必须留痕：否则爆破行为在审计里是不可见的。
 func (s *Server) auditManualAttempt(ctx context.Context, cred *managerclient.Credential,

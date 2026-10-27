@@ -224,7 +224,7 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 	if cred.RequiresUserInput {
 		// 凭据不托管：经 WebSocket 向浏览器索取口令（前端弹窗）。
 		// 此时主读循环尚未启动，可以安全地独占读取控制消息。
-		targetClient, targetSess, targetIn, targetOut, err = s.wsDialWithPrompt(ctx, c, cred, pty)
+		targetClient, targetSess, targetIn, targetOut, err = s.wsDialWithPrompt(ctx, c, cred, pty, live.touch)
 	} else {
 		targetClient, targetSess, targetIn, targetOut, err = s.dialTarget(cred, pty)
 	}
@@ -344,6 +344,8 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 			setReason(endClientDisconnect)
 			break
 		}
+		// 键盘、粘贴、窗口变化都算用户还在。目标输出不重置空闲。
+		live.touch()
 		if mtyp == websocket.MessageText {
 			var rs wsResize
 			if json.Unmarshal(data, &rs) == nil && rs.Type == "resize" && rs.Cols > 0 && rs.Rows > 0 {

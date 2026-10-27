@@ -107,6 +107,8 @@ type SessionCloseInput struct {
 //
 // 先锁住这一行再按 MergeFinish 落库。管理员已经把会话标成 terminated 之后，
 // 代理断开触发的 finish 不能把状态改回 closed，也不能改掉 end_reason。
+// 已经是 timeout 的行同样保留状态和结束原因。进行中的会话若上报
+// status=timeout、end_reason=timeout（空闲超时），按上报落库。
 // 中断理由（interrupt_reason）不在本语句里，强制中断写下的原文会留下来。
 // 会话不存在时与旧实现一样视为空更新，不返回错误。
 func (r *SessionRepo) Close(ctx context.Context, in SessionCloseInput) (FinishApply, error) {

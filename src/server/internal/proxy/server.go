@@ -48,6 +48,9 @@ const (
 	endClientDisconnect = "client_disconnect"
 	endRemoteClosed     = "remote_closed"
 	endGatewayShutdown  = "gateway_shutdown"
+	// endTimeout 是空闲超时。与 ops_session.status 用同一个编码，
+	// 审计结束原因字典也认 timeout，不再另造 idle_timeout。
+	endTimeout = "timeout"
 )
 
 // 录像状态
@@ -187,7 +190,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	defer ln.Close()
 	slog.Info("SSH 网关已启动", "addr", s.cfg.Proxy.SSHListen,
-		"host_key_fingerprint", ssh.FingerprintSHA256(signer.PublicKey()))
+		"host_key_fingerprint", ssh.FingerprintSHA256(signer.PublicKey()),
+		"idle_timeout", s.idleLimit())
 
 	go func() {
 		<-ctx.Done()
@@ -535,7 +539,10 @@ func (s *Server) handleSession(ctx context.Context, conn *ssh.ServerConn, ident 
 // runShell 执行一次完整的运维会话。
 func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 	reqs <-chan *ssh.Request, pty *ptyRequest, remoteIP string) {
-	br := bufio.NewReader(ch)
+	// 客户端字节（菜单、口令、终端输入）都从这条通道进来。
+	// 空闲只认这个方向，目标输出不续期。
+	activity := &activityHook{}
+	br := bufio.NewReader(&activityReader{r: ch, touch: activity.fire})
 	// 所有写回客户端的数据都走同一把锁：主循环与命令拦截器都会写
 	chw := &syncWriter{w: ch}
 	write := func(format string, a ...any) { fmt.Fprintf(chw, format, a...) }
@@ -619,6 +626,7 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 		UserID: ident.UserID, Username: ident.Username, AssetID: asset.AssetID,
 	}
 	live.addCloser(ch)
+	activity.set(live.touch)
 	s.registerLive(live)
 	defer s.unregisterLive(sess.SessionID)
 
@@ -750,6 +758,7 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 	go func() {
 		for req := range reqs {
 			if req.Type == "window-change" {
+				live.touch()
 				var win struct {
 					Columns uint32
 					Rows    uint32
@@ -799,14 +808,18 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 // credMode 记录本次会话实际使用的凭据来源（managed / manual），
 // 便于审计区分"用了堡垒机托管的凭据"与"运维人员自己输入的凭据"。
 // 无论哪种模式，口令本身都不会出现在任何归档里。
+//
+// 空闲超时走和强制掐断同一条关连接路径，但上报 status=timeout、
+// end_reason=timeout。读循环看到的 client_disconnect 只是连接被掐断后的表象，
+// 不能覆盖超时，否则审计会把发呆断开记成正常结束。
 func (s *Server) finish(ctx context.Context, sessionID int64, endReason string,
 	cmdCount, blockCount int, recStatus string, rec *record.Writer, credMode string) {
-	endReason = s.archiveReason(endReason)
+	status, endReason := s.finishDecision(sessionID, endReason)
 	if credMode == "" {
 		credMode = "managed"
 	}
 	payload := map[string]any{
-		"status": "closed", "end_reason": endReason,
+		"status": status, "end_reason": endReason,
 		"command_count": cmdCount, "block_count": blockCount,
 		"record_status": recStatus, "credential_mode": credMode,
 	}

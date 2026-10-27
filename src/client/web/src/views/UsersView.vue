@@ -18,6 +18,7 @@ import DataTable from '@/components/DataTable.vue'
 import Drawer from '@/components/Drawer.vue'
 import Modal from '@/components/Modal.vue'
 import Pagination from '@/components/Pagination.vue'
+import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import UkeyCertDialog from '@/components/UkeyCertDialog.vue'
 import { useAppStore } from '@/stores/app'
@@ -81,53 +82,6 @@ const page = ref(1)
 const pageSize = ref(10)
 const loading = ref(false)
 const query = reactive({ keyword: '', status: '', role_code: '' })
-/** 工具栏中编辑、启停、重置口令、证书链、删除所作用的当前行 */
-const selectedId = ref<number | null>(null)
-
-const selected = computed(
-  () => items.value.find((item) => item.user_id === selectedId.value) ?? null,
-)
-
-const canEnableSelected = computed(() => {
-  const row = selected.value
-  return Boolean(row && canToggleStatus(row) && row.status === 'disabled')
-})
-
-const canDisableSelected = computed(() => {
-  const row = selected.value
-  return Boolean(row && canToggleStatus(row) && row.status === 'active')
-})
-
-function selectRow(row: UserItem): void {
-  selectedId.value = row.user_id
-}
-
-function editSelected(): void {
-  if (selected.value) openDialog(selected.value)
-}
-
-function ukeySelected(): void {
-  if (selected.value) openUkeyDialog(selected.value)
-}
-
-function resetSelected(): void {
-  if (selected.value) resetTarget.value = selected.value
-}
-
-function statusSelected(): void {
-  if (selected.value) askStatus(selected.value)
-}
-
-function removeSelected(): void {
-  if (selected.value) userToRemove.value = selected.value
-}
-
-/** 工具栏按钮不可用时的说明：没选中，和选中了但不能操作，分开提示 */
-function menuActionTitle(ready: boolean, blocked = '当前用户不能执行该操作'): string {
-  if (ready) return ''
-  if (!selected.value) return '请先在列表中选择一名用户'
-  return blocked
-}
 
 const roles = ref<Role[]>([])
 
@@ -156,9 +110,6 @@ async function load(): Promise<void> {
     items.value = []
     total.value = 0
   } finally {
-    if (selectedId.value != null && !items.value.some((item) => item.user_id === selectedId.value)) {
-      selectedId.value = null
-    }
     loading.value = false
   }
 }
@@ -496,116 +447,36 @@ async function openPermissions(): Promise<void> {
     <div class="page-header">
       <div>
         <div class="page-title">用户管理</div>
-        <div class="page-subtitle">
-          维护系统用户与角色分配，角色决定可访问的功能与数据范围。选中列表中的用户后，可用本页菜单编辑、启停、重置口令或删除。
-        </div>
+        <div class="page-subtitle">维护系统用户与角色分配，角色决定可访问的功能与数据范围。</div>
+      </div>
+      <!-- 菜单栏只放页面级操作。编辑、证书链、重置口令、启停、删除留在每一行。 -->
+      <div class="page-menu" role="toolbar" aria-label="用户管理">
+        <button v-if="canViewRole" class="btn" type="button" @click="openPermissions">角色与权限说明</button>
+        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
+        <button v-if="canCreate" class="btn btn-primary" type="button" @click="openDialog()">新建用户</button>
       </div>
     </div>
 
-    <!--
-      本页功能收进同一行菜单：筛选、查询，以及原来散落在页头和行内的操作。
-      行内「编辑 / 证书链 / 重置口令 / 删除」和状态开关仍保留，点同一套处理函数。
-      不换行：窄屏时横向滚动，避免菜单被拆成两行。
-    -->
-    <div class="page-menu" role="toolbar" aria-label="用户管理功能">
+    <SearchBar>
       <input
         v-model.trim="query.keyword"
-        class="input"
+        class="input wide"
         placeholder="用户名 / 显示名 / 邮箱"
-        aria-label="用户名、显示名或邮箱"
         @keyup.enter="search"
       />
-      <select v-model="query.status" class="select" aria-label="状态">
+      <select v-model="query.status" class="select">
         <option value="">全部状态</option>
         <option v-for="(item, key) in USER_STATUS_MAP" :key="key" :value="key">{{ item.label }}</option>
       </select>
-      <select v-model="query.role_code" class="select" aria-label="角色">
+      <select v-model="query.role_code" class="select">
         <option value="">全部角色</option>
         <option v-for="item in roles" :key="item.role_id" :value="item.role_code">
           {{ item.role_name || roleLabel(item.role_code) }}
         </option>
       </select>
-      <button class="btn btn-sm btn-primary" type="button" @click="search">查询</button>
-      <button class="btn btn-sm" type="button" @click="resetQuery">重置</button>
-      <button class="btn btn-sm" type="button" :disabled="loading" @click="refresh">刷新</button>
-      <span class="page-menu-current" :class="{ 'is-set': Boolean(selected) }">
-        {{ selected ? `当前：${selected.display_name || selected.username}` : '未选择用户' }}
-      </span>
-
-      <span
-        v-if="canCreate || canUpdate || canManageUkey || canDelete"
-        class="page-menu-split"
-        aria-hidden="true"
-      />
-      <button v-if="canCreate" class="btn btn-sm btn-primary" type="button" @click="openDialog()">
-        新建用户
-      </button>
-      <button
-        v-if="canUpdate"
-        class="btn btn-sm"
-        type="button"
-        :disabled="!selected"
-        :title="menuActionTitle(Boolean(selected))"
-        @click="editSelected"
-      >
-        编辑
-      </button>
-      <button
-        v-if="canManageUkey"
-        class="btn btn-sm"
-        type="button"
-        :disabled="!selected"
-        :title="menuActionTitle(Boolean(selected))"
-        @click="ukeySelected"
-      >
-        证书链
-      </button>
-      <button
-        v-if="canUpdate"
-        class="btn btn-sm"
-        type="button"
-        :disabled="!selected"
-        :title="menuActionTitle(Boolean(selected))"
-        @click="resetSelected"
-      >
-        重置口令
-      </button>
-      <button
-        v-if="canUpdate"
-        class="btn btn-sm"
-        type="button"
-        :disabled="!canEnableSelected"
-        :title="menuActionTitle(canEnableSelected, '只能启用已停用、且在管理范围内的其他用户')"
-        @click="statusSelected"
-      >
-        启用
-      </button>
-      <button
-        v-if="canUpdate"
-        class="btn btn-sm"
-        type="button"
-        :disabled="!canDisableSelected"
-        :title="menuActionTitle(canDisableSelected, '只能停用状态正常、且在管理范围内的其他用户')"
-        @click="statusSelected"
-      >
-        停用
-      </button>
-      <button
-        v-if="canDelete"
-        class="btn btn-sm is-danger"
-        type="button"
-        :disabled="!selected"
-        :title="menuActionTitle(Boolean(selected))"
-        @click="removeSelected"
-      >
-        删除
-      </button>
-
-      <span v-if="canViewRole" class="page-menu-split" aria-hidden="true" />
-      <button v-if="canViewRole" class="btn btn-sm" type="button" @click="openPermissions">
-        角色与权限说明
-      </button>
-    </div>
+      <button class="btn btn-primary" type="button" @click="search">查询</button>
+      <button class="btn" type="button" @click="resetQuery">重置</button>
+    </SearchBar>
 
     <div class="mt-16">
       <DataTable
@@ -614,12 +485,7 @@ async function openPermissions(): Promise<void> {
         :empty="!loading && items.length === 0"
         empty-text="暂无用户"
       >
-        <tr
-          v-for="row in items"
-          :key="row.user_id"
-          :class="{ 'is-selected': selectedId === row.user_id }"
-          @click="selectRow(row)"
-        >
+        <tr v-for="row in items" :key="row.user_id">
           <td class="text-mono">{{ row.username }}</td>
           <td>{{ row.display_name }}</td>
           <td>
@@ -917,78 +783,11 @@ async function openPermissions(): Promise<void> {
 
 <style scoped>
 .page-menu {
-  display: flex;
+  display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  overflow-x: auto;
-}
-
-.page-menu .input,
-.page-menu .select {
   flex: 0 0 auto;
-  width: 168px;
-  height: 26px;
-  min-height: 26px;
-  padding-top: 0;
-  padding-bottom: 0;
-}
-
-.page-menu .input {
-  width: 200px;
-}
-
-.page-menu .btn {
-  flex: 0 0 auto;
-}
-
-.page-menu-split {
-  flex: 0 0 1px;
-  width: 1px;
-  height: 16px;
-  margin: 0 2px;
-  background: var(--color-border-strong);
-}
-
-.page-menu .btn.is-danger {
-  color: var(--color-danger);
-}
-
-.page-menu .btn.is-danger:hover:not(:disabled) {
-  background: var(--color-danger);
-  border-color: var(--color-danger);
-  color: #fff;
-}
-
-tbody tr {
-  cursor: pointer;
-}
-
-.page-menu-current {
-  flex: 0 0 auto;
-  font-size: 12px;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-}
-
-.page-menu-current.is-set {
-  color: var(--color-primary-dark);
-  font-weight: 600;
-}
-
-/* 选中行是工具栏操作的对象，背景画在 td 上，避免被表格 hover 盖掉 */
-.table tbody tr.is-selected td,
-.table tbody tr.is-selected:hover td {
-  background: var(--color-primary-soft);
-}
-
-.table tbody tr.is-selected td:first-child {
-  box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
 .expire-days-input {

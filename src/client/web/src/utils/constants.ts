@@ -270,6 +270,31 @@ export const EXEC_RESULT_MAP: Record<string, DictEntry> = {
   pending: { value: 'pending', label: '待确认', tone: 'warning' },
 }
 
+/** 高危命令告警状态（audit_alert.status） */
+export const ALERT_STATUS_MAP: Record<string, DictEntry> = {
+  firing: { value: 'firing', label: '待确认', tone: 'danger' },
+  acked: { value: 'acked', label: '已确认', tone: 'warning' },
+  resolved: { value: 'resolved', label: '已处理', tone: 'success' },
+  suppressed: { value: 'suppressed', label: '已抑制', tone: 'default' },
+}
+
+/** 告警级别。高危命令目前写入 warning / critical。 */
+export const ALERT_SEVERITY_MAP: Record<string, DictEntry> = {
+  info: { value: 'info', label: '提示', tone: 'info' },
+  warning: { value: 'warning', label: '警告', tone: 'warning' },
+  critical: { value: 'critical', label: '严重', tone: 'danger' },
+  emergency: { value: 'emergency', label: '紧急', tone: 'danger' },
+}
+
+/** notify_status：stored 表示只落库；skipped 表示规则要 Webhook 但未配置地址。 */
+export const ALERT_NOTIFY_STATUS_MAP: Record<string, DictEntry> = {
+  pending: { value: 'pending', label: '待通知', tone: 'default' },
+  stored: { value: 'stored', label: '仅落库', tone: 'info' },
+  sent: { value: 'sent', label: '已推送', tone: 'success' },
+  failed: { value: 'failed', label: '推送失败', tone: 'danger' },
+  skipped: { value: 'skipped', label: '未配置推送', tone: 'warning' },
+}
+
 export const LOG_RESULT_MAP: Record<string, DictEntry> = {
   success: { value: 'success', label: '成功', tone: 'success' },
   failed: { value: 'failed', label: '失败', tone: 'danger' },

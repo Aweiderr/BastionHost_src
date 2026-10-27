@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"bastion.local/manager/internal/model"
@@ -18,17 +19,50 @@ type SessionService struct {
 	assetRepo   *repo.AssetRepo
 	acctRepo    *repo.AccountRepo
 	oplog       *repo.OperationLogRepo
-	alertRepo   *repo.AlertRepo
+	alertRepo   highRiskAlerter
+	notifier    alertDispatcher
+	// alertNotifyAsync 为 true 时通知在后台执行，避免 Webhook 耗时拖住命令入库。
+	alertNotifyAsync bool
+}
+
+// highRiskAlerter 是高危命令告警需要的仓储能力。*repo.AlertRepo 满足它。
+type highRiskAlerter interface {
+	Insert(ctx context.Context, in repo.AlertInput) (int64, error)
+	NotifyChannels(ctx context.Context, tenantID int64, ruleCode string) ([]string, error)
+	UpdateNotifyStatus(ctx context.Context, alertID int64, status string) error
+}
+
+// alertDispatcher 按规则通道推送告警。*AlertNotifier 满足它。
+type alertDispatcher interface {
+	Dispatch(ctx context.Context, channels []string, notice AlertNotice) string
 }
 
 // NewSessionService 创建会话服务。
 func NewSessionService(sessionRepo *repo.SessionRepo, assetRepo *repo.AssetRepo,
 	acctRepo *repo.AccountRepo, oplog *repo.OperationLogRepo) *SessionService {
-	return &SessionService{sessionRepo: sessionRepo, assetRepo: assetRepo, acctRepo: acctRepo, oplog: oplog}
+	return &SessionService{
+		sessionRepo: sessionRepo, assetRepo: assetRepo, acctRepo: acctRepo, oplog: oplog,
+		alertNotifyAsync: true,
+	}
 }
 
 // SetAlertRepo 注入告警仓储（高危命令落库）。
-func (s *SessionService) SetAlertRepo(a *repo.AlertRepo) { s.alertRepo = a }
+func (s *SessionService) SetAlertRepo(a *repo.AlertRepo) {
+	if a == nil {
+		s.alertRepo = nil
+		return
+	}
+	s.alertRepo = a
+}
+
+// SetAlertNotifier 注入外部通知。未注入且规则要求 webhook 时，通知状态记为 skipped。
+func (s *SessionService) SetAlertNotifier(n *AlertNotifier) {
+	if n == nil {
+		s.notifier = nil
+		return
+	}
+	s.notifier = n
+}
 
 // StartSessionRequest 是会话开始上报。
 type StartSessionRequest struct {
@@ -103,7 +137,8 @@ func (s *SessionService) AddCommand(ctx context.Context, sessionID int64, c *mod
 	return c, nil
 }
 
-// maybeAlertHighRisk 策略阻断或高危/致命命令写入 audit_alert。
+// maybeAlertHighRisk 策略阻断或高危/致命命令写入 audit_alert，并按规则通道尝试通知。
+// 落库或推送失败只记日志，不让命令审计主路径失败。
 func (s *SessionService) maybeAlertHighRisk(ctx context.Context, c *model.SessionCommand) {
 	if s.alertRepo == nil || c == nil {
 		return
@@ -124,16 +159,59 @@ func (s *SessionService) maybeAlertHighRisk(ctx context.Context, c *model.Sessio
 		title = "命令策略阻断告警"
 	}
 	sid := c.SessionID
-	_, _ = s.alertRepo.Insert(ctx, repo.AlertInput{
+	content := fmt.Sprintf("命令=%q action=%s risk=%s rule=%s", c.CommandText, action, risk, c.MatchedRule)
+	occurred := c.CommandTime
+	if occurred.IsZero() {
+		occurred = time.Now()
+	}
+	id, err := s.alertRepo.Insert(ctx, repo.AlertInput{
 		AlertCode:  "cmd_high_risk",
 		Severity:   sev,
 		Title:      title,
-		Content:    fmt.Sprintf("命令=%q action=%s risk=%s rule=%s", c.CommandText, action, risk, c.MatchedRule),
+		Content:    content,
 		SourceType: "session_command",
 		SourceID:   fmt.Sprint(c.CommandID),
 		SessionID:  &sid,
 		DedupKey:   fmt.Sprintf("cmd:%d:%d", c.SessionID, c.SeqNo),
 	})
+	if err != nil {
+		slog.Warn("高危命令告警落库失败", "err", err)
+		return
+	}
+	notice := AlertNotice{
+		AlertID: id, AlertCode: "cmd_high_risk", Severity: sev, Title: title, Content: content,
+		SourceType: "session_command", SourceID: fmt.Sprint(c.CommandID),
+		SessionID: &sid, Status: repo.AlertStatusFiring,
+		OccurredAt: occurred.UTC().Format(time.RFC3339),
+	}
+	s.dispatchAlert(id, notice)
+}
+
+// dispatchAlert 读规则通道并回写 notify_status。db 只表示已经落库。
+func (s *SessionService) dispatchAlert(alertID int64, notice AlertNotice) {
+	run := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		channels, err := s.alertRepo.NotifyChannels(ctx, 0, "cmd_high_risk")
+		if err != nil {
+			slog.Warn("读取告警通知通道失败，按仅落库处理", "alert_id", alertID, "err", err)
+			channels = []string{"db"}
+		}
+		status := NotifyStatusStored
+		if s.notifier != nil {
+			status = s.notifier.Dispatch(ctx, channels, notice)
+		} else if channelEnabled(channels, alertChannelWebhook) {
+			status = NotifyStatusSkipped
+		}
+		if err := s.alertRepo.UpdateNotifyStatus(ctx, alertID, status); err != nil {
+			slog.Warn("更新告警通知状态失败", "alert_id", alertID, "err", err)
+		}
+	}
+	if s.alertNotifyAsync {
+		go run()
+		return
+	}
+	run()
 }
 
 // Finish 结束会话并归档统计与录像信息。

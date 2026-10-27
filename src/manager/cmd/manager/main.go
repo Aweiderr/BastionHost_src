@@ -235,6 +235,12 @@ func main() {
 		opsSvc = service.NewOpsService(authSvc, grantRepo, assetRepo, accountRepo, policyRepo, oplogRepo, cryptoHelper)
 		sessionSvc = service.NewSessionService(sessionRepo, assetRepo, accountRepo, oplogRepo)
 		sessionSvc.SetAlertRepo(repo.NewAlertRepo(pool))
+		sessionSvc.SetAlertNotifier(service.NewAlertNotifier(cfg.Alert.WebhookURL))
+		if cfg.Alert.WebhookURL != "" {
+			slog.Info("高危命令告警 Webhook 已启用")
+		} else {
+			slog.Info("高危命令告警 Webhook 未配置，新告警仅落库")
+		}
 
 		// 短信验证码：后端由环境变量决定，测试与生产的差异只在这里体现。
 		//

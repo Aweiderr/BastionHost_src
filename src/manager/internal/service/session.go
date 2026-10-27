@@ -64,7 +64,7 @@ func (s *SessionService) Start(ctx context.Context, req StartSessionRequest) (*m
 		TenantID: 0, SessionNo: no,
 		UserID: req.UserID, Username: req.Username, DisplayName: req.DisplayName,
 		AssetID: asset.AssetID, AssetName: asset.AssetName,
-		Protocol: orDefaultStr(req.Protocol, asset.Protocol),
+		Protocol:   orDefaultStr(req.Protocol, asset.Protocol),
 		ClientType: orDefaultStr(req.ClientType, "ssh_client"),
 		ClientIP:   req.ClientIP, ProxyNode: req.ProxyNode,
 		GrantSource: orDefaultStr(req.GrantSource, "manual"),
@@ -137,14 +137,21 @@ func (s *SessionService) maybeAlertHighRisk(ctx context.Context, c *model.Sessio
 }
 
 // Finish 结束会话并归档统计与录像信息。
+//
+// 操作日志记的是落库后的状态。强制中断后再收到代理的 client_disconnect，
+// 日志与审计行都保持 terminated / admin_kill，而不是改记成正常断开。
 func (s *SessionService) Finish(ctx context.Context, sessionID int64, in repo.SessionCloseInput) error {
 	in.SessionID = sessionID
-	if err := s.sessionRepo.Close(ctx, in); err != nil {
+	applied, err := s.sessionRepo.Close(ctx, in)
+	if err != nil {
 		return err
+	}
+	if !applied.Applied {
+		return nil
 	}
 	s.writeLog(ctx, &model.Session{SessionID: sessionID}, "session_end", fmt.Sprintf(
 		`{"status":%q,"end_reason":%q,"commands":%d,"blocked":%d,"record_status":%q,"record_path":%q}`,
-		in.Status, in.EndReason, in.CommandCount, in.BlockCount, in.RecordStatus, in.RecordPath))
+		applied.Status, applied.EndReason, in.CommandCount, in.BlockCount, in.RecordStatus, in.RecordPath))
 	return nil
 }
 

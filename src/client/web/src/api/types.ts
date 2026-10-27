@@ -469,6 +469,8 @@ export interface AuditSession {
   duration_sec: number
   status: string
   end_reason: string
+  /** 管理员强制中断时填写的原文；未填写或非强制中断时可能为空 */
+  interrupt_reason?: string
   command_count: number
   block_count: number
   record_status: string

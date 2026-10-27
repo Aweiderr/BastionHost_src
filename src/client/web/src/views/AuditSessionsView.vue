@@ -19,6 +19,10 @@ import {
   SESSION_STATUS_MAP,
   dictLabel,
   dictTone,
+  sessionEndReasonLabel,
+  sessionInterruptReason,
+  sessionListEndHint,
+  sessionWasInterrupted,
 } from '@/utils/constants'
 import { formatBytes, formatDuration, formatTime } from '@/utils/format'
 
@@ -35,7 +39,7 @@ const columns: TableColumn[] = [
   { key: 'duration', title: '时长', width: '95px' },
   { key: 'command', title: '命令 / 阻断', width: '110px', align: 'center' },
   { key: 'record', title: '录像', width: '110px' },
-  { key: 'status', title: '状态', width: '100px' },
+  { key: 'status', title: '状态', width: '140px' },
   { key: 'actions', title: '操作', align: 'right' },
 ]
 
@@ -181,6 +185,13 @@ onMounted(load)
               :text="dictLabel(SESSION_STATUS_MAP, row.status)"
               :tone="dictTone(SESSION_STATUS_MAP, row.status)"
             />
+            <div
+              v-if="sessionListEndHint(row.status, row.end_reason, row.interrupt_reason)"
+              class="text-secondary"
+              style="font-size: 12px; margin-top: 4px; word-break: break-all"
+            >
+              {{ sessionListEndHint(row.status, row.end_reason, row.interrupt_reason) }}
+            </div>
           </td>
           <td class="col-actions">
             <button class="btn-link" @click="openDetail(row)">详情</button>
@@ -261,8 +272,35 @@ onMounted(load)
                 <div class="desc-value">{{ formatDuration(detail.session.duration_sec) }}</div>
               </div>
               <div class="desc-item">
+                <div class="desc-label">状态</div>
+                <div class="desc-value">
+                  <StatusTag
+                    :text="dictLabel(SESSION_STATUS_MAP, detail.session.status)"
+                    :tone="dictTone(SESSION_STATUS_MAP, detail.session.status)"
+                  />
+                </div>
+              </div>
+              <div class="desc-item">
                 <div class="desc-label">结束原因</div>
-                <div class="desc-value">{{ detail.session.end_reason || '—' }}</div>
+                <div class="desc-value">
+                  {{ sessionEndReasonLabel(detail.session.status, detail.session.end_reason) }}
+                </div>
+              </div>
+              <div
+                v-if="sessionWasInterrupted(detail.session.status)"
+                class="desc-item"
+                style="grid-column: 1 / -1"
+              >
+                <div class="desc-label">中断理由</div>
+                <div class="desc-value" style="word-break: break-all">
+                  {{
+                    sessionInterruptReason(
+                      detail.session.status,
+                      detail.session.end_reason,
+                      detail.session.interrupt_reason,
+                    ) || '未填写'
+                  }}
+                </div>
               </div>
               <div class="desc-item">
                 <div class="desc-label">命令数 / 阻断数</div>

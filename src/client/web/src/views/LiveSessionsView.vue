@@ -227,7 +227,7 @@ onBeforeUnmount(() => {
         确认强制中断会话「{{ killTarget?.session_no || '' }}」？
         运维连接会被立即断开。访问授权仍然保留，这与「回收」不是同一操作。
       </div>
-      <input v-model.trim="killReason" class="input wide" placeholder="中断原因（记入操作日志，可留空）" />
+      <input v-model.trim="killReason" class="input wide" placeholder="中断理由（审计详情可见，可留空）" />
     </ConfirmDialog>
   </div>
 </template>

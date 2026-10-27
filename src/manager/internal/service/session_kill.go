@@ -35,9 +35,14 @@ type SessionKiller struct {
 
 // Kill 强制中断进行中的运维会话。
 //
-// 流程：校验会话仍为 active → 按 proxy_node 定位代理 → HMAC 调用代理
-// `/internal/v1/sessions/{id}/kill` → 无论代理是否在线，都将库中状态置为 terminated。
-// 代理不在线时会话会因连接已断而自然结束；库状态先改掉避免审计页长期显示"进行中"。
+// 流程：校验会话仍为 active → 先把库标成 terminated 并写下中断理由 →
+// 再 HMAC 调用代理 `/internal/v1/sessions/{id}/kill`。
+//
+// 必须先落库。代理被掐断后会走 finish，上报 status=closed、
+// end_reason=client_disconnect。若这一步发生在 Terminate 之前，
+// 条件更新匹配不到 active 行，强制中断会被记成正常断开。
+// 库先改掉之后，finish 只会补命令计数和录像，不会覆盖被中断的结论。
+// 代理不在线时连接已经不在，审计页也不会长期显示"进行中"。
 func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator OperatorContext, reason string) (*KillResult, error) {
 	if k == nil || k.Sessions == nil {
 		return nil, fmt.Errorf("会话服务未启用")
@@ -52,8 +57,14 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 			Status: sess.Status, Message: "会话已不在进行中",
 		}, nil
 	}
-	if reason == "" {
-		reason = "admin_kill"
+	endReason, interruptReason := model.SplitKillReason(reason)
+
+	updated, err := k.Sessions.sessionRepo.Terminate(ctx, sessionID, endReason, interruptReason)
+	if err != nil {
+		return nil, err
+	}
+	if !updated {
+		return k.alreadyEnded(ctx, sess), nil
 	}
 
 	proxyKilled := false
@@ -65,7 +76,11 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 		} else if node.Address == "" {
 			msg = "节点未上报地址，仅更新库状态"
 		} else {
-			if err := k.callProxyKill(ctx, node.Address, sessionID, reason); err != nil {
+			proxyReason := interruptReason
+			if proxyReason == "" {
+				proxyReason = endReason
+			}
+			if err := k.callProxyKill(ctx, node.Address, sessionID, proxyReason); err != nil {
 				msg = "通知代理失败（已更新库状态）：" + err.Error()
 			} else {
 				proxyKilled = true
@@ -74,16 +89,13 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 		}
 	}
 
-	if err := k.Sessions.sessionRepo.Terminate(ctx, sessionID, reason); err != nil {
-		return nil, err
-	}
-
 	if k.Sessions.oplog != nil {
 		l := &model.OperationLog{
 			Module: "ops", Action: "session_kill", TargetType: "session",
 			TargetID: fmt.Sprint(sess.SessionID), TargetName: sess.SessionNo,
-			AfterValue: fmt.Sprintf(`{"reason":%q,"proxy_killed":%v,"by":%q}`, reason, proxyKilled, operator.Username),
-			Result:     "success", ClientIP: operator.ClientIP, OperatorNameSnap: operator.Username,
+			AfterValue: fmt.Sprintf(`{"end_reason":%q,"interrupt_reason":%q,"proxy_killed":%v,"by":%q}`,
+				endReason, interruptReason, proxyKilled, operator.Username),
+			Result: "success", ClientIP: operator.ClientIP, OperatorNameSnap: operator.Username,
 		}
 		if operator.UserID != 0 {
 			uid := operator.UserID
@@ -96,6 +108,21 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 		SessionID: sess.SessionID, SessionNo: sess.SessionNo, ProxyNode: sess.ProxyNode,
 		ProxyKilled: proxyKilled, Status: model.SessionStatusTerminated, Message: msg,
 	}, nil
+}
+
+// alreadyEnded 在落库时发现会话已不再是 active 时返回当前状态。
+func (k *SessionKiller) alreadyEnded(ctx context.Context, sess *model.Session) *KillResult {
+	res := &KillResult{
+		SessionID: sess.SessionID, SessionNo: sess.SessionNo, ProxyNode: sess.ProxyNode,
+		Status: sess.Status, Message: "会话已不在进行中",
+	}
+	latest, err := k.Sessions.Get(ctx, sess.SessionID)
+	if err == nil && latest != nil {
+		res.Status = latest.Status
+		res.SessionNo = latest.SessionNo
+		res.ProxyNode = latest.ProxyNode
+	}
+	return res
 }
 
 func (k *SessionKiller) callProxyKill(ctx context.Context, address string, sessionID int64, reason string) error {

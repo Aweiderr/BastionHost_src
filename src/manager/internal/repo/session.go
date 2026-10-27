@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ const sessionCols = `session_id, tenant_id, session_no, user_id, username, coale
  asset_id, coalesce(asset_name,''), account_id, coalesce(account_name,''), protocol, client_type,
  coalesce(client_ip,''), coalesce(proxy_node,''), grant_source, ticket_id, coalesce(app_id,''),
  operator_id, coalesce(operator_name,''), coalesce(purpose,''), start_time, end_time, duration_sec,
- status, coalesce(end_reason,''), command_count, block_count, file_count, record_status,
+ status, coalesce(end_reason,''), coalesce(interrupt_reason,''), command_count, block_count, file_count, record_status,
  coalesce(record_path,''), record_size, coalesce(record_digest,''), record_chunks, credential_mode, create_time`
 
 func scanSession(row pgx.Row) (*model.Session, error) {
@@ -33,7 +34,7 @@ func scanSession(row pgx.Row) (*model.Session, error) {
 		&s.AssetID, &s.AssetName, &s.AccountID, &s.AccountName, &s.Protocol, &s.ClientType,
 		&s.ClientIP, &s.ProxyNode, &s.GrantSource, &s.TicketID, &s.AppID,
 		&s.OperatorID, &s.OperatorName, &s.Purpose, &s.StartTime, &s.EndTime, &s.DurationSec,
-		&s.Status, &s.EndReason, &s.CommandCount, &s.BlockCount, &s.FileCount, &s.RecordStatus,
+		&s.Status, &s.EndReason, &s.InterruptReason, &s.CommandCount, &s.BlockCount, &s.FileCount, &s.RecordStatus,
 		&s.RecordPath, &s.RecordSize, &s.RecordDigest, &s.RecordChunks, &s.CredentialMode, &s.CreateTime)
 	if err != nil {
 		return nil, err
@@ -103,40 +104,64 @@ type SessionCloseInput struct {
 }
 
 // Close 结束会话并回填统计与录像信息。
-func (r *SessionRepo) Close(ctx context.Context, in SessionCloseInput) error {
-	if in.Status == "" {
-		in.Status = model.SessionStatusClosed
+//
+// 先锁住这一行再按 MergeFinish 落库。管理员已经把会话标成 terminated 之后，
+// 代理断开触发的 finish 不能把状态改回 closed，也不能改掉 end_reason。
+// 中断理由（interrupt_reason）不在本语句里，强制中断写下的原文会留下来。
+// 会话不存在时与旧实现一样视为空更新，不返回错误。
+func (r *SessionRepo) Close(ctx context.Context, in SessionCloseInput) (FinishApply, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return FinishApply{}, err
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE ops_session SET
-	   end_time = now(),
-	   duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (now() - start_time))::int),
-	   status = $2, end_reason = $3, command_count = $4, block_count = $5, file_count = $6,
-	   record_status = $7, record_path = $8, record_size = $9, record_digest = $10, record_chunks = $11,
-	   credential_mode = COALESCE(NULLIF($12, ''), credential_mode)
-	 WHERE session_id = $1`,
-		in.SessionID, in.Status, in.EndReason, in.CommandCount, in.BlockCount, in.FileCount,
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var existingStatus, existingEndReason string
+	err = tx.QueryRow(ctx, `SELECT status, coalesce(end_reason,'')
+		FROM ops_session WHERE session_id = $1 FOR UPDATE`, in.SessionID).
+		Scan(&existingStatus, &existingEndReason)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return FinishApply{}, nil
+		}
+		return FinishApply{}, err
+	}
+	applied := MergeFinish(existingStatus, existingEndReason, in)
+	if _, err := tx.Exec(ctx, closeUpdateSQL(applied.RefreshTiming),
+		in.SessionID, applied.Status, applied.EndReason, in.CommandCount, in.BlockCount, in.FileCount,
 		in.RecordStatus, in.RecordPath, in.RecordSize, in.RecordDigest, in.RecordChunks,
-		in.CredentialMode)
-	return err
+		in.CredentialMode); err != nil {
+		return FinishApply{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return FinishApply{}, err
+	}
+	return applied, nil
 }
 
-// Terminate 将仍为 active 的会话标记为 terminated（保留命令计数与录像字段）。
+// Terminate 将仍为 active 的会话标记为 terminated。
 //
-// 供管理员强制中断：此时代理侧负责真正断开连接并随后上报 Finish；
-// 若代理已不可达，至少保证审计页不再显示"进行中"。
-func (r *SessionRepo) Terminate(ctx context.Context, sessionID int64, reason string) error {
-	if reason == "" {
-		reason = "admin_kill"
+// endReason 是机器编码（admin_kill），interruptReason 是管理员填写的中断理由，
+// 可以为空。只更新 status=active 的行：会话若已自行结束，不能再改判成被中断。
+// 调用方应先落库再通知代理断开，这样随后的 finish 会读到 terminated。
+// 返回值表示这次是否真的改到了行。
+func (r *SessionRepo) Terminate(ctx context.Context, sessionID int64, endReason, interruptReason string) (bool, error) {
+	if endReason == "" {
+		endReason = model.EndReasonAdminKill
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE ops_session SET
+	tag, err := r.pool.Exec(ctx, `UPDATE ops_session SET
 		end_time = COALESCE(end_time, now()),
 		duration_sec = COALESCE(duration_sec, GREATEST(0, EXTRACT(EPOCH FROM (now() - start_time))::int)),
 		status = $2,
 		end_reason = $3,
+		interrupt_reason = NULLIF($4, ''),
 		record_status = CASE WHEN record_status = 'recording' THEN 'failed' ELSE record_status END
 	 WHERE session_id = $1 AND status = 'active'`,
-		sessionID, model.SessionStatusTerminated, reason)
-	return err
+		sessionID, model.SessionStatusTerminated, endReason, interruptReason)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // CloseActive 结束一条仍为 active 的会话，写入 end_time 与 duration_sec。

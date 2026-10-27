@@ -29,17 +29,20 @@ type Session struct {
 	DurationSec  *int       `json:"duration_sec,omitempty"`
 	Status       string     `json:"status"`
 	EndReason    string     `json:"end_reason,omitempty"`
-	CommandCount int        `json:"command_count"`
-	BlockCount   int        `json:"block_count"`
-	FileCount    int        `json:"file_count"`
-	RecordStatus string     `json:"record_status"`
-	RecordPath   string     `json:"record_path,omitempty"`
-	RecordSize   int64      `json:"record_size"`
-	RecordDigest string     `json:"record_digest,omitempty"`
-	RecordChunks int        `json:"record_chunks"`
+	// InterruptReason 是管理员强制中断时填写的自由文本。
+	// 机器结束原因仍在 EndReason（admin_kill 等编码）。
+	InterruptReason string `json:"interrupt_reason,omitempty"`
+	CommandCount    int    `json:"command_count"`
+	BlockCount      int    `json:"block_count"`
+	FileCount       int    `json:"file_count"`
+	RecordStatus    string `json:"record_status"`
+	RecordPath      string `json:"record_path,omitempty"`
+	RecordSize      int64  `json:"record_size"`
+	RecordDigest    string `json:"record_digest,omitempty"`
+	RecordChunks    int    `json:"record_chunks"`
 	// CredentialMode 本次会话的凭据来源：managed / manual
-	CredentialMode string   `json:"credential_mode"`
-	CreateTime   time.Time  `json:"create_time"`
+	CredentialMode string    `json:"credential_mode"`
+	CreateTime     time.Time `json:"create_time"`
 
 	// Commands 会话命令记录（详情查询时填充）
 	Commands []*SessionCommand `json:"commands,omitempty"`

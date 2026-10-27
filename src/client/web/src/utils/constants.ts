@@ -177,9 +177,80 @@ export const PRIORITY_MAP = toMap(PRIORITIES)
 
 export const SESSION_STATUS_MAP: Record<string, DictEntry> = {
   active: { value: 'active', label: '进行中', tone: 'success' },
-  closed: { value: 'closed', label: '已结束', tone: 'default' },
+  closed: { value: 'closed', label: '正常结束', tone: 'default' },
   terminated: { value: 'terminated', label: '被中断', tone: 'danger' },
-  timeout: { value: 'timeout', label: '超时', tone: 'warning' },
+  timeout: { value: 'timeout', label: '超时结束', tone: 'warning' },
+}
+
+/**
+ * 会话结束原因编码。
+ * 已知编码显示中文；未知编码由 sessionEndReasonLabel 原样带出，避免只剩空白。
+ */
+export const END_REASON_MAP: Record<string, DictEntry> = {
+  admin_kill: { value: 'admin_kill', label: '管理员强制中断' },
+  client_disconnect: { value: 'client_disconnect', label: '客户端断开' },
+  remote_closed: { value: 'remote_closed', label: '目标端关闭连接' },
+  gateway_shutdown: { value: 'gateway_shutdown', label: '网关关闭' },
+  node_offline: { value: 'node_offline', label: '代理节点离线' },
+  no_live_conn: { value: 'no_live_conn', label: '连接已不存在' },
+  timeout: { value: 'timeout', label: '会话超时' },
+}
+
+/** 强制中断。审计详情在这种状态下展示「中断理由」。 */
+export function sessionWasInterrupted(status: string | undefined | null): boolean {
+  return status === 'terminated'
+}
+
+/**
+ * 结束原因的中文文案。
+ * 强制中断但 end_reason 仍是自由文本（迁移前的历史行）时，结束原因按管理员强制中断显示。
+ */
+export function sessionEndReasonLabel(
+  status: string | undefined | null,
+  endReason: string | undefined | null,
+): string {
+  const code = (endReason ?? '').trim()
+  if (!code) {
+    if (status === 'terminated') return END_REASON_MAP.admin_kill.label
+    if (status === 'timeout') return END_REASON_MAP.timeout.label
+    return '—'
+  }
+  const known = END_REASON_MAP[code]
+  if (known) return known.label
+  if (status === 'terminated') return END_REASON_MAP.admin_kill.label
+  return `未知结束原因（${code}）`
+}
+
+/**
+ * 强制中断时管理员填写的原文。
+ * 优先 interrupt_reason；历史行把原文写在 end_reason 里时，未知编码即该原文。
+ * 未填写返回空串，由详情页显示「未填写」。
+ */
+export function sessionInterruptReason(
+  status: string | undefined | null,
+  endReason: string | undefined | null,
+  interruptReason: string | undefined | null,
+): string {
+  if (!sessionWasInterrupted(status)) return ''
+  const typed = (interruptReason ?? '').trim()
+  if (typed) return typed
+  const code = (endReason ?? '').trim()
+  if (code && !END_REASON_MAP[code]) return code
+  return ''
+}
+
+/** 列表状态下方的一行说明：被中断且写了理由时优先展示理由，否则展示结束原因。 */
+export function sessionListEndHint(
+  status: string | undefined | null,
+  endReason: string | undefined | null,
+  interruptReason: string | undefined | null,
+): string {
+  if (status === 'active' || !status) return ''
+  if (sessionWasInterrupted(status)) {
+    const why = sessionInterruptReason(status, endReason, interruptReason)
+    if (why) return why
+  }
+  return sessionEndReasonLabel(status, endReason)
 }
 
 export const RECORD_STATUS_MAP: Record<string, DictEntry> = {

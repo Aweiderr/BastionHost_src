@@ -528,6 +528,9 @@ async function openPermissions(): Promise<void> {
       <button class="btn btn-sm btn-primary" type="button" @click="search">查询</button>
       <button class="btn btn-sm" type="button" @click="resetQuery">重置</button>
       <button class="btn btn-sm" type="button" :disabled="loading" @click="refresh">刷新</button>
+      <span class="page-menu-current" :class="{ 'is-set': Boolean(selected) }">
+        {{ selected ? `当前：${selected.display_name || selected.username}` : '未选择用户' }}
+      </span>
 
       <span
         v-if="canCreate || canUpdate || canManageUkey || canDelete"
@@ -966,9 +969,26 @@ tbody tr {
   cursor: pointer;
 }
 
-tr.is-selected,
-tr.is-selected:hover {
+.page-menu-current {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.page-menu-current.is-set {
+  color: var(--color-primary-dark);
+  font-weight: 600;
+}
+
+/* 选中行是工具栏操作的对象，背景画在 td 上，避免被表格 hover 盖掉 */
+.table tbody tr.is-selected td,
+.table tbody tr.is-selected:hover td {
   background: var(--color-primary-soft);
+}
+
+.table tbody tr.is-selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
 .expire-days-input {

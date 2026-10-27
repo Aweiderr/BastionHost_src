@@ -126,6 +126,11 @@ function resetQuery(): void {
   search()
 }
 
+/** 按当前筛选与页码重新拉取，不改查询条件 */
+function refresh(): void {
+  void load()
+}
+
 function onPageChange(next: number): void {
   page.value = next
   void load()
@@ -444,9 +449,11 @@ async function openPermissions(): Promise<void> {
         <div class="page-title">用户管理</div>
         <div class="page-subtitle">维护系统用户与角色分配，角色决定可访问的功能与数据范围。</div>
       </div>
-      <div class="btn-group">
-        <button v-if="canViewRole" class="btn" @click="openPermissions">角色与权限说明</button>
-        <button v-if="canCreate" class="btn btn-primary" @click="openDialog()">新建用户</button>
+      <!-- 菜单栏只放页面级操作。编辑、证书链、重置口令、启停、删除留在每一行。 -->
+      <div class="page-menu" role="toolbar" aria-label="用户管理">
+        <button v-if="canViewRole" class="btn" type="button" @click="openPermissions">角色与权限说明</button>
+        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
+        <button v-if="canCreate" class="btn btn-primary" type="button" @click="openDialog()">新建用户</button>
       </div>
     </div>
 
@@ -467,8 +474,8 @@ async function openPermissions(): Promise<void> {
           {{ item.role_name || roleLabel(item.role_code) }}
         </option>
       </select>
-      <button class="btn btn-primary" @click="search">查询</button>
-      <button class="btn" @click="resetQuery">重置</button>
+      <button class="btn btn-primary" type="button" @click="search">查询</button>
+      <button class="btn" type="button" @click="resetQuery">重置</button>
     </SearchBar>
 
     <div class="mt-16">

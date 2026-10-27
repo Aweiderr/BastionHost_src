@@ -443,21 +443,19 @@ const FAILOVER_TONE: Record<string, TagTone> = {
 
 <template>
   <div>
+    <div class="page-header">
+      <div>
+        <div class="page-title">集群管理</div>
+        <div class="page-subtitle">手动登记设备分组，查看在线、主备和会话接收情况。</div>
+      </div>
+      <div class="page-menu" role="toolbar" aria-label="集群管理">
+        <button class="btn" type="button" :disabled="loading" @click="loadClusters()">刷新</button>
+        <button v-if="canManage" class="btn btn-primary" type="button" @click="openCreate">新建集群</button>
+      </div>
+    </div>
+
     <!-- 集群列表 -->
     <div class="card mb-16">
-      <div class="card-header">
-        <span class="card-title">集群</span>
-        <div class="btn-group">
-          <button v-if="canManage" class="btn btn-sm btn-primary" @click="openCreate">
-            新建集群
-          </button>
-          <button class="btn btn-sm" :disabled="loading" @click="loadClusters()">
-            <span v-if="loading" class="spinner" />
-            {{ loading ? '读取中…' : '刷新' }}
-          </button>
-        </div>
-      </div>
-
       <div class="card-body text-secondary" style="font-size: 12px; line-height: 1.8">
         集群由运维手动定义：填写集群名称与<strong>设备 IP</strong>（设备之间需网络互通，
         且已部署堡垒机服务端，默认探测 <span class="text-mono">:8081</span>）。
@@ -606,12 +604,12 @@ const FAILOVER_TONE: Record<string, TagTone> = {
             </template>
           </template>
         </div>
-        <div class="btn-group">
-          <button v-if="canManage" class="btn btn-sm" @click="openAdd">添加设备</button>
-          <button class="btn btn-sm" :disabled="detailLoading" @click="doProbe">
+        <div class="page-menu" role="toolbar" aria-label="集群设备">
+          <button class="btn" type="button" :disabled="detailLoading" @click="doProbe">
             <span v-if="detailLoading" class="spinner" />
             立即探测
           </button>
+          <button v-if="canManage" class="btn btn-primary" type="button" @click="openAdd">添加设备</button>
         </div>
       </div>
 

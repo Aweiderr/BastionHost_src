@@ -80,11 +80,6 @@ function resetQuery(): void {
   search()
 }
 
-/** 按当前筛选与页码重新拉取，不改查询条件 */
-function refresh(): void {
-  void load()
-}
-
 function onPageChange(next: number): void {
   page.value = next
   void load()
@@ -134,9 +129,6 @@ onMounted(load)
       <div>
         <div class="page-title">会话审计</div>
         <div class="page-subtitle">查询全部运维会话，查看命令留痕并回放终端录像。</div>
-      </div>
-      <div class="page-menu" role="toolbar" aria-label="会话审计">
-        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
       </div>
     </div>
 

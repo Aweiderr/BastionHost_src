@@ -148,12 +148,10 @@ onBeforeUnmount(() => {
           当前仍在进行的运维连接。强制中断会立即断开这一条会话，不会回收访问授权。
         </div>
       </div>
-      <div class="page-menu" role="toolbar" aria-label="在线会话">
-        <button class="btn" type="button" :disabled="loading" @click="load()">
-          <span v-if="loading" class="spinner" />
-          刷新
-        </button>
-      </div>
+      <button class="btn" :disabled="loading" @click="load()">
+        <span v-if="loading" class="spinner" />
+        刷新
+      </button>
     </div>
 
     <SearchBar>

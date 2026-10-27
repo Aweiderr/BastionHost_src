@@ -101,12 +101,6 @@ function resetQuery(): void {
   search()
 }
 
-/** 按当前筛选与页码重新拉取策略和统计，不改查询条件 */
-function refresh(): void {
-  void load()
-  void loadStats()
-}
-
 function onPageChange(next: number): void {
   page.value = next
   void load()
@@ -305,10 +299,7 @@ onMounted(async () => {
           策略引擎按优先级匹配运维命令，决定放行、审计、二次确认或直接阻断。
         </div>
       </div>
-      <div class="page-menu" role="toolbar" aria-label="命令策略">
-        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
-        <button class="btn btn-primary" type="button" @click="openDialog()">新建策略</button>
-      </div>
+      <button class="btn btn-primary" @click="openDialog()">新建策略</button>
     </div>
 
     <div class="stat-grid mb-16">

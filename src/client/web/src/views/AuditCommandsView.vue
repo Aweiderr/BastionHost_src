@@ -71,11 +71,6 @@ function resetQuery(): void {
   search()
 }
 
-/** 按当前筛选与页码重新拉取，不改查询条件 */
-function refresh(): void {
-  void load()
-}
-
 function onPageChange(next: number): void {
   page.value = next
   void load()
@@ -102,9 +97,6 @@ onMounted(load)
       <div>
         <div class="page-title">命令审计</div>
         <div class="page-subtitle">按风险等级与处置动作检索命令留痕，快速定位高危与阻断操作。</div>
-      </div>
-      <div class="page-menu" role="toolbar" aria-label="命令审计">
-        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
       </div>
     </div>
 

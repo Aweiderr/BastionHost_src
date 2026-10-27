@@ -83,6 +83,15 @@ export interface LoginResult {
   must_change_password: boolean
   password_expired?: boolean
   mfa_enabled: boolean
+  /**
+   * UKey 证书临期或已过期提示。
+   *
+   * 登录成功、且该用户绑定的 client 证书将在约 30 天内到期（或已经过期）时，
+   * 由服务端写入。文案已是给用户看的中文，前端原样展示。
+   * 账密阶段若仍要第二因子（mfa_required），这次响应通常还没有该字段；
+   * 真正签发令牌的那次结果才会带上。
+   */
+  cert_expiry_hint?: string
 
   // ---- MFA 二次认证（账密已通过，等待第二因子）----
   //
@@ -739,6 +748,32 @@ export interface UKeyCertQuery extends PageQuery {
   /** 按归属用户过滤，用户管理页查"某人绑了哪些证书"用这个 */
   owner_id?: number
   keyword?: string
+}
+
+/**
+ * 临期或已过期的用户 UKey 证书摘要。
+ *
+ * 对应 `GET /ukey/certs/expiring`。只含 cert_type=client 的证书，
+ * 不是证书链页里的 CA 记录。days_left / status 都由服务端计算，
+ * 前端不要再用本地时钟重算一遍。
+ */
+export interface UKeyExpiringCert {
+  cert_id: number
+  cert_name: string
+  owner_id?: number | null
+  owner_name?: string
+  fingerprint: string
+  not_after: string
+  /** 剩余整天数；已过期为负数 */
+  days_left: number
+  status: UKeyCertStatus | string
+}
+
+/** 临期列表接口的 data */
+export interface UKeyExpiringCertsResult {
+  /** 无记录时后端可能给 null */
+  items: UKeyExpiringCert[] | null
+  within_days: number
 }
 
 export interface UKeyRegisterPayload {

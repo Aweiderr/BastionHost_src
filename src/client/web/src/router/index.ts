@@ -148,6 +148,15 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        // 安全管理员查看并强制中断进行中的运维会话。
+        // 权限点是 ops:session:live，不是 audit:session:list：
+        // 后者会把「会话审计」（含历史）整页开放出来。
+        path: 'monitor/sessions',
+        name: 'live-sessions',
+        component: () => import('@/views/LiveSessionsView.vue'),
+        meta: { title: '在线会话', permission: ['ops:session:live'] },
+      },
+      {
         path: 'users',
         name: 'users',
         component: () => import('@/views/UsersView.vue'),
@@ -227,6 +236,8 @@ export const ICONS = {
     'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3.5 9.5h17M3.5 14.5h17M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z',
   // 访问授权：锁 —— 表达"谁可以访问什么"
   grant: 'M6 10.5h12V20H6zM9 10.5V8a3 3 0 0 1 6 0v2.5M12 14v2.5',
+  // 在线会话：显示器 + 心跳，与「我的会话」的时钟、「审计」的列表区分开
+  monitor: 'M3 5h18v11H3zM8 20h8M12 16v4M7.2 10.6h1.6l1.2-2.2 1.8 4.4 1.2-2.2h3.8',
   // UKey 证书：钥匙 + 齿 —— 与"用户"图标区分开，避免菜单里两个相似图标
   ukey: 'M15 3.5a5 5 0 1 1-4.7 6.7L8 12.5v2.5H5.5V18H3v-3.4l7.3-7.3A5 5 0 0 1 15 3.5zM16.2 7.6h.01',
 } as const
@@ -323,6 +334,19 @@ export const MENU_GROUPS: MenuGroup[] = [
         icon: ICONS.grant,
         // 与路由 meta 保持一致：hasAny 判定，三个 acl:grant:* 任一即可见
         permission: ['acl:grant:list', 'acl:grant:create', 'acl:grant:revoke'],
+      },
+    ],
+  },
+  {
+    // 插在「权限与策略」和「系统」之间。
+    // 只认 ops:session:live：系统管理员、审计管理员没有该点，侧边栏与原来一致。
+    title: '会话监控',
+    items: [
+      {
+        title: '在线会话',
+        path: '/monitor/sessions',
+        icon: ICONS.monitor,
+        permission: ['ops:session:live'],
       },
     ],
   },

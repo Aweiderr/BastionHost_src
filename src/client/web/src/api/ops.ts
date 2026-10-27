@@ -10,6 +10,7 @@
  * 否则运维会以为能直接连，实际连接时才被拒。
  */
 import { request } from './http'
+import type { PageResult } from './types'
 
 /** 运维视角的托管账号（不含任何凭据材料） */
 export interface OpsAccount {
@@ -49,4 +50,52 @@ export interface OpsAsset {
 /** 我可运维（或可申请）的资产与账号 */
 export function listOpsAssets() {
   return request<{ items: OpsAsset[]; total: number }>('/ops/assets')
+}
+
+/** 进行中的运维会话（ops_session，status=active）。权限点 ops:session:live。 */
+export interface LiveSession {
+  session_id: number
+  session_no: string
+  username: string
+  display_name?: string
+  asset_name?: string
+  account_name?: string
+  /** 代理节点 ID（ops_session.proxy_node） */
+  proxy_node?: string
+  start_time: string
+  status: string
+}
+
+export interface LiveSessionQuery {
+  keyword?: string
+  page?: number
+  page_size?: number
+}
+
+export interface SessionKillResult {
+  session_id: number
+  session_no: string
+  proxy_node?: string
+  proxy_killed: boolean
+  status: string
+  message: string
+}
+
+/** 在线会话列表。服务端忽略 status，只返回进行中的会话。 */
+export function listLiveSessions(query: LiveSessionQuery = {}, silent = false) {
+  return request<PageResult<LiveSession>>('/ops/sessions/live', {
+    params: { ...query },
+    silent,
+  })
+}
+
+/**
+ * 强制中断一条进行中的运维会话。
+ * 权限点 ops:session:kill。与访问授权里的「回收」不是同一件事。
+ */
+export function killOpsSession(id: number, reason: string) {
+  return request<SessionKillResult>(`/ops/sessions/${id}/kill`, {
+    method: 'POST',
+    body: { reason },
+  })
 }

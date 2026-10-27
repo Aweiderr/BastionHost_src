@@ -856,6 +856,7 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 | `BASTION_CRYPTO_BACKEND` | go | 软件实现的后端：`gmssl` / `openssl` / `go` |
 | `BASTION_JWT_SECRET` | （调试模式自动填充） | 令牌签名密钥，生产必须显式配置 |
 | `BASTION_SSH_LISTEN` | :2222 | 服务端 SSH 网关监听地址（第三方客户端接入） |
+| `BASTION_IDLE_TIMEOUT` | 30m | SSH / WebSSH 运维会话空闲上限（无用户输入；`0` 关闭）。到点后掐断连接，会话状态与结束原因都记为 `timeout`（审计显示「超时结束」）。系统配置项 `security.session.idle_minutes` 只展示同一默认值（30 分钟），代理不读取 |
 | `BASTION_RECORD_DIR` | ./data/records | 录像存储目录 |
 | `BASTION_KEYSTORE_DIR` | ./data/keys | 密钥库目录 |
 

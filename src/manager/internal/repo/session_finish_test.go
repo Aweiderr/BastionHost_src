@@ -53,6 +53,17 @@ func TestMergeFinishKeepsTimeout(t *testing.T) {
 	}
 }
 
+func TestMergeFinishAppliesIdleTimeoutOnActiveSession(t *testing.T) {
+	in := SessionCloseInput{
+		Status:    model.SessionStatusTimeout,
+		EndReason: model.EndReasonTimeout,
+	}
+	got := MergeFinish(model.SessionStatusActive, "", in)
+	if got.Status != model.SessionStatusTimeout || got.EndReason != model.EndReasonTimeout || !got.RefreshTiming {
+		t.Fatalf("空闲超时上报应落成 timeout/timeout，实际 %+v", got)
+	}
+}
+
 func TestMergeFinishAppliesNormalClose(t *testing.T) {
 	in := SessionCloseInput{Status: "", EndReason: model.EndReasonRemoteClosed}
 	got := MergeFinish(model.SessionStatusActive, "", in)

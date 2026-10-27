@@ -80,6 +80,12 @@ type ProxyConfig struct {
 	OracleEnable bool
 	// 会话上限与超时
 	MaxSessionsPerNode int
+	// IdleTimeout 是运维会话无用户输入时的空闲上限（BASTION_IDLE_TIMEOUT，默认 30m）。
+	// <=0 关闭空闲断开。到点后掐断 SSH / WebSSH 连接，会话记为 timeout，
+	// 结束原因同为 timeout。RDP/VNC/Oracle 仍是未接入 ops_session 的骨架，不在此列。
+	//
+	// 这是生效配置。sys_config 的 security.session.idle_minutes（种子值 30）
+	// 只在系统配置页展示，代理不读取。两边默认都是 30 分钟；要改行为请改本环境变量。
 	IdleTimeout        time.Duration
 	ConnectTimeout     time.Duration
 	// 命令审计缓冲区大小（行）

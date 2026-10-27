@@ -194,6 +194,7 @@ export const END_REASON_MAP: Record<string, DictEntry> = {
   node_offline: { value: 'node_offline', label: '代理节点离线' },
   no_live_conn: { value: 'no_live_conn', label: '连接已不存在' },
   timeout: { value: 'timeout', label: '会话超时' },
+  policy_deny: { value: 'policy_deny', label: '策略阻断' },
 }
 
 /** 强制中断。审计详情在这种状态下展示「中断理由」。 */

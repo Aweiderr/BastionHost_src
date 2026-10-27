@@ -24,7 +24,8 @@ const assetColumns = `asset_id, tenant_id, group_id, COALESCE(asset_code,''), as
 	asset_type, protocol, host, port, level, COALESCE(os_type,''), COALESCE(tags,'[]'::jsonb),
 	gateway_id, status, reachable, last_check_time, COALESCE(last_check_msg,''),
 	COALESCE(remark,''), create_time, update_time,
-	COALESCE(ssh_host_key_fp,''), COALESCE(ssh_host_key_policy,'tofu')`
+	COALESCE(ssh_host_key_fp,''), COALESCE(ssh_host_key_policy,'tofu'),
+	COALESCE(oracle_service_name,''), COALESCE(oracle_sid,'')`
 
 func scanAsset(row pgx.Row) (*model.Asset, error) {
 	var a model.Asset
@@ -33,7 +34,8 @@ func scanAsset(row pgx.Row) (*model.Asset, error) {
 		&a.AssetType, &a.Protocol, &a.Host, &a.Port, &a.Level, &a.OSType, &tagsRaw,
 		&a.GatewayID, &a.Status, &a.Reachable, &a.LastCheckTime, &a.LastCheckMsg,
 		&a.Remark, &a.CreateTime, &a.UpdateTime,
-		&a.SSHHostKeyFP, &a.SSHHostKeyPolicy)
+		&a.SSHHostKeyFP, &a.SSHHostKeyPolicy,
+		&a.OracleServiceName, &a.OracleSID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -54,13 +56,15 @@ func (r *AssetRepo) Create(ctx context.Context, a *model.Asset) error {
 	}
 	const q = `INSERT INTO ast_asset
 		(tenant_id, group_id, asset_code, asset_name, asset_type, protocol, host, port,
-		 level, os_type, tags, gateway_id, status, reachable, remark, create_by, update_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'unknown',$14,$15,$15)
+		 level, os_type, tags, gateway_id, status, reachable, remark,
+		 oracle_service_name, oracle_sid, create_by, update_by)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'unknown',$14,$15,$16,$17,$17)
 		RETURNING asset_id, create_time, update_time`
 	err := r.pool.QueryRow(ctx, q,
 		a.TenantID, a.GroupID, nullIfEmpty(a.AssetCode), a.AssetName, a.AssetType, a.Protocol,
 		a.Host, a.Port, a.Level, nullIfEmpty(a.OSType), tags, a.GatewayID,
-		a.Status, nullIfEmpty(a.Remark), nil,
+		a.Status, nullIfEmpty(a.Remark),
+		nullIfEmpty(a.OracleServiceName), nullIfEmpty(a.OracleSID), nil,
 	).Scan(&a.AssetID, &a.CreateTime, &a.UpdateTime)
 	if err != nil {
 		return fmt.Errorf("创建资产失败: %w", err)
@@ -91,15 +95,15 @@ func (r *AssetRepo) ExistsByName(ctx context.Context, tenantID int64, name strin
 
 // AssetFilter 是资产查询条件。
 type AssetFilter struct {
-	TenantID int64
-	GroupID  int64
-	Keyword  string // 匹配名称或地址
+	TenantID  int64
+	GroupID   int64
+	Keyword   string // 匹配名称或地址
 	AssetType string
-	Protocol string
-	Level    string
-	Status   string
-	Page     int
-	PageSize int
+	Protocol  string
+	Level     string
+	Status    string
+	Page      int
+	PageSize  int
 }
 
 // List 查询资产列表。
@@ -161,6 +165,7 @@ func (r *AssetRepo) List(ctx context.Context, f AssetFilter) ([]*model.Asset, in
 		a.asset_type, a.protocol, a.host, a.port, a.level, COALESCE(a.os_type,''), COALESCE(a.tags,'[]'::jsonb),
 		a.gateway_id, a.status, a.reachable, a.last_check_time, COALESCE(a.last_check_msg,''),
 		COALESCE(a.remark,''), a.create_time, a.update_time,
+		COALESCE(a.oracle_service_name,''), COALESCE(a.oracle_sid,''),
 		(SELECT count(*) FROM ast_account ac WHERE ac.asset_id = a.asset_id AND ac.status='active')
 		FROM ast_asset a` + where + fmt.Sprintf(` ORDER BY a.asset_id DESC LIMIT $%d OFFSET $%d`, idx, idx+1)
 	args = append(args, pageSize, offset)
@@ -178,7 +183,8 @@ func (r *AssetRepo) List(ctx context.Context, f AssetFilter) ([]*model.Asset, in
 		if err := rows.Scan(&a.AssetID, &a.TenantID, &a.GroupID, &a.AssetCode, &a.AssetName,
 			&a.AssetType, &a.Protocol, &a.Host, &a.Port, &a.Level, &a.OSType, &tagsRaw,
 			&a.GatewayID, &a.Status, &a.Reachable, &a.LastCheckTime, &a.LastCheckMsg,
-			&a.Remark, &a.CreateTime, &a.UpdateTime, &a.AccountCount); err != nil {
+			&a.Remark, &a.CreateTime, &a.UpdateTime,
+			&a.OracleServiceName, &a.OracleSID, &a.AccountCount); err != nil {
 			return nil, 0, err
 		}
 		if len(tagsRaw) > 0 {
@@ -198,12 +204,14 @@ func (r *AssetRepo) Update(ctx context.Context, a *model.Asset) error {
 	const q = `UPDATE ast_asset SET
 		group_id=$2, asset_code=$3, asset_name=$4, asset_type=$5, protocol=$6,
 		host=$7, port=$8, level=$9, os_type=$10, tags=$11, gateway_id=$12,
-		status=$13, remark=$14, update_time=now()
+		status=$13, remark=$14, oracle_service_name=$15, oracle_sid=$16,
+		update_time=now()
 		WHERE asset_id=$1`
 	ct, err := r.pool.Exec(ctx, q,
 		a.AssetID, a.GroupID, nullIfEmpty(a.AssetCode), a.AssetName, a.AssetType, a.Protocol,
 		a.Host, a.Port, a.Level, nullIfEmpty(a.OSType), tags, a.GatewayID,
-		a.Status, nullIfEmpty(a.Remark))
+		a.Status, nullIfEmpty(a.Remark),
+		nullIfEmpty(a.OracleServiceName), nullIfEmpty(a.OracleSID))
 	if err != nil {
 		return fmt.Errorf("更新资产失败: %w", err)
 	}

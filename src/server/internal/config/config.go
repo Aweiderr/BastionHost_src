@@ -74,20 +74,23 @@ type ProxyConfig struct {
 	VNCListen string
 	// OracleListen Oracle SQL 通道入口
 	OracleListen string
-	// RDPEnable / VNCEnable / OracleEnable 默认 false，显式开启骨架监听
-	RDPEnable bool
-	VNCEnable bool
+	// OracleAdvertise 是监听重定向时告诉客户端回连的地址（只写主机名或 IP）。
+	// 监听在 0.0.0.0 上时本地地址不能用，不填就会拒绝把客户端直接导向数据库。
+	OracleAdvertise string
+	// RDPEnable / VNCEnable 默认 false。OracleEnable 默认 false，开启后才是真正的网关。
+	RDPEnable    bool
+	VNCEnable    bool
 	OracleEnable bool
 	// 会话上限与超时
 	MaxSessionsPerNode int
 	// IdleTimeout 是运维会话无用户输入时的空闲上限（BASTION_IDLE_TIMEOUT，默认 30m）。
-	// <=0 关闭空闲断开。到点后掐断 SSH / WebSSH 连接，会话记为 timeout，
-	// 结束原因同为 timeout。RDP/VNC/Oracle 仍是未接入 ops_session 的骨架，不在此列。
+	// <=0 关闭空闲断开。到点后掐断 SSH / WebSSH / Oracle 连接，会话记为 timeout，
+	// 结束原因同为 timeout。RDP/VNC 仍是未接入 ops_session 的骨架，不在此列。
 	//
 	// 这是生效配置。sys_config 的 security.session.idle_minutes（种子值 30）
 	// 只在系统配置页展示，代理不读取。两边默认都是 30 分钟；要改行为请改本环境变量。
-	IdleTimeout        time.Duration
-	ConnectTimeout     time.Duration
+	IdleTimeout    time.Duration
+	ConnectTimeout time.Duration
 	// 命令审计缓冲区大小（行）
 	CommandBufSize int
 	// WebSSHOrigins 允许的浏览器 Origin 白名单（逗号分隔环境变量）。
@@ -166,19 +169,20 @@ func Load() (*Config, error) {
 			MasterKeyFile: configx.Str("BASTION_MASTER_KEY_FILE", "./data/server-master.key"),
 		},
 		Proxy: ProxyConfig{
-			SSHListen:          configx.Str("BASTION_SSH_LISTEN", ":2222"),
-			HostKeyFile:        configx.Str("BASTION_SSH_HOST_KEY", "./data/ssh_host_ed25519_key"),
-			RDPListen:          configx.Str("BASTION_RDP_LISTEN", ":3389"),
-			VNCListen:          configx.Str("BASTION_VNC_LISTEN", ":5900"),
-			OracleListen:       configx.Str("BASTION_ORACLE_LISTEN", ":1521"),
-			RDPEnable:          configx.Bool("BASTION_RDP_ENABLE", false),
-			VNCEnable:          configx.Bool("BASTION_VNC_ENABLE", false),
-			OracleEnable:       configx.Bool("BASTION_ORACLE_ENABLE", false),
-			MaxSessionsPerNode: configx.Int("BASTION_MAX_SESSIONS", 300),
-			IdleTimeout:        configx.Duration("BASTION_IDLE_TIMEOUT", 30*time.Minute),
-			ConnectTimeout:     configx.Duration("BASTION_CONNECT_TIMEOUT", 10*time.Second),
-			CommandBufSize:     configx.Int("BASTION_CMD_BUF", 4096),
-			WebSSHOrigins:      configx.CSV("BASTION_WEBSSH_ORIGINS", nil),
+			SSHListen:            configx.Str("BASTION_SSH_LISTEN", ":2222"),
+			HostKeyFile:          configx.Str("BASTION_SSH_HOST_KEY", "./data/ssh_host_ed25519_key"),
+			RDPListen:            configx.Str("BASTION_RDP_LISTEN", ":3389"),
+			VNCListen:            configx.Str("BASTION_VNC_LISTEN", ":5900"),
+			OracleListen:         configx.Str("BASTION_ORACLE_LISTEN", ":1521"),
+			OracleAdvertise:      configx.Str("BASTION_ORACLE_ADVERTISE", ""),
+			RDPEnable:            configx.Bool("BASTION_RDP_ENABLE", false),
+			VNCEnable:            configx.Bool("BASTION_VNC_ENABLE", false),
+			OracleEnable:         configx.Bool("BASTION_ORACLE_ENABLE", false),
+			MaxSessionsPerNode:   configx.Int("BASTION_MAX_SESSIONS", 300),
+			IdleTimeout:          configx.Duration("BASTION_IDLE_TIMEOUT", 30*time.Minute),
+			ConnectTimeout:       configx.Duration("BASTION_CONNECT_TIMEOUT", 10*time.Second),
+			CommandBufSize:       configx.Int("BASTION_CMD_BUF", 4096),
+			WebSSHOrigins:        configx.CSV("BASTION_WEBSSH_ORIGINS", nil),
 			DefaultHostKeyPolicy: configx.Str("BASTION_HOSTKEY_POLICY", "tofu"),
 		},
 		Manager: ManagerConfig{

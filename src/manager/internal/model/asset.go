@@ -30,6 +30,12 @@ type Asset struct {
 	// SSHHostKeyPolicy 指纹策略：strict / tofu / insecure
 	SSHHostKeyPolicy string `json:"ssh_host_key_policy,omitempty"`
 
+	// OracleServiceName 是 Oracle 服务名（CONNECT_DATA 的 SERVICE_NAME）。
+	// 与 OracleSID 至少填一项；两者都有时网关优先用服务名。
+	OracleServiceName string `json:"oracle_service_name,omitempty"`
+	// OracleSID 是 Oracle 实例 SID。
+	OracleSID string `json:"oracle_sid,omitempty"`
+
 	// AccountCount 关联账号数（查询时填充，非数据库字段）
 	AccountCount int `json:"account_count,omitempty"`
 }

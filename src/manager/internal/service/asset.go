@@ -63,6 +63,10 @@ type CreateAssetRequest struct {
 	OSType    string   `json:"ostype"`
 	Tags      []string `json:"tags"`
 	Remark    string   `json:"remark"`
+	// OracleServiceName / OracleSID 用指针区分「没传」和「传了空串」。
+	// 更新时没传表示不动原值；传空串表示清空。创建时两者等价于空。
+	OracleServiceName *string `json:"oracle_service_name"`
+	OracleSID         *string `json:"oracle_sid"`
 }
 
 // CreateAsset 创建资产。
@@ -88,6 +92,12 @@ func (s *AssetService) CreateAsset(ctx context.Context, req CreateAssetRequest, 
 	if req.Port == 0 {
 		return nil, fmt.Errorf("协议 %s 未指定端口且无默认值", req.Protocol)
 	}
+	serviceName, sid := oracleFieldsOf(req)
+	if !strings.EqualFold(req.Protocol, "oracle") {
+		serviceName, sid = "", ""
+	} else if err := validateOracleIdentity(serviceName, sid); err != nil {
+		return nil, err
+	}
 
 	exists, err := s.assetRepo.ExistsByName(ctx, 0, req.AssetName, 0)
 	if err != nil {
@@ -98,19 +108,21 @@ func (s *AssetService) CreateAsset(ctx context.Context, req CreateAssetRequest, 
 	}
 
 	a := &model.Asset{
-		TenantID:  0,
-		GroupID:   req.GroupID,
-		AssetCode: req.AssetCode,
-		AssetName: req.AssetName,
-		AssetType: req.AssetType,
-		Protocol:  req.Protocol,
-		Host:      req.Host,
-		Port:      req.Port,
-		Level:     req.Level,
-		OSType:    req.OSType,
-		Tags:      req.Tags,
-		Status:    "active",
-		Remark:    req.Remark,
+		TenantID:          0,
+		GroupID:           req.GroupID,
+		AssetCode:         req.AssetCode,
+		AssetName:         req.AssetName,
+		AssetType:         req.AssetType,
+		Protocol:          req.Protocol,
+		Host:              req.Host,
+		Port:              req.Port,
+		Level:             req.Level,
+		OSType:            req.OSType,
+		Tags:              req.Tags,
+		Status:            "active",
+		Remark:            req.Remark,
+		OracleServiceName: serviceName,
+		OracleSID:         sid,
 	}
 	if err := s.assetRepo.Create(ctx, a); err != nil {
 		s.writeLog(ctx, op, "asset", "create", "asset", "", req.AssetName, "", "", err)
@@ -178,6 +190,22 @@ func (s *AssetService) UpdateAsset(ctx context.Context, assetID int64, req Creat
 	}
 	if req.Remark != "" {
 		old.Remark = req.Remark
+	}
+	if req.OracleServiceName != nil {
+		old.OracleServiceName = strings.TrimSpace(*req.OracleServiceName)
+	}
+	if req.OracleSID != nil {
+		old.OracleSID = strings.TrimSpace(*req.OracleSID)
+	}
+	// 切走 Oracle 时清掉连接标识，避免残留被网关误当成实例名。
+	if req.Protocol != "" && !strings.EqualFold(old.Protocol, "oracle") {
+		old.OracleServiceName = ""
+		old.OracleSID = ""
+	}
+	if strings.EqualFold(old.Protocol, "oracle") {
+		if err := validateOracleIdentity(old.OracleServiceName, old.OracleSID); err != nil {
+			return nil, err
+		}
 	}
 
 	before := toJSON(old)
@@ -264,22 +292,22 @@ func validateCredentialMode(mode, password, privateKey, sudoPassword string) err
 
 // CreateAccountRequest 是创建账号请求。
 type CreateAccountRequest struct {
-	AccountName  string `json:"account_name"`
-	AccountType  string `json:"account_type"`
+	AccountName string `json:"account_name"`
+	AccountType string `json:"account_type"`
 	// CredentialMode 凭据模式：managed（默认，堡垒机托管）/ manual（不托管，运维时手动输入）
 	//
 	// manual 模式下 Password / PrivateKey / SudoPassword 必须为空 ——
 	// 不是"忽略"，而是明确报错：如果调用方以为传了口令却没被保存，
 	// 后续连接会一直失败且难以定位。
 	CredentialMode string `json:"credential_mode"`
-	Password     string `json:"password"`
-	PrivateKey   string `json:"private_key"`
-	SSHPubKey    string `json:"ssh_pub_key"`
-	SudoPassword string `json:"sudo_password"`
-	Privileged   bool   `json:"privileged"`
-	PrivilegeMode string `json:"privilege_mode"`
-	RotateDays   int    `json:"rotate_days"`
-	Remark       string `json:"remark"`
+	Password       string `json:"password"`
+	PrivateKey     string `json:"private_key"`
+	SSHPubKey      string `json:"ssh_pub_key"`
+	SudoPassword   string `json:"sudo_password"`
+	Privileged     bool   `json:"privileged"`
+	PrivilegeMode  string `json:"privilege_mode"`
+	RotateDays     int    `json:"rotate_days"`
+	Remark         string `json:"remark"`
 }
 
 // CreateAccount 创建托管账号（口令加密存储）。
@@ -584,6 +612,63 @@ func sanitizeAccount(a *model.Account) map[string]any {
 		"status":       a.Status,
 		"has_password": a.PasswordCipher != "",
 	}
+}
+
+// oracleFieldsOf 取出请求里的服务名与 SID（未传视为空）。
+func oracleFieldsOf(req CreateAssetRequest) (serviceName, sid string) {
+	if req.OracleServiceName != nil {
+		serviceName = strings.TrimSpace(*req.OracleServiceName)
+	}
+	if req.OracleSID != nil {
+		sid = strings.TrimSpace(*req.OracleSID)
+	}
+	return serviceName, sid
+}
+
+// validateOracleIdentity 校验 Oracle 连接标识。
+//
+// 服务名与 SID 至少填一项。字符集收紧到描述符里不会被当成语法的范围，
+// 避免资产台账里的值拼进 CONNECT_DATA 时把括号吃掉。
+func validateOracleIdentity(serviceName, sid string) error {
+	if serviceName == "" && sid == "" {
+		return fmt.Errorf("Oracle 资产必须填写服务名或 SID")
+	}
+	if serviceName != "" {
+		if err := validateOracleToken("服务名", serviceName, 128, true); err != nil {
+			return err
+		}
+	}
+	if sid != "" {
+		if err := validateOracleToken("SID", sid, 64, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateOracleToken(label, value string, max int, allowDot bool) error {
+	if len(value) > max {
+		return fmt.Errorf("%s长度不能超过 %d", label, max)
+	}
+	for i, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9', r == '_', r == '$', r == '#':
+			if i == 0 {
+				return fmt.Errorf("%s必须以字母开头", label)
+			}
+		case r == '.' && allowDot:
+			if i == 0 {
+				return fmt.Errorf("%s必须以字母开头", label)
+			}
+		default:
+			return fmt.Errorf("%s含有非法字符", label)
+		}
+	}
+	if value == "" {
+		return fmt.Errorf("%s不能为空", label)
+	}
+	return nil
 }
 
 // toJSON 序列化为 JSON 字符串（失败时返回空串）。

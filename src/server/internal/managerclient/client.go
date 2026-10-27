@@ -183,20 +183,22 @@ type AccountBrief struct {
 
 // AssetBrief 是可运维资产。
 type AssetBrief struct {
-	AssetID     int64          `json:"asset_id"`
-	AssetName   string         `json:"asset_name"`
-	Host        string         `json:"host"`
-	Port        int            `json:"port"`
-	Protocol    string         `json:"protocol"`
-	Level       string         `json:"level"`
-	OSType      string         `json:"os_type"`
-	Remark      string         `json:"remark"`
-	Accounts    []AccountBrief `json:"accounts"`
-	GrantID     int64          `json:"grant_id"`
-	GrantSource string         `json:"grant_source"`
-	TicketID    *int64         `json:"ticket_id"`
-	ValidTo     *time.Time     `json:"valid_to"`
-	CanFile     bool           `json:"can_file"`
+	AssetID           int64          `json:"asset_id"`
+	AssetName         string         `json:"asset_name"`
+	Host              string         `json:"host"`
+	Port              int            `json:"port"`
+	Protocol          string         `json:"protocol"`
+	Level             string         `json:"level"`
+	OSType            string         `json:"os_type"`
+	Remark            string         `json:"remark"`
+	OracleServiceName string         `json:"oracle_service_name,omitempty"`
+	OracleSID         string         `json:"oracle_sid,omitempty"`
+	Accounts          []AccountBrief `json:"accounts"`
+	GrantID           int64          `json:"grant_id"`
+	GrantSource       string         `json:"grant_source"`
+	TicketID          *int64         `json:"ticket_id"`
+	ValidTo           *time.Time     `json:"valid_to"`
+	CanFile           bool           `json:"can_file"`
 }
 
 // GrantCheck 是授权校验结果。
@@ -227,19 +229,21 @@ type Credential struct {
 	CredentialMode string `json:"credential_mode"`
 	// RequiresUserInput 为 true 表示凭据不由堡垒机托管，需向运维人员索取；
 	// 此时 Password / PrivateKey 必为空，用过即弃。
-	RequiresUserInput bool   `json:"requires_user_input"`
-	Password      string `json:"password"`
-	PrivateKey    string `json:"private_key"`
-	SudoPassword  string `json:"sudo_password"`
-	PrivilegeMode string `json:"privilege_mode"`
-	GrantID       int64  `json:"grant_id"`
-	GrantSource   string `json:"grant_source"`
-	TicketID      *int64 `json:"ticket_id"`
-	CanFile       bool   `json:"can_file"`
-	CanCopy       bool   `json:"can_copy"`
-	CanPaste      bool   `json:"can_paste"`
+	RequiresUserInput  bool   `json:"requires_user_input"`
+	Password           string `json:"password"`
+	PrivateKey         string `json:"private_key"`
+	SudoPassword       string `json:"sudo_password"`
+	PrivilegeMode      string `json:"privilege_mode"`
+	GrantID            int64  `json:"grant_id"`
+	GrantSource        string `json:"grant_source"`
+	TicketID           *int64 `json:"ticket_id"`
+	CanFile            bool   `json:"can_file"`
+	CanCopy            bool   `json:"can_copy"`
+	CanPaste           bool   `json:"can_paste"`
 	HostKeyFingerprint string `json:"host_key_fingerprint,omitempty"`
 	HostKeyPolicy      string `json:"host_key_policy,omitempty"`
+	OracleServiceName  string `json:"oracle_service_name,omitempty"`
+	OracleSID          string `json:"oracle_sid,omitempty"`
 }
 
 // SessionInfo 是会话记录。
@@ -334,7 +338,6 @@ func (c *Client) LearnHostKey(ctx context.Context, assetID int64, fingerprint, p
 	}, nil)
 }
 
-
 func (c *Client) CommandPolicies(ctx context.Context) ([]*policy.Rule, error) {
 	var out struct {
 		Items []*policy.Rule `json:"items"`
@@ -350,15 +353,15 @@ func (c *Client) CommandPolicies(ctx context.Context) ([]*policy.Rule, error) {
 // 不含 node_id：身份由签名头（internalauth.HeaderNode）承载，
 // 请求体里的标识不可信 —— 签名覆盖了头部，没有覆盖请求体。
 type HeartbeatPayload struct {
-	NodeName       string   `json:"node_name"`
-	NodeRole       string   `json:"node_role"`
-	Address        string   `json:"address"`
-	Version        string   `json:"version"`
-	ActiveSessions int      `json:"active_sessions"`
-	MaxSessions    int      `json:"max_sessions"`
-	CPUPercent     float64  `json:"cpu_percent"`
-	MemPercent     float64  `json:"mem_percent"`
-	LastError      string   `json:"last_error,omitempty"`
+	NodeName       string  `json:"node_name"`
+	NodeRole       string  `json:"node_role"`
+	Address        string  `json:"address"`
+	Version        string  `json:"version"`
+	ActiveSessions int     `json:"active_sessions"`
+	MaxSessions    int     `json:"max_sessions"`
+	CPUPercent     float64 `json:"cpu_percent"`
+	MemPercent     float64 `json:"mem_percent"`
+	LastError      string  `json:"last_error,omitempty"`
 	// LiveSessionIDs 本节点在途运维会话（管理面 session_id）。
 	//
 	// 不要加 omitempty。空数组表示"节点在线且没有在途会话"；

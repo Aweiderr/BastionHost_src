@@ -259,7 +259,9 @@ async function doCancel(): Promise<void> {
   <div class="card mb-16">
     <div class="card-header">
       <span class="card-title">网络配置</span>
-      <button class="btn btn-sm" :disabled="loading" @click="load">刷新</button>
+      <div class="page-menu" role="toolbar" aria-label="网络配置">
+        <button class="btn" type="button" :disabled="loading" @click="load">刷新</button>
+      </div>
     </div>
 
     <!-- 待确认倒计时：必须置于最显眼位置 -->

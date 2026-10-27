@@ -7,6 +7,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { listOpsAssets, type OpsAsset } from '@/api/ops'
 import DataTable from '@/components/DataTable.vue'
+import SearchBar from '@/components/SearchBar.vue'
 import type { TableColumn } from '@/types/ui'
 import { PROTOCOL_MAP, dictLabel } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
@@ -88,27 +89,27 @@ onMounted(load)
           仅列出已授权给您的资产。可直连的点「连接」打开 Web 终端；需审批的请先提交工单。
         </div>
       </div>
-      <button class="btn" type="button" :disabled="loading" @click="load">
-        <span v-if="loading" class="spinner" />
-        刷新
-      </button>
-    </div>
-
-    <div class="card mb-16">
-      <div class="card-body tight flex-center gap-12">
-        <span class="text-secondary">筛选</span>
-        <input
-          v-model="keyword"
-          class="input"
-          style="width: 280px"
-          type="search"
-          placeholder="资产名 / IP / 账号"
-        />
-        <span class="text-muted">共 {{ filtered.length }} 条</span>
+      <div class="page-menu" role="toolbar" aria-label="我的资源">
+        <button class="btn" type="button" :disabled="loading" @click="load">
+          <span v-if="loading" class="spinner" />
+          刷新
+        </button>
       </div>
     </div>
 
+    <SearchBar>
+      <span class="text-secondary">筛选</span>
+      <input
+        v-model="keyword"
+        class="input wide"
+        type="search"
+        placeholder="资产名 / IP / 账号"
+      />
+      <span class="text-muted">共 {{ filtered.length }} 条</span>
+    </SearchBar>
+
     <DataTable
+      class="mt-16"
       :columns="columns"
       :loading="loading"
       :empty="!loading && filtered.length === 0"

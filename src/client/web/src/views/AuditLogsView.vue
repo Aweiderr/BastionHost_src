@@ -59,6 +59,11 @@ function resetQuery(): void {
   search()
 }
 
+/** 按当前筛选与页码重新拉取，不改查询条件 */
+function refresh(): void {
+  void load()
+}
+
 function onPageChange(next: number): void {
   page.value = next
   void load()
@@ -79,6 +84,9 @@ onMounted(load)
       <div>
         <div class="page-title">操作日志</div>
         <div class="page-subtitle">记录管理面的全部写操作，用于行为追溯与责任认定。</div>
+      </div>
+      <div class="page-menu" role="toolbar" aria-label="操作日志">
+        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
       </div>
     </div>
 

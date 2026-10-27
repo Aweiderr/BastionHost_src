@@ -610,11 +610,13 @@ async function submitDelete(): Promise<void> {
   <div class="card mb-16">
     <div class="card-header">
       <span class="card-title">高级网络配置</span>
-      <div class="btn-group">
-        <button class="btn btn-sm" :disabled="loading" @click="reload">
-          <span v-if="loading" class="spinner" />
-          {{ loading ? '读取中…' : '刷新' }}
-        </button>
+      <div class="page-menu" role="toolbar" aria-label="高级网络配置">
+        <button class="btn" type="button" :disabled="loading" @click="reload">刷新</button>
+        <template v-if="canWrite">
+          <button class="btn" type="button" @click="openCreate('vlan')">新建 VLAN 子接口</button>
+          <button class="btn" type="button" @click="openCreate('bridge')">新建网桥</button>
+          <button class="btn btn-primary" type="button" @click="openCreate('bond')">新建链路聚合</button>
+        </template>
       </div>
     </div>
 
@@ -659,13 +661,7 @@ async function submitDelete(): Promise<void> {
       </div>
     </div>
 
-    <!-- 创建入口 -->
-    <div class="card-body" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
-      <template v-if="canWrite">
-        <button class="btn btn-sm btn-primary" @click="openCreate('bond')">新建链路聚合</button>
-        <button class="btn btn-sm" @click="openCreate('vlan')">新建 VLAN 子接口</button>
-        <button class="btn btn-sm" @click="openCreate('bridge')">新建网桥</button>
-      </template>
+    <div class="card-body" style="padding-top: 12px; padding-bottom: 12px">
       <span class="text-secondary" style="font-size: 12px">
         <template v-if="canWrite">
           聚合做链路冗余，VLAN 在同一物理口上划分多个网段，网桥用于串联部署

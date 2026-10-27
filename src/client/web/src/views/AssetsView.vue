@@ -128,6 +128,11 @@ function resetQuery(): void {
   search()
 }
 
+/** 按当前筛选与页码重新拉取资产和分组，不改查询条件 */
+function refresh(): void {
+  void Promise.all([loadGroups(), loadAssets()])
+}
+
 /* --------------------------------------------------------------- 分组树 */
 
 const groups = ref<AssetGroup[]>([])
@@ -542,13 +547,17 @@ onMounted(async () => {
         <div class="page-title">资产管理</div>
         <div class="page-subtitle">维护纳管主机、网络设备与其登录账号，账号凭据加密存储。</div>
       </div>
+      <div class="page-menu" role="toolbar" aria-label="资产管理">
+        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
+        <button v-if="canCreate" class="btn" type="button" @click="openGroupDialog()">新建分组</button>
+        <button v-if="canCreate" class="btn btn-primary" type="button" @click="openAssetDialog()">新建资产</button>
+      </div>
     </div>
 
     <div class="asset-layout">
       <div class="card asset-side">
         <div class="card-header">
           <span class="card-title">资产分组</span>
-          <button v-if="canCreate" class="btn-link" @click="openGroupDialog()">新建</button>
         </div>
         <div class="card-body tight">
           <div class="tree-node" :class="{ active: selectedGroup === null }" @click="selectedGroup = null">
@@ -589,11 +598,8 @@ onMounted(async () => {
               {{ item.label }}
             </option>
           </select>
-          <button class="btn btn-primary" @click="search">查询</button>
-          <button class="btn" @click="resetQuery">重置</button>
-          <template #actions>
-            <button v-if="canCreate" class="btn btn-primary" @click="openAssetDialog()">新建资产</button>
-          </template>
+          <button class="btn btn-primary" type="button" @click="search">查询</button>
+          <button class="btn" type="button" @click="resetQuery">重置</button>
         </SearchBar>
 
         <div class="mt-16">
@@ -741,9 +747,9 @@ onMounted(async () => {
         <div class="text-secondary">
           资产地址：<span class="text-mono">{{ currentAsset?.host }}:{{ currentAsset?.port }}</span>
         </div>
-        <button v-if="canManageAccount" class="btn btn-primary btn-sm" @click="openAccountDialog()">
-          新建账号
-        </button>
+        <div v-if="canManageAccount" class="page-menu" role="toolbar" aria-label="账号管理">
+          <button class="btn btn-primary" type="button" @click="openAccountDialog()">新建账号</button>
+        </div>
       </div>
 
       <DataTable

@@ -782,14 +782,6 @@ async function openPermissions(): Promise<void> {
 </template>
 
 <style scoped>
-.page-menu {
-  display: inline-flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
 .expire-days-input {
   max-width: 220px;
 }

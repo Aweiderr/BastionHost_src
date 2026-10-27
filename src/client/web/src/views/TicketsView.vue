@@ -128,6 +128,20 @@ function switchTab(next: TabKey): void {
   }
 }
 
+/** 按当前页签重新拉取，不改筛选条件 */
+function refresh(): void {
+  void loadStats()
+  if (tab.value === 'grants') {
+    void loadGrants()
+    return
+  }
+  if (tab.value === 'apply') {
+    void prepareApplyForm()
+    return
+  }
+  void loadTickets()
+}
+
 /* --------------------------------------------------------------- 我的授权 */
 
 const grants = ref<Grant[]>([])
@@ -429,7 +443,17 @@ onMounted(async () => {
         <div class="page-title">工单与授权</div>
         <div class="page-subtitle">运维访问需先申请、后审批、再授权，紧急放行将标记为待补单。</div>
       </div>
-      <button v-if="canApply" class="btn btn-primary" @click="switchTab('apply')">申请工单</button>
+      <div class="page-menu" role="toolbar" aria-label="工单与授权">
+        <button
+          class="btn"
+          type="button"
+          :disabled="ticketLoading || grantsLoading"
+          @click="refresh"
+        >
+          刷新
+        </button>
+        <button v-if="canApply" class="btn btn-primary" type="button" @click="switchTab('apply')">申请工单</button>
+      </div>
     </div>
 
     <!--

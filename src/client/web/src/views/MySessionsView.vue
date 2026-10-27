@@ -4,6 +4,7 @@ import { listMySessions } from '@/api/audit'
 import type { AuditSession } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import Pagination from '@/components/Pagination.vue'
+import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import type { TableColumn } from '@/types/ui'
 import {
@@ -76,24 +77,25 @@ onMounted(load)
         <div class="page-title">我的会话</div>
         <div class="page-subtitle">您发起的全部运维会话记录，包含命令执行与阻断情况。</div>
       </div>
-      <button class="btn" :disabled="loading" @click="load">
-        <span v-if="loading" class="spinner" />
-        刷新
-      </button>
-    </div>
-
-    <div class="card mb-16">
-      <div class="card-body tight flex-center gap-12">
-        <span class="text-secondary">状态筛选</span>
-        <select v-model="statusFilter" class="select" style="width: 160px" @change="onStatusChange">
-          <option value="">全部</option>
-          <option v-for="(item, key) in SESSION_STATUS_MAP" :key="key" :value="key">{{ item.label }}</option>
-        </select>
-        <span class="text-muted">共 {{ filtered.length }} 条记录</span>
+      <div class="page-menu" role="toolbar" aria-label="我的会话">
+        <button class="btn" type="button" :disabled="loading" @click="load">
+          <span v-if="loading" class="spinner" />
+          刷新
+        </button>
       </div>
     </div>
 
+    <SearchBar>
+      <span class="text-secondary">状态筛选</span>
+      <select v-model="statusFilter" class="select" @change="onStatusChange">
+        <option value="">全部</option>
+        <option v-for="(item, key) in SESSION_STATUS_MAP" :key="key" :value="key">{{ item.label }}</option>
+      </select>
+      <span class="text-muted">共 {{ filtered.length }} 条记录</span>
+    </SearchBar>
+
     <DataTable
+      class="mt-16"
       :columns="columns"
       :loading="loading"
       :empty="!loading && pagedItems.length === 0"

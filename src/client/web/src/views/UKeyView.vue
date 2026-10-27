@@ -17,6 +17,7 @@ import { UKEY_CHAIN_PERMISSION, getUKeyCA, importExternalCA, listUKeyCerts } fro
 import type { UKeyCAStatus, UKeyCertRecord } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import Modal from '@/components/Modal.vue'
+import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -419,8 +420,9 @@ const caChains = computed(() => {
           用户与证书的绑定关系在用户管理页的「证书链」入口维护。
         </div>
       </div>
-      <div class="btn-group">
-        <button class="btn" :disabled="caLoading || certLoading" @click="refreshAll">刷新</button>
+      <div class="page-menu" role="toolbar" aria-label="证书链管理">
+        <button class="btn" type="button" :disabled="caLoading || certLoading" @click="refreshAll">刷新</button>
+        <button v-if="canManage" class="btn btn-primary" type="button" @click="openImport">导入外部 CA</button>
       </div>
     </div>
 
@@ -528,22 +530,20 @@ const caChains = computed(() => {
         </div>
       </div>
 
-      <!-- 查询区 -->
-      <div class="flex-center gap-8 mb-12" style="flex-wrap: wrap">
+      <SearchBar>
         <input
           v-model.trim="keyword"
           class="input wide"
           placeholder="证书链名称 / 末级证书 DN"
           @keyup.enter="search"
         />
-        <button class="btn btn-primary" @click="search">查询</button>
-        <button class="btn" @click="resetQuery">重置</button>
+        <button class="btn btn-primary" type="button" @click="search">查询</button>
+        <button class="btn" type="button" @click="resetQuery">重置</button>
         <span class="text-muted">共 {{ filteredRows.length }} 条证书链</span>
-        <span style="flex: 1" />
-        <button class="btn btn-primary" @click="openImport">导入外部 CA</button>
-      </div>
+      </SearchBar>
 
       <DataTable
+        class="mt-16"
         :columns="columns"
         :loading="certLoading || caLoading"
         :empty="!certLoading && !caLoading && filteredRows.length === 0"

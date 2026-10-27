@@ -85,6 +85,18 @@ function search(): void {
   void load()
 }
 
+function resetQuery(): void {
+  keyword.value = ''
+  statusFilter.value = ''
+  sourceFilter.value = ''
+  search()
+}
+
+/** 按当前筛选与页码重新拉取，不改查询条件 */
+function refresh(): void {
+  void load()
+}
+
 function onPageChange(next: number): void {
   page.value = next
   void load()
@@ -383,11 +395,19 @@ onMounted(async () => {
 
 <template>
   <div>
-    <div class="page-title">访问授权</div>
-    <div class="text-secondary mb-12" style="font-size: 13px">
-      给运维人员绑定可访问的资产与账号（权限点 acl:grant:*；系统管理员与安全管理员均可配置）。
-      <b>绑定</b>回答"这个运维可以访问／申请哪些资源"，长期有效；勾选「访问时需要审批」后，
-      实际使用前仍需提交工单，审批通过产生的<b>通行证</b>有独立有效期、到期后绑定依然保留。
+    <div class="page-header">
+      <div>
+        <div class="page-title">访问授权</div>
+        <div class="page-subtitle">
+          给运维人员绑定可访问的资产与账号（权限点 acl:grant:*；系统管理员与安全管理员均可配置）。
+          <b>绑定</b>回答"这个运维可以访问／申请哪些资源"，长期有效；勾选「访问时需要审批」后，
+          实际使用前仍需提交工单，审批通过产生的<b>通行证</b>有独立有效期、到期后绑定依然保留。
+        </div>
+      </div>
+      <div class="page-menu" role="toolbar" aria-label="访问授权">
+        <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
+        <button v-if="canCreate" class="btn btn-primary" type="button" @click="openCreate">新建授权</button>
+      </div>
     </div>
 
     <SearchBar>
@@ -409,13 +429,12 @@ onMounted(async () => {
         <option value="ticket">工单审批</option>
       </select>
       <span class="text-muted">共 {{ total }} 条</span>
-      <template #actions>
-        <button class="btn" :disabled="loading" @click="search">查询</button>
-        <button v-if="canCreate" class="btn btn-primary" @click="openCreate">新建授权</button>
-      </template>
+      <button class="btn btn-primary" type="button" :disabled="loading" @click="search">查询</button>
+      <button class="btn" type="button" @click="resetQuery">重置</button>
     </SearchBar>
 
     <DataTable
+      class="mt-16"
       :columns="columns"
       :loading="loading"
       :empty="!loading && items.length === 0"

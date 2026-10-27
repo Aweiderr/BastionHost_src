@@ -276,6 +276,16 @@
   color: var(--color-text-secondary);
 }
 
+/* 页面菜单：一行里只放本页级操作（刷新、新建、少量说明入口）。
+   关键字和查询/重置留在筛选条，编辑/删除等留在表格每一行。 */
+.page-menu {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 /* ------------------------------------------------------------------ 表格 */
 
 .table-wrap {

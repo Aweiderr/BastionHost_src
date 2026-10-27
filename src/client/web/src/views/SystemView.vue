@@ -208,8 +208,21 @@ onMounted(async () => {
         <div class="page-title">系统信息</div>
         <!-- 原副标题只是把标题换个说法（"查看设备版本…"），页面本身会展示这些内容，无需预告 -->
       </div>
-      <div class="btn-group">
-        <button class="btn" :disabled="infoLoading" @click="loadInfo">刷新</button>
+      <div class="page-menu" role="toolbar" aria-label="系统信息">
+        <button class="btn" type="button" :disabled="infoLoading" @click="loadInfo">刷新</button>
+        <button
+          v-if="canReadConfig"
+          class="btn"
+          type="button"
+          :disabled="configLoading"
+          @click="loadConfig"
+        >
+          刷新配置
+        </button>
+        <button class="btn btn-primary" type="button" :disabled="selftestRunning" @click="executeSelftest">
+          <span v-if="selftestRunning" class="spinner light" />
+          {{ selftestRunning ? '自检中…' : '执行单次自检' }}
+        </button>
       </div>
     </div>
 
@@ -309,10 +322,6 @@ onMounted(async () => {
           <span v-if="selftestResult" class="text-secondary">
             耗时 {{ selftestResult.duration_ms }} ms
           </span>
-          <button class="btn btn-primary btn-sm" :disabled="selftestRunning" @click="executeSelftest">
-            <span v-if="selftestRunning" class="spinner light" />
-            {{ selftestRunning ? '自检中…' : '执行单次自检' }}
-          </button>
         </div>
       </div>
       <div class="card-body">
@@ -422,9 +431,6 @@ onMounted(async () => {
         <option v-for="item in categories" :key="item" :value="item">{{ item }}</option>
       </select>
       <span class="text-muted">共 {{ filteredConfig.length }} 项</span>
-      <template #actions>
-        <button class="btn" :disabled="configLoading" @click="loadConfig">刷新配置</button>
-      </template>
     </SearchBar>
 
     <div v-if="canReadConfig" class="mt-16">

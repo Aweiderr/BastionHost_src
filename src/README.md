@@ -859,6 +859,17 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 | `BASTION_IDLE_TIMEOUT` | 30m | SSH / WebSSH 运维会话空闲上限（无用户输入；`0` 关闭）。到点后掐断连接，会话状态与结束原因都记为 `timeout`（审计显示「超时结束」）。系统配置项 `security.session.idle_minutes` 只展示同一默认值（30 分钟），代理不读取 |
 | `BASTION_RECORD_DIR` | ./data/records | 录像存储目录 |
 | `BASTION_KEYSTORE_DIR` | ./data/keys | 密钥库目录 |
+| `BASTION_ALERT_WEBHOOK_URL` | （空） | 高危命令告警 Webhook。空则只落库 |
+
+### 高危命令告警通知
+
+策略阻断，或风险级别为 `danger` / `critical` 的命令，会写入 `audit_alert`（`alert_code=cmd_high_risk`）。审计管理员在「告警中心」确认、处理。
+
+是否外推由规则 `cmd_high_risk` 的 `notify_channels` 决定（迁移 `0035` 在种子值 `["db"]` 上追加 `webhook`，已改过的通道不动）：
+
+- `db`：只落库。
+- `webhook`：向 `BASTION_ALERT_WEBHOOK_URL` POST JSON。地址只从该环境变量读取，不写进 `notify_targets`，日志也不打印 URL。未配置、或地址不是 http/https 时告警仍在，通知状态为 `skipped` / `failed`，不影响命令入库。
+- 邮件、钉钉没有现成客户端，不内置 SDK。钉钉自定义机器人本身是 Webhook，把机器人地址配到上面的变量即可。
 
 ## 开发进度
 

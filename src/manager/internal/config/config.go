@@ -39,6 +39,20 @@ type Config struct {
 	// DownloadDir 客户端安装包目录，经 <前缀>/downloads/ 对外提供下载。
 	// 为空或目录不存在时不提供下载（登录页也应相应地不显示下载入口）。
 	DownloadDir string
+	// Alert 高危命令告警的外部通知。地址只来自环境变量，不入库。
+	Alert AlertConfig
+}
+
+// AlertConfig 是高危命令告警通知配置。
+//
+// WebhookURL 来自 BASTION_ALERT_WEBHOOK_URL。为空时，规则里的 webhook 通道
+// 记为 skipped：告警仍然落库，命令审计主路径不报错。
+//
+// 不读取 audit_alert_rule.notify_targets，避免把带令牌的地址写入数据库或日志。
+// 仓库里没有 SMTP / 钉钉客户端。钉钉自定义机器人本身是 Webhook，
+// 把机器人地址配到该变量即可，不要另接一套未接线的 SDK。
+type AlertConfig struct {
+	WebhookURL string
 }
 
 // DBConfig 是数据库配置。
@@ -188,6 +202,9 @@ func Load() (*Config, error) {
 		WebDir:        configx.Str("BASTION_WEB_DIR", "./client/web/dist"),
 		WebPrefix:     configx.Str("BASTION_WEB_PREFIX", "bastion"),
 		DownloadDir:   configx.Str("BASTION_DOWNLOAD_DIR", "./downloads"),
+		Alert: AlertConfig{
+			WebhookURL: configx.Str("BASTION_ALERT_WEBHOOK_URL", ""),
+		},
 	}
 
 	if cfg.Auth.JWTSecret == "" {

@@ -121,6 +121,13 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '操作日志', permission: ['audit:log:list'] },
       },
       {
+        path: 'audit/alerts',
+        name: 'audit-alerts',
+        component: () => import('@/views/AuditAlertsView.vue'),
+        // 与 GET/POST /api/v1/audit/alerts 相同：能看会话审计的角色就能处理告警。
+        meta: { title: '告警中心', permission: ['audit:session:list'] },
+      },
+      {
         path: 'policies',
         name: 'policies',
         component: () => import('@/views/PoliciesView.vue'),
@@ -227,6 +234,7 @@ export const ICONS = {
   list: 'M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01',
   command: 'M4 5h16v14H4zM8 9.5l2.5 2.5L8 14.5M12.5 15H16',
   file: 'M6 3h8l4 4v14H6zM14 3v4h4',
+  bell: 'M6 8.5a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9M9.5 20a2.5 2.5 0 0 0 5 0',
   shield: 'M12 3l7.5 3v6c0 4.4-3.1 8.2-7.5 9-4.4-.8-7.5-4.6-7.5-9V6z',
   ticket: 'M4 7h16v3.2a2 2 0 0 0 0 3.6V17H4v-3.2a2 2 0 0 0 0-3.6z',
   users: 'M15.5 20v-1.8a3.7 3.7 0 0 0-3.7-3.7H7.2A3.7 3.7 0 0 0 3.5 18.2V20M9.5 10.6a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6M20.5 20v-1.8a3.7 3.7 0 0 0-2.8-3.6M15.5 4.2a3.3 3.3 0 0 1 0 6.4',
@@ -311,6 +319,12 @@ export const MENU_GROUPS: MenuGroup[] = [
         permission: ['audit:command:list'],
       },
       { title: '操作日志', path: '/audit/logs', icon: ICONS.file, permission: ['audit:log:list'] },
+      {
+        title: '告警中心',
+        path: '/audit/alerts',
+        icon: ICONS.bell,
+        permission: ['audit:session:list'],
+      },
     ],
   },
   {

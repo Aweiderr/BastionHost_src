@@ -1,15 +1,16 @@
 package api
 
 import (
-	"bastion.local/manager/internal/service"
 	"fmt"
-	"strconv"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
+	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
+	"bastion.local/manager/internal/service"
 	"bastion.local/shared/httpx"
 )
 
@@ -17,6 +18,9 @@ import (
 //
 // 权限划分：审计类查询归审计管理员；"我的会话"登录即可，
 // 让运维人员能回看自己的操作记录，无需额外授权。
+//
+// 在线会话（进行中的 ops_session）单独走 ops:session:live，归安全管理员。
+// 不要把它挂到 audit:session:list 上，否则安全管理员会看到全部历史审计。
 func registerAuditRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("GET /api/v1/audit/sessions", s.requirePermission("audit:session:list", s.handleAuditSessions))
 	mux.HandleFunc("GET /api/v1/audit/sessions/stats", s.requirePermission("audit:session:list", s.handleAuditStats))
@@ -26,6 +30,8 @@ func registerAuditRoutes(mux *http.ServeMux, s *Server) {
 
 	// 运维人员：我的会话（只读自己的）
 	mux.HandleFunc("GET /api/v1/ops/sessions/my", s.requireAuth(s.handleMySessions))
+	// 安全管理员：当前进行中的运维会话（不含历史）
+	mux.HandleFunc("GET /api/v1/ops/sessions/live", s.requirePermission("ops:session:live", s.handleLiveSessions))
 	mux.HandleFunc("POST /api/v1/ops/sessions/{id}/kill", s.requirePermission("ops:session:kill", s.handleSessionKill))
 	mux.HandleFunc("POST /api/v1/audit/sessions/{id}/kill", s.requirePermission("ops:session:kill", s.handleSessionKill))
 	// 运维人员：我可运维的资产（带授权与可用账号）
@@ -122,7 +128,7 @@ func (s *Server) handleAuditSessionDetail(w http.ResponseWriter, r *http.Request
 		return
 	}
 	rec := map[string]any{
-		"session": sess,
+		"session":  sess,
 		"commands": sess.Commands,
 	}
 	// 录像回放地址：录像文件在代理节点本地，由服务端提供解密流。
@@ -233,6 +239,45 @@ func (s *Server) handleAuditOperationLogs(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// liveSessionFilter 构造「在线会话」查询。
+//
+// 状态固定为 active，调用方传入的 status 一律忽略。
+// 历史会话属于审计（audit:session:list），不从这条接口漏出去。
+func liveSessionFilter(tenantID int64, keyword string, page, pageSize int) repo.SessionFilter {
+	return repo.SessionFilter{
+		TenantID: tenantID,
+		Keyword:  keyword,
+		Status:   model.SessionStatusActive,
+		Page:     page,
+		PageSize: pageSize,
+	}
+}
+
+// handleLiveSessions 列出进行中的运维会话。
+//
+// 供安全管理员的「在线会话」页使用。数据来自 ops_session，不是审计归档表。
+func (s *Server) handleLiveSessions(w http.ResponseWriter, r *http.Request) {
+	if s.sessRepo == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	// 不读取 status：查询参数不能把列表放宽到已结束会话。
+	f := liveSessionFilter(
+		claimsFrom(r).TenantID,
+		r.URL.Query().Get("keyword"),
+		queryInt(r, "page", 1),
+		queryInt(r, "page_size", 20),
+	)
+	list, total, err := s.sessRepo.List(r.Context(), f)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	httpx.OK(w, map[string]any{
+		"items": list, "total": total, "page": f.Page, "page_size": f.PageSize,
+	})
+}
+
 // handleSessionKill 管理员强制中断进行中的运维会话。
 func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -257,4 +302,3 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.OK(w, res)
 }
-

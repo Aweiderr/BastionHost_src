@@ -883,7 +883,7 @@ export BASTION_ORACLE_ENABLE=true
 export BASTION_ORACLE_LISTEN=:1521
 ```
 
-客户端把堡垒机当监听。连接描述符里写 `SERVICE_NAME=运维用户@资产[#账号]`，并用 `BASTION_PASSWORD` 带堡垒机口令（末尾 `:六位数字` 是动态令牌，规则与 SSH 相同）。网关校验授权后，把主机、端口和服务名/SID 改成资产台账上的值再转发。语句按尽力识别写入 `ops_session_command`；`deny` 和无法交互的 `confirm` 会断开连接。出厂另有三条只作用于 Oracle 的规则：删除对象和 `TRUNCATE TABLE` 阻断，账号与授权变更记审计。
+客户端把堡垒机当监听。连接描述符里写 `SERVICE_NAME=运维用户@资产[#账号]`，并用 `BASTION_PASSWORD` 带堡垒机口令（末尾 `:六位数字` 是动态令牌，规则与 SSH 相同）。网关校验授权后写入 `ops_session`（谁、资产、客户端 IP、开始时间），把主机、端口和服务名/SID 改成资产台账上的值再转发。拨号或握手失败时结束原因是 `connect_failed`；连上之后按断开原因结束。语句按尽力识别写入 `ops_session_command`；`deny` 和无法交互的 `confirm` 会断开连接。出厂另有三条只作用于 Oracle 的规则：删除对象和 `TRUNCATE TABLE` 阻断，账号与授权变更记审计。完整的 TTC 语句解析仍不是本版本的范围。
 
 库口令仍由 SQL 客户端向 Oracle 提交。11g 以后的登录包不是明文，本版本不改写 O5LOGON/O7LOGON。细节和真机步骤见 `server/internal/proxy/PROTOCOL_SKELETON.md`。
 

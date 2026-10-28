@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+func TestOracleSessionEndMigration(t *testing.T) {
+	raw, err := FS.ReadFile("0037_oracle_session_end.sql")
+	if err != nil {
+		t.Fatalf("读取迁移失败: %v", err)
+	}
+	sql := stripSQLLineComments(string(raw))
+	if !strings.Contains(sql, "connect_failed") || !strings.Contains(sql, "ops_session.end_reason") {
+		t.Fatalf("迁移没有补上 connect_failed: %s", sql)
+	}
+}
+
 func TestOracleConnectMigration(t *testing.T) {
 	raw, err := FS.ReadFile("0036_oracle_connect.sql")
 	if err != nil {

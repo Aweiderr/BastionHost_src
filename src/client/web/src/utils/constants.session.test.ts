@@ -26,6 +26,7 @@ test('已知结束原因显示中文，未知编码仍然可读', () => {
   assert.equal(sessionEndReasonLabel('terminated', 'admin_kill'), '管理员强制中断')
   assert.equal(sessionEndReasonLabel('timeout', 'timeout'), '会话超时')
   assert.equal(sessionEndReasonLabel('closed', 'policy_deny'), '策略阻断')
+  assert.equal(sessionEndReasonLabel('closed', 'connect_failed'), '连接目标失败')
   assert.equal(sessionEndReasonLabel('timeout', ''), '会话超时')
   assert.equal(sessionEndReasonLabel('closed', ''), '—')
   assert.equal(sessionEndReasonLabel('closed', 'proxy_oom'), '未知结束原因（proxy_oom）')

@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/binary"
+	"io"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -127,6 +130,183 @@ func TestExtractSQLAndRedact(t *testing.T) {
 	}
 }
 
+func TestRewriteKeepsNulInConnectLength(t *testing.T) {
+	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=bastion)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ops01@fin-db#app)(BASTION_PASSWORD=OpsSecret)))`
+	out, err := rebuildConnect(buildTestConnect(desc+"\x00"), "10.1.1.9", 1522, "ORCLPDB", "ORCL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, end, ok := locateDescriptor(out)
+	if !ok {
+		t.Fatal("改写后找不到描述符")
+	}
+	if strings.Contains(got, "OpsSecret") || strings.Contains(strings.ToUpper(got), "BASTION_") {
+		t.Fatalf("口令仍在: %s", got)
+	}
+	if !strings.Contains(got, "(HOST=10.1.1.9)") || !strings.Contains(got, "(SERVICE_NAME=ORCLPDB)") || strings.Contains(got, "SID=") {
+		t.Fatalf("描述符未按资产改写: %s", got)
+	}
+	cdLen := int(binary.BigEndian.Uint16(out[24:26]))
+	if cdLen != len(got)+1 {
+		t.Fatalf("连接数据长度=%d，描述符=%d，NUL 没有留在长度里", cdLen, len(got))
+	}
+	if end >= len(out) || out[end] != 0 {
+		t.Fatal("描述符后的 NUL 被丢掉了")
+	}
+	if int(binary.BigEndian.Uint16(out[0:2])) != len(out) {
+		t.Fatalf("包长度字段=%d 实际=%d", int(binary.BigEndian.Uint16(out[0:2])), len(out))
+	}
+}
+
+func TestRewriteSplitConnectData(t *testing.T) {
+	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=bastion)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ops01@fin-db#app)(BASTION_PASSWORD=OpsSecret)(CID=(PROGRAM=sqlplus)(HOST=workstation)(USER=alice))))`
+	pkts, err := readClientConnect(bytes.NewReader(buildSplitConnect(desc)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkts) != 2 || packetType(pkts[0]) != tnsConnect || packetType(pkts[1]) != tnsData {
+		t.Fatalf("长连接数据应拆成 CONNECT+DATA，得到 %d 包", len(pkts))
+	}
+	out, err := rewriteConnectPackets(pkts, func(d string) (string, error) {
+		return rewriteConnectData(d, "10.1.1.9", 1522, "ORCLPDB", "")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("改写后包数=%d", len(out))
+	}
+	got, _, end, ok := locateDescriptor(out[1])
+	if !ok {
+		t.Fatal("DATA 包里没有描述符")
+	}
+	if strings.Contains(got, "OpsSecret") || strings.Contains(string(out[0]), "OpsSecret") {
+		t.Fatal("口令泄漏到上行包")
+	}
+	if !strings.Contains(got, "(HOST=10.1.1.9)") || !strings.Contains(got, "(PORT=1522)") || !strings.Contains(got, "SERVICE_NAME=ORCLPDB") {
+		t.Fatalf("DATA 描述符未改写: %s", got)
+	}
+	if !strings.Contains(got, "HOST=workstation") {
+		t.Fatalf("CID 里的客户端主机被改掉了: %s", got)
+	}
+	cdLen := int(binary.BigEndian.Uint16(out[0][24:26]))
+	if cdLen != len(got)+1 {
+		t.Fatalf("CONNECT 长度字段=%d 描述符=%d", cdLen, len(got))
+	}
+	if int(binary.BigEndian.Uint16(out[0][0:2])) != len(out[0]) || int(binary.BigEndian.Uint16(out[1][0:2])) != len(out[1]) {
+		t.Fatal("拆包后的包头长度不对")
+	}
+	if end >= len(out[1]) || out[1][end] != 0 {
+		t.Fatal("DATA 包里的 NUL 被丢掉了")
+	}
+	// 再按包头读一遍，确认两包边界没有粘在一起。
+	stream := append(append([]byte{}, out[0]...), out[1]...)
+	again, err := readClientConnect(bytes.NewReader(stream))
+	if err != nil || len(again) != 2 {
+		t.Fatalf("改写后的字节流无法再拆包: %v len=%d", err, len(again))
+	}
+}
+
+func TestRewriteSpacedDescriptorKeepsCIDHost(t *testing.T) {
+	desc := "(DESCRIPTION=\n  (CONNECT_DATA =\n    (SERVICE_NAME = ops01@fin-db#app)\n    (CID=(PROGRAM=sqlplus)(HOST=workstation)(USER=alice))\n    (BASTION_PASSWORD = OpsSecret))\n  (ADDRESS = (PROTOCOL = TCP)(HOST = bastion)(PORT = 1521)))"
+	user, asset, account, password, _, err := parseOracleLogin(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user != "ops01" || asset != "fin-db" || account != "app" || password != "OpsSecret" {
+		t.Fatalf("带空白的描述符没有解析出身份: %s %s %s", user, asset, account)
+	}
+	next, err := rewriteConnectData(desc, "10.1.1.9", 1522, "ORCLPDB", "ORCL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(next, "OpsSecret") || strings.Contains(strings.ToUpper(next), "BASTION_") {
+		t.Fatalf("口令仍在: %s", next)
+	}
+	if !strings.Contains(next, "(HOST=10.1.1.9)") || !strings.Contains(next, "(PORT=1522)") {
+		t.Fatalf("ADDRESS 未改写: %s", next)
+	}
+	if !strings.Contains(next, "HOST=workstation") || strings.Contains(next, "HOST=bastion") || strings.Contains(next, "HOST = bastion") {
+		t.Fatalf("改到了 CID 或留下了堡垒机地址: %s", next)
+	}
+	if !strings.Contains(next, "(SERVICE_NAME=ORCLPDB)") || strings.Contains(next, "SID=") {
+		t.Fatalf("应优先服务名: %s", next)
+	}
+}
+
+func TestRedirectLengthIncludesNul(t *testing.T) {
+	redir := `(ADDRESS=(PROTOCOL=TCP)(HOST=10.9.9.9)(PORT=15991))`
+	body := make([]byte, 2+len(redir)+1)
+	binary.BigEndian.PutUint16(body[0:2], uint16(len(redir)+1))
+	copy(body[2:], redir)
+	pkt := frameTNS(tnsRedirect, body)
+	next, err := rewriteEndpoint(redir, "127.0.0.1", 41000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := applyDescriptor(pkt, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, end, ok := locateDescriptor(out)
+	if !ok {
+		t.Fatal(err)
+	}
+	field := int(binary.BigEndian.Uint16(out[8:10]))
+	if field != len(got)+1 {
+		t.Fatalf("重定向长度=%d 描述符=%d", field, len(got))
+	}
+	if strings.Contains(got, "10.9.9.9") || !strings.Contains(got, "HOST=127.0.0.1") || !strings.Contains(got, "PORT=41000") {
+		t.Fatalf("回连地址不对: %s", got)
+	}
+	if end >= len(out) || out[end] != 0 {
+		t.Fatal("重定向 NUL 被丢掉了")
+	}
+}
+
+func TestLargeTNSLength(t *testing.T) {
+	total := 70000
+	hdr := make([]byte, 8)
+	binary.BigEndian.PutUint32(hdr[0:4], uint32(total))
+	hdr[4] = tnsData
+	r := io.MultiReader(bytes.NewReader(hdr), bytes.NewReader(make([]byte, total-8)))
+	got, err := readTNSPacket(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != total || packetType(got) != tnsData {
+		t.Fatalf("64KiB 以上的包被读坏: %d type=%d", len(got), packetType(got))
+	}
+
+	wide := 600000
+	hdr = make([]byte, 8)
+	binary.BigEndian.PutUint32(hdr[0:4], uint32(wide))
+	hdr[4] = tnsData
+	r = io.MultiReader(bytes.NewReader(hdr), bytes.NewReader(make([]byte, wide-8)))
+	got, err = readTNSPacketMode(r, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != wide {
+		t.Fatalf("大 SDU 包长度=%d 期望=%d", len(got), wide)
+	}
+}
+
+func TestDataDescriptorTrailer(t *testing.T) {
+	pkt := make([]byte, 16)
+	binary.BigEndian.PutUint16(pkt[0:2], 16)
+	pkt[4] = tnsDataDescriptor
+	binary.BigEndian.PutUint32(pkt[12:16], 4)
+	extra := []byte{9, 8, 7, 6}
+	got, err := readTNSPacket(io.MultiReader(bytes.NewReader(pkt), bytes.NewReader(extra)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 20 || !bytes.Equal(got[16:], extra) {
+		t.Fatalf("描述符尾随数据没跟上: %d %v", len(got), got)
+	}
+}
+
 func TestV315Length(t *testing.T) {
 	body := []byte{0, 0, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'}
 	total := 8 + len(body)
@@ -156,4 +336,20 @@ func buildTestConnect(desc string) []byte {
 	body[19] = byte(off)
 	copy(body[26:], desc)
 	return frameTNS(tnsConnect, body)
+}
+
+// buildSplitConnect 模拟 OCI 把描述符放到 CONNECT 后面的 DATA 包里，并带上 NUL。
+func buildSplitConnect(desc string) []byte {
+	body := make([]byte, 26)
+	body[0] = 0x01
+	body[1] = 0x3e
+	n := len(desc) + 1
+	body[16] = byte(n >> 8)
+	body[17] = byte(n)
+	body[18] = byte(34 >> 8)
+	body[19] = byte(34)
+	connect := frameTNS(tnsConnect, body)
+	payload := append([]byte{0, 0}, desc...)
+	payload = append(payload, 0)
+	return append(connect, frameTNS(tnsData, payload)...)
 }

@@ -48,6 +48,8 @@ const (
 	endClientDisconnect = "client_disconnect"
 	endRemoteClosed     = "remote_closed"
 	endGatewayShutdown  = "gateway_shutdown"
+	// endConnectFailed 是目标还没接通就结束。审计用来区分「连上过」和「拨号/握手失败」。
+	endConnectFailed = "connect_failed"
 	// endTimeout 是空闲超时。与 ops_session.status 用同一个编码，
 	// 审计结束原因字典也认 timeout，不再另造 idle_timeout。
 	endTimeout = "timeout"

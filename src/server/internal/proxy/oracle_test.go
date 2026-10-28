@@ -35,6 +35,7 @@ type fakeOracle struct {
 	cred     *managerclient.Credential
 	deny     bool
 	cmds     []managerclient.SessionCommandPayload
+	started  map[string]any
 	finished map[string]any
 	done     chan struct{}
 	dials    int
@@ -68,7 +69,10 @@ func (f *fakeOracle) FetchCredential(context.Context, int64, string, int64, int6
 	return f.cred, nil
 }
 
-func (f *fakeOracle) StartSession(context.Context, map[string]any) (*managerclient.SessionInfo, error) {
+func (f *fakeOracle) StartSession(_ context.Context, payload map[string]any) (*managerclient.SessionInfo, error) {
+	f.mu.Lock()
+	f.started = payload
+	f.mu.Unlock()
 	return &managerclient.SessionInfo{SessionID: 42, SessionNo: "S-42"}, nil
 }
 
@@ -314,6 +318,137 @@ func TestOracleTunnelRewritesAndAudits(t *testing.T) {
 	}
 	if fake.cmds[0].PolicyAction != policy.ActionAllow {
 		t.Fatalf("放行动作不对: %#v", fake.cmds[0])
+	}
+	if fake.started["username"] != "ops01" || fake.started["asset_id"] != int64(9) ||
+		fake.started["protocol"] != "oracle" || fake.started["client_ip"] != "127.0.0.1" ||
+		fake.started["client_type"] != "oracle_client" {
+		t.Fatalf("会话开始字段不对: %#v", fake.started)
+	}
+}
+
+func TestOracleForwardsSplitConnect(t *testing.T) {
+	fake := &fakeOracle{user: "ops01", pass: "right", assets: []*managerclient.AssetBrief{testAsset()}, cred: testCred(), done: make(chan struct{})}
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	seen := make(chan string, 1)
+	go func() {
+		c, err := upstream.Accept()
+		if err != nil {
+			seen <- err.Error()
+			return
+		}
+		defer c.Close()
+		pkts, err := readClientConnect(c)
+		if err != nil {
+			seen <- err.Error()
+			return
+		}
+		blob := string(pkts[0])
+		for _, p := range pkts[1:] {
+			blob += string(p)
+		}
+		if strings.Contains(blob, "right") || strings.Contains(blob, "OpsSecret") || strings.Contains(strings.ToUpper(blob), "BASTION_") {
+			seen <- "secret leaked"
+			return
+		}
+		desc, ok := firstDescriptor(pkts)
+		if !ok || !strings.Contains(desc, "SERVICE_NAME=ORCLPDB") || !strings.Contains(desc, "HOST=10.1.1.9") || !strings.Contains(desc, "HOST=workstation") {
+			seen <- "rewrite missing: " + desc
+			return
+		}
+		_, _ = c.Write(frameTNS(tnsAccept, []byte{0x01, 0x3f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}))
+		seen <- ""
+		_, _ = io.Copy(io.Discard, c)
+	}()
+	g := &OracleGateway{
+		Listen: "127.0.0.1:0", Enable: true, Control: fake, ConnectTimeout: 2 * time.Second,
+		Dial: func(_ context.Context, _, addr string) (net.Conn, error) {
+			if addr != "10.1.1.9:1522" {
+				return nil, io.ErrClosedPipe
+			}
+			return net.Dial("tcp", upstream.Addr().String())
+		},
+	}
+	addr := startGateway(t, g)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=bastion)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ops01@fin-db#app)(BASTION_PASSWORD=right)(CID=(PROGRAM=sqlplus)(HOST=workstation)(USER=alice))))`
+	if _, err := conn.Write(buildSplitConnect(desc)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	pkt, err := readTNSPacket(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packetType(pkt) != tnsAccept {
+		t.Fatalf("未收到 ACCEPT: %d %s", packetType(pkt), pkt)
+	}
+	if tnsHeaderVersion(pkt) < tnsVersionLargeSDU {
+		t.Fatal("测试 ACCEPT 应带上大 SDU 版本")
+	}
+	select {
+	case msg := <-seen:
+		if msg != "" {
+			t.Fatal(msg)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("上游没有收到拆开的连接包")
+	}
+	_ = conn.Close()
+	fin := fake.waitDone(t)
+	if fin["end_reason"] == endConnectFailed {
+		t.Fatalf("接通后不应记连接失败: %#v", fin)
+	}
+}
+
+func TestOracleDialFailureRecordsSession(t *testing.T) {
+	fake := &fakeOracle{user: "ops01", pass: "right", assets: []*managerclient.AssetBrief{testAsset()}, cred: testCred(), done: make(chan struct{})}
+	dials := 0
+	g := &OracleGateway{
+		Listen: "127.0.0.1:0", Enable: true, Control: fake, ConnectTimeout: 2 * time.Second,
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			dials++
+			return nil, io.ErrClosedPipe
+		},
+	}
+	addr := startGateway(t, g)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=bastion)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ops01@fin-db#app)(BASTION_PASSWORD=right)))`
+	if _, err := conn.Write(buildTestConnect(desc)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	pkt, err := readTNSPacket(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packetType(pkt) != tnsRefuse || !strings.Contains(string(pkt), "连接目标 Oracle 失败") {
+		t.Fatalf("应拒绝拨号失败: %s", pkt)
+	}
+	if dials != 1 {
+		t.Fatalf("拨号次数=%d", dials)
+	}
+	fin := fake.waitDone(t)
+	if fin["end_reason"] != endConnectFailed || fin["status"] != "closed" {
+		t.Fatalf("失败会话归档不对: %#v", fin)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.started["username"] != "ops01" || fake.started["asset_id"] != int64(9) ||
+		fake.started["user_id"] != int64(7) || fake.started["protocol"] != "oracle" ||
+		fake.started["client_ip"] != "127.0.0.1" {
+		t.Fatalf("失败会话开始字段不对: %#v", fake.started)
 	}
 }
 

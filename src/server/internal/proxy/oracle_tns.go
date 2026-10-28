@@ -20,21 +20,34 @@ const (
 	tnsData     = 6
 	tnsResend   = 11
 	tnsMarker   = 12
+	// tnsDataDescriptor 是 LOB/FILE 描述包。头里的长度不含紧随其后的数据。
+	tnsDataDescriptor = 15
 )
 
-const maxTNSPacket = 8 << 20
+const (
+	maxTNSPacket = 8 << 20
+	// tnsVersionLargeSDU 起，ACCEPT 之后的包用 4 字节长度。
+	// 这个数就是 ACCEPT 头里的协议版本（python-oracledb 的 TNS_VERSION_MIN_LARGE_SDU）。
+	tnsVersionLargeSDU = 315
+)
 
-// readTNSPacket 读一个 TNS 包。
-//
-// 传统包的长度是头两个字节（大端，含 8 字节头）。TNS 315 之后的 DATA
-// 包把这两个字节写成 0，真正的长度放在前四个字节。两种都要认，
-// 否则现代客户端的包会被当成空包。
+// readTNSPacket 读一个 TNS 包。握手阶段用它：2 字节长度，以及「前两字节为 0」的 4 字节长度。
 func readTNSPacket(r io.Reader) ([]byte, error) {
+	return readTNSPacketMode(r, false)
+}
+
+// readTNSPacketMode 读一个 TNS 包。
+//
+// largeSDU 为真时长度固定按前四个字节（大端）理解。这是协议版本 ≥ 315
+// 在 ACCEPT 之后的写法，包可以大于 65535。为假时仍认两种常见头：
+// 传统 2 字节长度，以及前两字节为 0、长度落在后两字节的 4 字节小包。
+// 2 字节长度小于 8 但 4 字节长度 ≥ 65536 时，也按大包读，避免 64KiB～512KiB 的包把流拆散。
+func readTNSPacketMode(r io.Reader, largeSDU bool) ([]byte, error) {
 	var hdr [8]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
-	total, fourByte, err := tnsPacketLength(hdr[:])
+	total, err := tnsPacketLength(hdr[:], largeSDU)
 	if err != nil {
 		return nil, err
 	}
@@ -43,25 +56,86 @@ func readTNSPacket(r io.Reader) ([]byte, error) {
 	if _, err := io.ReadFull(r, pkt[8:]); err != nil {
 		return nil, err
 	}
-	if fourByte && binary.BigEndian.Uint16(pkt[0:2]) != 0 {
-		return nil, errors.New("TNS 长度字段不一致")
+	extra := dataDescriptorTrailer(pkt)
+	if extra == 0 {
+		return pkt, nil
 	}
-	return pkt, nil
+	tail := make([]byte, extra)
+	if _, err := io.ReadFull(r, tail); err != nil {
+		return nil, err
+	}
+	return append(pkt, tail...), nil
 }
 
-func tnsPacketLength(hdr []byte) (total int, fourByte bool, err error) {
+func tnsPacketLength(hdr []byte, largeSDU bool) (int, error) {
+	if len(hdr) < 8 {
+		return 0, errors.New("TNS 头不完整")
+	}
 	n16 := int(binary.BigEndian.Uint16(hdr[0:2]))
-	if n16 == 0 {
-		n32 := int(binary.BigEndian.Uint32(hdr[0:4]))
-		if n32 < 8 || n32 > maxTNSPacket {
-			return 0, true, fmt.Errorf("TNS 包长度越界: %d", n32)
+	n32 := int(binary.BigEndian.Uint32(hdr[0:4]))
+	typ := hdr[4]
+	if largeSDU {
+		if !validTNSLength(n32) || !knownTNSType(typ) {
+			return 0, fmt.Errorf("TNS 包长度越界: %d", n32)
 		}
-		return n32, true, nil
+		return n32, nil
 	}
-	if n16 < 8 || n16 > maxTNSPacket {
-		return 0, false, fmt.Errorf("TNS 包长度越界: %d", n16)
+	if n16 == 0 {
+		if !validTNSLength(n32) || !knownTNSType(typ) {
+			return 0, fmt.Errorf("TNS 包长度越界: %d", n32)
+		}
+		return n32, nil
 	}
-	return n16, false, nil
+	if n16 < 8 {
+		if n32 >= 65536 && validTNSLength(n32) && knownTNSType(typ) {
+			return n32, nil
+		}
+		return 0, fmt.Errorf("TNS 包长度越界: %d", n16)
+	}
+	if n16 > maxTNSPacket {
+		return 0, fmt.Errorf("TNS 包长度越界: %d", n16)
+	}
+	return n16, nil
+}
+
+func validTNSLength(n int) bool {
+	return n >= 8 && n <= maxTNSPacket
+}
+
+func knownTNSType(t byte) bool {
+	switch t {
+	case tnsConnect, tnsAccept, 3, tnsRefuse, tnsRedirect, tnsData, 7, 9,
+		tnsResend, tnsMarker, 13, 14, tnsDataDescriptor:
+		return true
+	default:
+		return false
+	}
+}
+
+// dataDescriptorTrailer 返回紧跟在 Data Descriptor 包头长度之外的字节数。
+// 普通包返回 0。算错时宁可当普通包转发，也不要多读把后续包吃掉。
+func dataDescriptorTrailer(pkt []byte) int {
+	if packetType(pkt) != tnsDataDescriptor || len(pkt) < 16 {
+		return 0
+	}
+	n := int(binary.BigEndian.Uint32(pkt[12:16]))
+	if n <= 0 || n > maxTNSPacket {
+		return 0
+	}
+	return n
+}
+
+// tnsHeaderVersion 读取 CONNECT / ACCEPT 固定头里的协议版本。
+func tnsHeaderVersion(pkt []byte) int {
+	if len(pkt) < 10 {
+		return 0
+	}
+	switch packetType(pkt) {
+	case tnsConnect, tnsAccept:
+		return int(binary.BigEndian.Uint16(pkt[8:10]))
+	default:
+		return 0
+	}
 }
 
 func packetType(pkt []byte) byte {
@@ -113,26 +187,21 @@ func sanitizeRefuse(msg string) string {
 }
 
 // locateDescriptor 在包里找到第一段括号平衡的 DESCRIPTION 或 ADDRESS。
+//
+// 键名与等号之间允许空白。tnsnames 风格的描述符经常写成 `(DESCRIPTION =`，
+// 只认 `(DESCRIPTION=` 会把这种包当成没有描述符。
 func locateDescriptor(pkt []byte) (text string, start, end int, ok bool) {
 	s := string(pkt)
-	for _, marker := range []string{"(DESCRIPTION=", "(ADDRESS="} {
-		i := indexFold(s, marker)
+	for _, name := range []string{"DESCRIPTION", "ADDRESS"} {
+		i := findNamedParen(s, name)
 		if i < 0 {
 			continue
 		}
-		depth := 0
-		for j := i; j < len(s); j++ {
-			switch s[j] {
-			case '(':
-				depth++
-			case ')':
-				depth--
-				if depth == 0 {
-					return s[i : j+1], i, j + 1, true
-				}
-			}
+		end, balanced := balancedEnd(s, i)
+		if !balanced {
+			return s[i:], i, len(s), false
 		}
-		return s[i:], i, len(s), false
+		return s[i:end], i, end, true
 	}
 	return "", 0, 0, false
 }
@@ -208,8 +277,11 @@ func rewriteConnectData(desc, host string, port int, service, sid string) (strin
 	desc = removeParenKey(desc, "BASTION_USER")
 	desc = removeParenKey(desc, "BASTION_ASSET")
 	desc = removeParenKey(desc, "BASTION_ACCOUNT")
-	desc = putParenKey(desc, "HOST", oracleHostLiteral(host))
-	desc = putParenKey(desc, "PORT", strconv.Itoa(port))
+	var err error
+	desc, err = rewriteFirstAddress(desc, host, port)
+	if err != nil {
+		return "", err
+	}
 	switch {
 	case service != "":
 		desc = removeParenKey(desc, "SID")
@@ -236,9 +308,36 @@ func rewriteEndpoint(desc, host string, port int) (string, error) {
 	desc = removeParenKey(desc, "BASTION_USER")
 	desc = removeParenKey(desc, "BASTION_ASSET")
 	desc = removeParenKey(desc, "BASTION_ACCOUNT")
-	desc = putParenKey(desc, "HOST", oracleHostLiteral(host))
-	desc = putParenKey(desc, "PORT", strconv.Itoa(port))
-	return desc, nil
+	return rewriteFirstAddress(desc, host, port)
+}
+
+// rewriteFirstAddress 只改第一段 ADDRESS 里的 HOST/PORT。
+//
+// CID 里也有 HOST（客户端机器名）。整段描述符上替换第一个 HOST 会把
+// 工作站名字写成数据库地址，ADDRESS 却还指着堡垒机。
+func rewriteFirstAddress(desc, host string, port int) (string, error) {
+	host = oracleHostLiteral(host)
+	if !safeDescriptorToken(host) || port <= 0 || port > 65535 {
+		return "", errors.New("资产地址不能写入连接串")
+	}
+	pieceHost := "(HOST=" + host + ")"
+	piecePort := "(PORT=" + strconv.Itoa(port) + ")"
+	i := findNamedParen(desc, "ADDRESS")
+	if i < 0 {
+		piece := "(ADDRESS=(PROTOCOL=TCP)" + pieceHost + piecePort + ")"
+		if next, ok := insertAfterNamed(desc, "DESCRIPTION", piece); ok {
+			return next, nil
+		}
+		return desc + piece, nil
+	}
+	end, ok := balancedEnd(desc, i)
+	if !ok {
+		return "", errors.New("连接描述符不完整")
+	}
+	block := desc[i:end]
+	block = putParenKey(block, "HOST", host)
+	block = putParenKey(block, "PORT", strconv.Itoa(port))
+	return desc[:i] + block + desc[end:], nil
 }
 
 func validateRewriteTarget(host, service, sid string) error {
@@ -301,78 +400,153 @@ func putParenKey(desc, key, value string) string {
 }
 
 func hasParenKey(desc, key string) bool {
-	return indexFold(desc, "("+key+"=") >= 0
+	_, ok := findParenKey(desc, key)
+	return ok
 }
 
 func parenValue(desc, key string) (string, bool) {
-	token := "(" + key + "="
-	i := indexFold(desc, token)
-	if i < 0 {
+	sp, ok := findParenKey(desc, key)
+	if !ok {
 		return "", false
 	}
-	j := i + len(token)
-	k := j
-	for k < len(desc) && desc[k] != ')' && desc[k] != '(' {
-		k++
-	}
-	if k >= len(desc) || desc[k] != ')' {
-		return "", false
-	}
-	return desc[j:k], true
+	return strings.TrimSpace(desc[sp.valueStart:sp.valueEnd]), true
 }
 
 func replaceParenKey(desc, key, value string) string {
-	token := "(" + key + "="
-	i := indexFold(desc, token)
-	if i < 0 {
+	sp, ok := findParenKey(desc, key)
+	if !ok {
 		return desc
 	}
-	j := i + len(token)
-	for j < len(desc) && desc[j] != ')' {
-		j++
-	}
-	if j >= len(desc) {
-		return desc
-	}
-	return desc[:i] + "(" + key + "=" + value + ")" + desc[j+1:]
+	return desc[:sp.start] + "(" + key + "=" + value + ")" + desc[sp.valueEnd+1:]
 }
 
 func removeParenKey(desc, key string) string {
-	token := "(" + key + "="
 	for {
-		i := indexFold(desc, token)
-		if i < 0 {
+		sp, ok := findParenKey(desc, key)
+		if !ok {
 			return desc
 		}
-		j := i + len(token)
-		for j < len(desc) && desc[j] != ')' && desc[j] != '(' {
-			j++
-		}
-		if j >= len(desc) || desc[j] != ')' {
-			return desc
-		}
-		desc = desc[:i] + desc[j+1:]
+		desc = desc[:sp.start] + desc[sp.valueEnd+1:]
 	}
 }
 
 // insertParenKey 把键插进 CONNECT_DATA；没有这段时插进第一段 ADDRESS。
 func insertParenKey(desc, key, value string) string {
 	piece := "(" + key + "=" + value + ")"
-	if i := indexFold(desc, "(CONNECT_DATA="); i >= 0 {
-		at := i + len("(CONNECT_DATA=")
-		return desc[:at] + piece + desc[at:]
+	if next, ok := insertAfterNamed(desc, "CONNECT_DATA", piece); ok {
+		return next
 	}
 	if key == "HOST" || key == "PORT" {
-		if i := indexFold(desc, "(ADDRESS="); i >= 0 {
-			at := i + len("(ADDRESS=")
-			return desc[:at] + piece + desc[at:]
+		if next, ok := insertAfterNamed(desc, "ADDRESS", piece); ok {
+			return next
 		}
 	}
-	if i := indexFold(desc, "(DESCRIPTION="); i >= 0 {
-		at := i + len("(DESCRIPTION=")
-		return desc[:at] + "(CONNECT_DATA=" + piece + ")" + desc[at:]
+	if next, ok := insertAfterNamed(desc, "DESCRIPTION", "(CONNECT_DATA="+piece+")"); ok {
+		return next
 	}
 	return desc + piece
+}
+
+type parenSpan struct {
+	start      int
+	valueStart int
+	valueEnd   int
+}
+
+// findParenKey 定位 `(KEY = value)`。等号两侧的空白忽略，值本身停在下一个括号。
+// KEY 必须是完整键名：`(HOST` 不能命中 `(HOSTNAME`。
+func findParenKey(desc, key string) (parenSpan, bool) {
+	token := "(" + key
+	for i := 0; i+len(token) <= len(desc); i++ {
+		if !asciiEqualFold(desc[i:i+len(token)], token) {
+			continue
+		}
+		j := i + len(token)
+		if j < len(desc) && isKeyChar(desc[j]) {
+			continue
+		}
+		j = skipSpace(desc, j)
+		if j >= len(desc) || desc[j] != '=' {
+			continue
+		}
+		j = skipSpace(desc, j+1)
+		k := j
+		for k < len(desc) && desc[k] != ')' && desc[k] != '(' {
+			k++
+		}
+		if k >= len(desc) || desc[k] != ')' {
+			return parenSpan{}, false
+		}
+		return parenSpan{start: i, valueStart: j, valueEnd: k}, true
+	}
+	return parenSpan{}, false
+}
+
+// findNamedParen 找到 `(NAME` 后面跟可选空白和 `=` 的位置。NAME 同样要求完整。
+func findNamedParen(s, name string) int {
+	token := "(" + name
+	for i := 0; i+len(token) <= len(s); i++ {
+		if !asciiEqualFold(s[i:i+len(token)], token) {
+			continue
+		}
+		j := i + len(token)
+		if j < len(s) && isKeyChar(s[j]) {
+			continue
+		}
+		j = skipSpace(s, j)
+		if j < len(s) && s[j] == '=' {
+			return i
+		}
+	}
+	return -1
+}
+
+func insertAfterNamed(desc, name, piece string) (string, bool) {
+	i := findNamedParen(desc, name)
+	if i < 0 {
+		return desc, false
+	}
+	j := skipSpace(desc, i+1+len(name))
+	if j >= len(desc) || desc[j] != '=' {
+		return desc, false
+	}
+	j = skipSpace(desc, j+1)
+	return desc[:j] + piece + desc[j:], true
+}
+
+func balancedEnd(s string, start int) (int, bool) {
+	if start < 0 || start >= len(s) || s[start] != '(' {
+		return 0, false
+	}
+	depth := 0
+	for j := start; j < len(s); j++ {
+		switch s[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return j + 1, true
+			}
+		}
+	}
+	return len(s), false
+}
+
+func skipSpace(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func isKeyChar(b byte) bool {
+	return b == '_' || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 // indexFold 做 ASCII 大小写不敏感查找，下标按原字符串计。
@@ -436,21 +610,188 @@ func applyDescriptor(pkt []byte, next string) ([]byte, error) {
 		}
 		binary.BigEndian.PutUint16(out[0:2], uint16(len(out)))
 	}
-	fixDescriptorLength(out, start, oldLen, len(next))
+	if err := fixDescriptorLength(out, start, oldLen, len(next)); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-// fixDescriptorLength 同步 CONNECT 固定头和 REDIRECT 数据长度。
-// 描述符起点不变，只更新“原来记的是旧长度”的那个字段。
-func fixDescriptorLength(pkt []byte, start, oldLen, newLen int) {
-	if len(pkt) >= 28 {
-		if int(binary.BigEndian.Uint16(pkt[24:26])) == oldLen {
-			binary.BigEndian.PutUint16(pkt[24:26], uint16(newLen))
+// fixDescriptorLength 按改写前后的描述符长度差，修正 CONNECT / REDIRECT 的数据长度。
+//
+// 客户端几乎都会在描述符后加一个 NUL，长度字段比括号文本多 1。
+// 只有字段恰好等于旧文本长度才更新的话，监听读到的是被截断的新描述符，登录直接失败。
+// 描述符落在声明的数据窗口里（窗口可以比文本多出 NUL）时，按差值修正。
+// DATA 包没有这个字段，长度只改包头。
+func fixDescriptorLength(pkt []byte, start, oldLen, newLen int) error {
+	delta := newLen - oldLen
+	if delta == 0 || len(pkt) < 8 {
+		return nil
+	}
+	switch packetType(pkt) {
+	case tnsConnect:
+		if len(pkt) < 28 {
+			return errors.New("CONNECT 头不完整")
+		}
+		field := int(binary.BigEndian.Uint16(pkt[24:26]))
+		dataStart := int(binary.BigEndian.Uint16(pkt[26:28]))
+		if !descriptorInWindow(start, oldLen, dataStart, field) && field != oldLen {
+			return errors.New("连接数据长度与描述符不一致")
+		}
+		return bumpUint16(pkt, 24, delta)
+	case tnsRedirect:
+		if len(pkt) < 10 {
+			return errors.New("REDIRECT 头不完整")
+		}
+		field := int(binary.BigEndian.Uint16(pkt[8:10]))
+		if !descriptorInWindow(start, oldLen, 10, field) && field != oldLen {
+			return errors.New("重定向数据长度与描述符不一致")
+		}
+		return bumpUint16(pkt, 8, delta)
+	default:
+		return nil
+	}
+}
+
+func descriptorInWindow(start, oldLen, dataStart, field int) bool {
+	if field < 0 || dataStart < 0 {
+		return false
+	}
+	return start >= dataStart && start+oldLen <= dataStart+field
+}
+
+func bumpUint16(pkt []byte, at, delta int) error {
+	if at < 0 || at+2 > len(pkt) {
+		return errors.New("连接数据长度字段缺失")
+	}
+	n := int(binary.BigEndian.Uint16(pkt[at:at+2])) + delta
+	if n < 0 || n > 65535 {
+		return errors.New("改写后的连接数据过长")
+	}
+	binary.BigEndian.PutUint16(pkt[at:at+2], uint16(n))
+	return nil
+}
+
+// readClientConnect 读客户端的 CONNECT，以及描述符放不下时紧跟的 DATA 包。
+//
+// 连接数据长于大约 221 字节时，OCI / JDBC 不把它放进 CONNECT，
+// 而是让 CONNECT 的偏移指向包尾，下一包 DATA 才是描述符。
+// 把两包粘成一个再改长度，监听会按旧偏移去读 DATA 的包头。
+func readClientConnect(r io.Reader) ([][]byte, error) {
+	pkt, err := readTNSPacket(r)
+	if err != nil {
+		return nil, err
+	}
+	if packetType(pkt) != tnsConnect {
+		return nil, errors.New("不是 CONNECT")
+	}
+	if _, _, _, ok := locateDescriptor(pkt); ok {
+		return [][]byte{pkt}, nil
+	}
+	off, n, ok := connectDataInfo(pkt)
+	if !ok || n <= 0 || off < len(pkt) {
+		return nil, errors.New("连接描述符不完整")
+	}
+	next, err := readTNSPacket(r)
+	if err != nil {
+		return nil, err
+	}
+	if packetType(next) != tnsData {
+		return nil, errors.New("连接描述符不完整")
+	}
+	if _, _, _, ok := locateDescriptor(next); !ok {
+		return nil, errors.New("连接描述符不完整")
+	}
+	return [][]byte{pkt, next}, nil
+}
+
+func connectDataInfo(pkt []byte) (offset, length int, ok bool) {
+	if len(pkt) < 28 || packetType(pkt) != tnsConnect {
+		return 0, 0, false
+	}
+	length = int(binary.BigEndian.Uint16(pkt[24:26]))
+	offset = int(binary.BigEndian.Uint16(pkt[26:28]))
+	if length <= 0 || offset < 0 {
+		return 0, 0, false
+	}
+	return offset, length, true
+}
+
+func firstDescriptor(pkts [][]byte) (string, bool) {
+	for _, pkt := range pkts {
+		desc, _, _, ok := locateDescriptor(pkt)
+		if ok {
+			return desc, true
 		}
 	}
-	if start == 10 && len(pkt) >= 10 && int(binary.BigEndian.Uint16(pkt[8:10])) == oldLen {
-		binary.BigEndian.PutUint16(pkt[8:10], uint16(newLen))
+	return "", false
+}
+
+// rewriteConnectPackets 改写描述符所在的包，并在描述符位于后续 DATA 包时同步 CONNECT 的长度字段。
+func rewriteConnectPackets(pkts [][]byte, mutate func(string) (string, error)) ([][]byte, error) {
+	if len(pkts) == 0 {
+		return nil, errors.New("连接描述符不完整")
 	}
+	idx := -1
+	var desc string
+	var start, end int
+	for i, pkt := range pkts {
+		d, s, e, ok := locateDescriptor(pkt)
+		if !ok {
+			continue
+		}
+		idx, desc, start, end = i, d, s, e
+		break
+	}
+	if idx < 0 {
+		return nil, errors.New("连接描述符不完整")
+	}
+	next, err := mutate(desc)
+	if err != nil {
+		return nil, err
+	}
+	updated, err := applyDescriptor(pkts[idx], next)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]byte, len(pkts))
+	for i := range pkts {
+		if i == idx {
+			out[i] = updated
+			continue
+		}
+		out[i] = append([]byte(nil), pkts[i]...)
+	}
+	if idx > 0 {
+		fixed, err := adjustConnectDataLength(out[0], len(next)-(end-start))
+		if err != nil {
+			return nil, err
+		}
+		out[0] = fixed
+	}
+	return out, nil
+}
+
+func adjustConnectDataLength(pkt []byte, delta int) ([]byte, error) {
+	if delta == 0 {
+		return pkt, nil
+	}
+	if len(pkt) < 26 || packetType(pkt) != tnsConnect {
+		return nil, errors.New("CONNECT 头不完整")
+	}
+	out := append([]byte(nil), pkt...)
+	if err := bumpUint16(out, 24, delta); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func writeTNSPackets(w io.Writer, pkts [][]byte) error {
+	for _, p := range pkts {
+		if _, err := w.Write(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func wipeBytes(b []byte) {

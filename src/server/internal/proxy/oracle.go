@@ -196,14 +196,18 @@ func (g *OracleGateway) serveConn(ctx context.Context, client net.Conn) {
 
 	remoteIP := hostOf(client.RemoteAddr().String())
 	_ = client.SetDeadline(time.Now().Add(g.timeout()))
-	raw, err := readInitialConnect(client)
+	pkts, err := readClientConnect(client)
 	if err != nil {
 		_, _ = client.Write(tnsRefusePacket("无法读取 Oracle 连接包"))
 		return
 	}
-	defer wipeBytes(raw)
+	defer func() {
+		for _, p := range pkts {
+			wipeBytes(p)
+		}
+	}()
 
-	desc, _, _, ok := locateDescriptor(raw)
+	desc, ok := firstDescriptor(pkts)
 	if !ok {
 		_, _ = client.Write(tnsRefusePacket("连接描述符不完整"))
 		return
@@ -272,7 +276,9 @@ func (g *OracleGateway) serveConn(ctx context.Context, client net.Conn) {
 	}
 
 	credMode := "managed"
-	endReason := endRemoteClosed
+	// 会话已经落库。拨号、改写或握手没走到 ACCEPT 之前结束，都记连接失败。
+	// 真正转发之后由 relayHandshake 换成客户端断开、对端关闭或策略阻断。
+	endReason := endConnectFailed
 	st := &oraState{
 		sessionID: sess.SessionID,
 		userID:    id.UserID,
@@ -348,14 +354,16 @@ func (g *OracleGateway) serveConn(ctx context.Context, client net.Conn) {
 	live.addCloser(upstream)
 	defer upstream.Close()
 
-	rewritten, err := rebuildConnect(raw, cred.Host, cred.Port, service, sid)
+	forward, err := rewriteConnectPackets(pkts, func(d string) (string, error) {
+		return rewriteConnectData(d, cred.Host, cred.Port, service, sid)
+	})
 	if err != nil {
 		slog.Warn("Oracle 改写连接串失败", "session_id", sess.SessionID, "err", err)
 		_, _ = client.Write(tnsRefusePacket("无法按资产改写连接串"))
 		return
 	}
 	_ = upstream.SetDeadline(time.Now().Add(g.timeout()))
-	endReason = g.relayHandshake(ctx, client, upstream, rewritten, remoteIP, st, live, 0)
+	endReason = g.relayHandshake(ctx, client, upstream, forward, remoteIP, st, live, 0)
 }
 
 func (g *OracleGateway) dial(ctx context.Context, host string, port int) (net.Conn, error) {
@@ -372,25 +380,25 @@ func (g *OracleGateway) dial(ctx context.Context, host string, port int) (net.Co
 	return d.DialContext(dctx, "tcp", addr)
 }
 
-func (g *OracleGateway) relayHandshake(ctx context.Context, client, upstream net.Conn, rewritten []byte, clientIP string, st *oraState, live *liveSession, depth int) string {
+func (g *OracleGateway) relayHandshake(ctx context.Context, client, upstream net.Conn, forward [][]byte, clientIP string, st *oraState, live *liveSession, depth int) string {
 	if depth > 2 {
 		_, _ = client.Write(tnsRefusePacket("目标重定向次数过多"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
-	if _, err := upstream.Write(rewritten); err != nil {
+	if err := writeTNSPackets(upstream, forward); err != nil {
 		_, _ = client.Write(tnsRefusePacket("连接目标 Oracle 失败"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	for i := 0; i < 8; i++ {
 		pkt, err := readTNSPacket(upstream)
 		if err != nil {
 			_, _ = client.Write(tnsRefusePacket("目标 Oracle 未完成握手"))
-			return endRemoteClosed
+			return endConnectFailed
 		}
 		switch packetType(pkt) {
 		case tnsResend:
-			if _, err := upstream.Write(rewritten); err != nil {
-				return endRemoteClosed
+			if err := writeTNSPackets(upstream, forward); err != nil {
+				return endConnectFailed
 			}
 		case tnsRedirect:
 			// 监听连接的使命到此为止，别占着不放。
@@ -398,8 +406,11 @@ func (g *OracleGateway) relayHandshake(ctx context.Context, client, upstream net
 			return g.followRedirect(ctx, client, pkt, clientIP, st, live, depth)
 		case tnsRefuse:
 			_, _ = client.Write(pkt)
-			return endRemoteClosed
+			return endConnectFailed
 		case tnsAccept:
+			if ver := tnsHeaderVersion(pkt); ver >= tnsVersionLargeSDU {
+				st.largeSDU = true
+			}
 			if _, err := client.Write(pkt); err != nil {
 				return endClientDisconnect
 			}
@@ -413,7 +424,7 @@ func (g *OracleGateway) relayHandshake(ctx context.Context, client, upstream net
 		}
 	}
 	_, _ = client.Write(tnsRefusePacket("目标 Oracle 未完成握手"))
-	return endRemoteClosed
+	return endConnectFailed
 }
 
 // followRedirect 把监听返回的专用服务器地址留在网关这一侧。
@@ -424,18 +435,18 @@ func (g *OracleGateway) followRedirect(ctx context.Context, client net.Conn, pkt
 	desc, _, _, ok := locateDescriptor(pkt)
 	if !ok {
 		_, _ = client.Write(tnsRefusePacket("目标重定向无法解析"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	realHost, realPort, ok := hostPortOf(desc)
 	if !ok {
 		_, _ = client.Write(tnsRefusePacket("目标重定向缺少地址"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	adv, err := g.advertiseHost(client)
 	if err != nil {
 		slog.Warn("Oracle 重定向被拒绝", "session_id", st.sessionID, "err", err)
 		_, _ = client.Write(tnsRefusePacket("监听发生重定向，但未配置 BASTION_ORACLE_ADVERTISE，已拒绝直连数据库"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(adv, "0"))
 	if err != nil {
@@ -443,7 +454,7 @@ func (g *OracleGateway) followRedirect(ctx context.Context, client net.Conn, pkt
 	}
 	if err != nil {
 		_, _ = client.Write(tnsRefusePacket("无法为重定向分配回连端口"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	defer ln.Close()
 	_, portText, _ := net.SplitHostPort(ln.Addr().String())
@@ -451,12 +462,12 @@ func (g *OracleGateway) followRedirect(ctx context.Context, client net.Conn, pkt
 	nextDesc, err := rewriteEndpoint(desc, adv, bridgePort)
 	if err != nil {
 		_, _ = client.Write(tnsRefusePacket("无法改写重定向地址"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	rewritten, err := applyDescriptor(pkt, nextDesc)
 	if err != nil {
 		_, _ = client.Write(tnsRefusePacket("无法改写重定向地址"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	if _, err := client.Write(rewritten); err != nil {
 		return endClientDisconnect
@@ -469,7 +480,7 @@ func (g *OracleGateway) followRedirect(ctx context.Context, client net.Conn, pkt
 		return endClientDisconnect
 	}
 	defer next.Close()
-	if hostOf(next.RemoteAddr().String()) != clientIP {
+	if !sameIP(hostOf(next.RemoteAddr().String()), clientIP) {
 		slog.Warn("Oracle 重定向回连来源不匹配", "session_id", st.sessionID, "remote", hostOf(next.RemoteAddr().String()))
 		return endClientDisconnect
 	}
@@ -477,21 +488,27 @@ func (g *OracleGateway) followRedirect(ctx context.Context, client net.Conn, pkt
 		live.addCloser(next)
 	}
 	_ = next.SetDeadline(time.Now().Add(g.timeout()))
-	second, err := readInitialConnect(next)
+	second, err := readClientConnect(next)
 	if err != nil {
 		return endClientDisconnect
 	}
-	defer wipeBytes(second)
-	forward, err := rebuildEndpoint(second, realHost, realPort)
+	defer func() {
+		for _, p := range second {
+			wipeBytes(p)
+		}
+	}()
+	forward, err := rewriteConnectPackets(second, func(d string) (string, error) {
+		return rewriteEndpoint(d, realHost, realPort)
+	})
 	if err != nil {
 		_, _ = next.Write(tnsRefusePacket("重定向后的连接串无法转发"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	up, err := g.dial(ctx, realHost, realPort)
 	if err != nil {
 		slog.Warn("Oracle 重定向拨号失败", "session_id", st.sessionID, "err", err)
 		_, _ = next.Write(tnsRefusePacket("连接目标 Oracle 失败"))
-		return endRemoteClosed
+		return endConnectFailed
 	}
 	if live != nil {
 		live.addCloser(up)
@@ -499,6 +516,14 @@ func (g *OracleGateway) followRedirect(ctx context.Context, client net.Conn, pkt
 	defer up.Close()
 	_ = up.SetDeadline(time.Now().Add(g.timeout()))
 	return g.relayHandshake(ctx, next, up, forward, clientIP, st, live, depth+1)
+}
+
+func sameIP(a, b string) bool {
+	ia, ib := net.ParseIP(a), net.ParseIP(b)
+	if ia != nil && ib != nil {
+		return ia.Equal(ib)
+	}
+	return a == b
 }
 
 func (g *OracleGateway) advertiseHost(client net.Conn) (string, error) {
@@ -540,7 +565,7 @@ func (g *OracleGateway) splice(client, upstream net.Conn, st *oraState) string {
 
 func (g *OracleGateway) pump(src, dst net.Conn, fromClient bool, st *oraState) {
 	for {
-		pkt, err := readTNSPacket(src)
+		pkt, err := readTNSPacketMode(src, st != nil && st.largeSDU)
 		if err != nil {
 			if fromClient {
 				st.noteStop(endClientDisconnect)
@@ -671,6 +696,8 @@ type oraState struct {
 	seq       int
 	blocked   int
 	touch     func()
+	// largeSDU 在看到版本 ≥ 315 的 ACCEPT 之后置位。两边随后的包都按 4 字节长度读。
+	largeSDU bool
 
 	mu   sync.Mutex
 	stop string
@@ -699,59 +726,17 @@ func (st *oraState) stopReason() string {
 	return st.stop
 }
 
-func readInitialConnect(conn net.Conn) ([]byte, error) {
-	pkt, err := readTNSPacket(conn)
-	if err != nil {
-		return nil, err
-	}
-	if packetType(pkt) != tnsConnect {
-		return nil, errors.New("不是 CONNECT")
-	}
-	raw := pkt
-	for i := 0; i < 6; i++ {
-		if _, _, _, ok := locateDescriptor(raw); ok {
-			return raw, nil
-		}
-		if len(raw) > maxTNSPacket {
-			return nil, errors.New("连接包过大")
-		}
-		buf := make([]byte, 4096)
-		n, rerr := conn.Read(buf)
-		if n > 0 {
-			raw = append(raw, buf[:n]...)
-		}
-		if rerr != nil {
-			break
-		}
-	}
-	if _, _, _, ok := locateDescriptor(raw); ok {
-		return raw, nil
-	}
-	return nil, errors.New("连接描述符不完整")
-}
-
 func rebuildConnect(raw []byte, host string, port int, service, sid string) ([]byte, error) {
-	desc, _, _, ok := locateDescriptor(raw)
-	if !ok {
-		return nil, errors.New("连接描述符不完整")
-	}
-	next, err := rewriteConnectData(desc, host, port, service, sid)
+	pkts, err := rewriteConnectPackets([][]byte{raw}, func(desc string) (string, error) {
+		return rewriteConnectData(desc, host, port, service, sid)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return applyDescriptor(raw, next)
-}
-
-func rebuildEndpoint(raw []byte, host string, port int) ([]byte, error) {
-	desc, _, _, ok := locateDescriptor(raw)
-	if !ok {
+	if len(pkts) != 1 {
 		return nil, errors.New("连接描述符不完整")
 	}
-	next, err := rewriteEndpoint(desc, host, port)
-	if err != nil {
-		return nil, err
-	}
-	return applyDescriptor(raw, next)
+	return pkts[0], nil
 }
 
 func oracleAssets(in []*managerclient.AssetBrief) []*managerclient.AssetBrief {

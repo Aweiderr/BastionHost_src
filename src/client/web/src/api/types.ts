@@ -152,6 +152,10 @@ export interface Asset {
   group_id?: number
   account_count?: number
   remark?: string
+  /** Oracle 服务名。协议为 oracle 时与 SID 至少填一项 */
+  oracle_service_name?: string
+  /** Oracle SID。两者都填时网关优先使用服务名 */
+  oracle_sid?: string
   create_time?: string
 }
 
@@ -166,6 +170,8 @@ export interface AssetPayload {
   tags: string[]
   group_id: number
   remark: string
+  oracle_service_name?: string
+  oracle_sid?: string
 }
 
 export interface AssetQuery extends PageQuery {

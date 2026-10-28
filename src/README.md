@@ -856,7 +856,10 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 | `BASTION_CRYPTO_BACKEND` | go | 软件实现的后端：`gmssl` / `openssl` / `go` |
 | `BASTION_JWT_SECRET` | （调试模式自动填充） | 令牌签名密钥，生产必须显式配置 |
 | `BASTION_SSH_LISTEN` | :2222 | 服务端 SSH 网关监听地址（第三方客户端接入） |
-| `BASTION_IDLE_TIMEOUT` | 30m | SSH / WebSSH 运维会话空闲上限（无用户输入；`0` 关闭）。到点后掐断连接，会话状态与结束原因都记为 `timeout`（审计显示「超时结束」）。系统配置项 `security.session.idle_minutes` 只展示同一默认值（30 分钟），代理不读取 |
+| `BASTION_ORACLE_ENABLE` | false | Oracle 网关开关。false 时不监听 |
+| `BASTION_ORACLE_LISTEN` | :1521 | Oracle 网关监听地址 |
+| `BASTION_ORACLE_ADVERTISE` | （空） | 数据库监听 REDIRECT 时告诉客户端回连的主机名或 IP。监听绑在通配地址上且发生重定向时必填，否则拒绝直连数据库 |
+| `BASTION_IDLE_TIMEOUT` | 30m | SSH / WebSSH / Oracle 运维会话空闲上限（无用户输入；`0` 关闭）。到点后掐断连接，会话状态与结束原因都记为 `timeout`（审计显示「超时结束」）。系统配置项 `security.session.idle_minutes` 只展示同一默认值（30 分钟），代理不读取 |
 | `BASTION_RECORD_DIR` | ./data/records | 录像存储目录 |
 | `BASTION_KEYSTORE_DIR` | ./data/keys | 密钥库目录 |
 | `BASTION_ALERT_WEBHOOK_URL` | （空） | 高危命令告警 Webhook。空则只落库 |
@@ -870,6 +873,19 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 - `db`：只落库。
 - `webhook`：向 `BASTION_ALERT_WEBHOOK_URL` POST JSON。地址只从该环境变量读取，不写进 `notify_targets`，日志也不打印 URL。未配置、或地址不是 http/https 时告警仍在，通知状态为 `skipped` / `failed`，不影响命令入库。
 - 邮件、钉钉没有现成客户端，不内置 SDK。钉钉自定义机器人本身是 Webhook，把机器人地址配到上面的变量即可。
+
+### Oracle 网关
+
+默认关闭。资产协议选 Oracle 后要填写服务名或 SID（迁移 `0036`，两者都填时网关用服务名）。开启：
+
+```bash
+export BASTION_ORACLE_ENABLE=true
+export BASTION_ORACLE_LISTEN=:1521
+```
+
+客户端把堡垒机当监听。连接描述符里写 `SERVICE_NAME=运维用户@资产[#账号]`，并用 `BASTION_PASSWORD` 带堡垒机口令（末尾 `:六位数字` 是动态令牌，规则与 SSH 相同）。网关校验授权后，把主机、端口和服务名/SID 改成资产台账上的值再转发。语句按尽力识别写入 `ops_session_command`；`deny` 和无法交互的 `confirm` 会断开连接。出厂另有三条只作用于 Oracle 的规则：删除对象和 `TRUNCATE TABLE` 阻断，账号与授权变更记审计。
+
+库口令仍由 SQL 客户端向 Oracle 提交。11g 以后的登录包不是明文，本版本不改写 O5LOGON/O7LOGON。细节和真机步骤见 `server/internal/proxy/PROTOCOL_SKELETON.md`。
 
 ## 开发进度
 

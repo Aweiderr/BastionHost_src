@@ -5,15 +5,16 @@
 //
 // 启动顺序（任一步失败都不进入"能连但不受控"的状态）：
 //
-//	1. 加载配置与密码服务（录像加密用本地密钥库）；
-//	2. 建立到管理服务的服务间通道并做健康检查；
-//	3. **强制拉取一次命令策略**：拉不到就不开启 SSH 监听 ——
-//	   宁可运维入口暂不可用，也不能在没有策略的情况下放流量；
-//	4. 启动 SSH 网关与观测用 HTTP 接口。
+//  1. 加载配置与密码服务（录像加密用本地密钥库）；
+//  2. 建立到管理服务的服务间通道并做健康检查；
+//  3. **强制拉取一次命令策略**：拉不到就不开启 SSH 监听 ——
+//     宁可运维入口暂不可用，也不能在没有策略的情况下放流量；
+//  4. 启动 SSH 网关与观测用 HTTP 接口。
 package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -128,6 +129,7 @@ func main() {
 	// 网关实例总是创建（HTTP 观测接口需要它上报活跃会话数），
 	// 但只有在策略就绪后才真正开始监听。
 	var sshSrv *proxy.Server
+	var oracleGw *proxy.OracleGateway
 	var beater *nodebeat.Beater
 	if prov != nil {
 		sshSrv = proxy.NewServer(cfg, mc, policies, prov, recordKeyID)
@@ -140,10 +142,22 @@ func main() {
 		// 维护状态（draining）下拒绝新会话，存量会话继续跑完
 		sshSrv.SetAdmissionCheck(beater.Allowed)
 
-		// RDP / VNC / Oracle 通道骨架（默认关闭，见 PROTOCOL_SKELETON.md）
+		// RDP / VNC 仍是骨架。Oracle 开启后做授权校验和 TNS 转发，
+		// 命令策略未就绪时它自己等待，不先放流量。
 		rdpGw := &proxy.RDPGateway{Listen: cfg.Proxy.RDPListen, Enable: cfg.Proxy.RDPEnable, Timeout: cfg.Proxy.ConnectTimeout}
 		vncGw := &proxy.VNCGateway{Listen: cfg.Proxy.VNCListen, Enable: cfg.Proxy.VNCEnable, Timeout: cfg.Proxy.ConnectTimeout}
-		oracleGw := &proxy.OracleGateway{Listen: cfg.Proxy.OracleListen, Enable: cfg.Proxy.OracleEnable}
+		oracleGw = &proxy.OracleGateway{
+			Listen: cfg.Proxy.OracleListen, Enable: cfg.Proxy.OracleEnable,
+			AdvertiseHost: cfg.Proxy.OracleAdvertise, ConnectTimeout: cfg.Proxy.ConnectTimeout,
+			NodeID: cfg.Node.ID, Control: mc, Policies: policies, Sessions: sshSrv,
+			Digest: func(b []byte) string {
+				sum := prov.SM3Sum(b)
+				if len(sum) == 0 {
+					return ""
+				}
+				return hex.EncodeToString(sum)
+			},
+		}
 		go func() { _ = rdpGw.ListenAndServe(ctx) }()
 		go func() { _ = vncGw.ListenAndServe(ctx) }()
 		go func() { _ = oracleGw.ListenAndServe(ctx) }()
@@ -218,6 +232,9 @@ func main() {
 	// 影响它；而把"断开连接"放到最后，进程会在退出前一直阻塞在会话 IO 上，
 	// 于是留下永久 active 的会话与没有封存尾的录像。
 	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if oracleGw != nil {
+		oracleGw.Shutdown()
+	}
 	if sshSrv != nil {
 		sshSrv.Shutdown(sessionCtx)
 	}

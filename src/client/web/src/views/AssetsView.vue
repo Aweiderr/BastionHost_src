@@ -247,6 +247,8 @@ const assetForm = reactive({
   tagsText: '',
   group_id: 0,
   remark: '',
+  oracle_service_name: '',
+  oracle_sid: '',
 })
 
 function openAssetDialog(asset?: Asset): void {
@@ -261,6 +263,8 @@ function openAssetDialog(asset?: Asset): void {
   assetForm.tagsText = (asset?.tags ?? []).join(', ')
   assetForm.group_id = asset?.group_id ?? selectedGroup.value?.group_id ?? 0
   assetForm.remark = asset?.remark ?? ''
+  assetForm.oracle_service_name = asset?.oracle_service_name ?? ''
+  assetForm.oracle_sid = asset?.oracle_sid ?? ''
   assetDialogVisible.value = true
 }
 
@@ -279,6 +283,14 @@ async function submitAsset(): Promise<void> {
     app.error('请填写资产地址')
     return
   }
+  if (
+    assetForm.protocol === 'oracle' &&
+    !assetForm.oracle_service_name.trim() &&
+    !assetForm.oracle_sid.trim()
+  ) {
+    app.error('Oracle 资产请填写服务名或 SID')
+    return
+  }
   const payload: AssetPayload = {
     asset_name: assetForm.asset_name.trim(),
     asset_type: assetForm.asset_type,
@@ -293,6 +305,8 @@ async function submitAsset(): Promise<void> {
       .filter(Boolean),
     group_id: Number(assetForm.group_id) || 0,
     remark: assetForm.remark,
+    oracle_service_name: assetForm.protocol === 'oracle' ? assetForm.oracle_service_name.trim() : '',
+    oracle_sid: assetForm.protocol === 'oracle' ? assetForm.oracle_sid.trim() : '',
   }
   assetSubmitting.value = true
   try {
@@ -620,7 +634,14 @@ onMounted(async () => {
                 <span class="tag tag-primary">{{ dictLabel(ASSET_TYPE_MAP, row.asset_type) }}</span>
                 <span class="tag tag-info">{{ dictLabel(PROTOCOL_MAP, row.protocol) }}</span>
               </td>
-              <td class="text-mono">{{ row.host }}:{{ row.port }}</td>
+              <td class="text-mono">
+                <div>{{ row.host }}:{{ row.port }}</div>
+                <div v-if="row.protocol === 'oracle' && (row.oracle_service_name || row.oracle_sid)" class="text-secondary">
+                  <template v-if="row.oracle_service_name">服务名 {{ row.oracle_service_name }}</template>
+                  <template v-if="row.oracle_service_name && row.oracle_sid"> · </template>
+                  <template v-if="row.oracle_sid">SID {{ row.oracle_sid }}</template>
+                </div>
+              </td>
               <td>
                 <StatusTag :text="dictLabel(ASSET_LEVEL_MAP, row.level)" :tone="dictTone(ASSET_LEVEL_MAP, row.level)" />
               </td>
@@ -690,6 +711,19 @@ onMounted(async () => {
           <label class="form-label">端口</label>
           <input v-model="assetForm.port" class="input text-mono" placeholder="留空按协议自动填充" />
         </div>
+        <template v-if="assetForm.protocol === 'oracle'">
+          <div class="form-item">
+            <label class="form-label">服务名</label>
+            <input v-model.trim="assetForm.oracle_service_name" class="input text-mono" placeholder="例如 ORCLPDB1" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">SID</label>
+            <input v-model.trim="assetForm.oracle_sid" class="input text-mono" placeholder="与服务名至少填一项" />
+          </div>
+          <div class="form-item span-2">
+            <span class="form-hint">Oracle 连接标识。服务名对应 SERVICE_NAME，SID 对应实例名。两者都填时网关优先使用服务名。</span>
+          </div>
+        </template>
         <div class="form-item">
           <label class="form-label">重要等级</label>
           <select v-model="assetForm.level" class="select">

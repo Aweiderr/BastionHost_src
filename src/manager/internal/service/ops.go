@@ -93,18 +93,21 @@ type OpsAccountBrief struct {
 
 // OpsAssetBrief 是可运维资产摘要（含授权信息）。
 type OpsAssetBrief struct {
-	AssetID     int64             `json:"asset_id"`
-	AssetName   string            `json:"asset_name"`
-	Host        string            `json:"host"`
-	Port        int               `json:"port"`
-	Protocol    string            `json:"protocol"`
-	Level       string            `json:"level"`
-	OSType      string            `json:"os_type,omitempty"`
-	GroupID     *int64            `json:"group_id,omitempty"`
-	Remark      string            `json:"remark,omitempty"`
-	Accounts    []OpsAccountBrief `json:"accounts"`
-	GrantID     int64             `json:"grant_id"`
-	GrantSource string            `json:"grant_source"`
+	AssetID   int64  `json:"asset_id"`
+	AssetName string `json:"asset_name"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Protocol  string `json:"protocol"`
+	Level     string `json:"level"`
+	OSType    string `json:"os_type,omitempty"`
+	GroupID   *int64 `json:"group_id,omitempty"`
+	Remark    string `json:"remark,omitempty"`
+	// OracleServiceName / OracleSID 供数据面改写 CONNECT 描述符。
+	OracleServiceName string            `json:"oracle_service_name,omitempty"`
+	OracleSID         string            `json:"oracle_sid,omitempty"`
+	Accounts          []OpsAccountBrief `json:"accounts"`
+	GrantID           int64             `json:"grant_id"`
+	GrantSource       string            `json:"grant_source"`
 	// GrantKind binding（长期绑定关系）/ pass（工单审批产生的通行证）
 	GrantKind string     `json:"grant_kind,omitempty"`
 	TicketID  *int64     `json:"ticket_id,omitempty"`
@@ -142,6 +145,7 @@ func (s *OpsService) AccessibleAssets(ctx context.Context, userID int64) ([]*Ops
 			AssetID: asset.AssetID, AssetName: asset.AssetName, Host: asset.Host,
 			Port: asset.Port, Protocol: asset.Protocol, Level: asset.Level,
 			OSType: asset.OSType, GroupID: asset.GroupID, Remark: asset.Remark,
+			OracleServiceName: asset.OracleServiceName, OracleSID: asset.OracleSID,
 			GrantID: g.GrantID, GrantSource: g.GrantSource, GrantKind: g.GrantKind,
 			TicketID: g.TicketID, ValidTo: g.ValidTo, CanFile: g.CanFile,
 			NeedApproval: needApproval,
@@ -268,32 +272,36 @@ func (s *OpsService) CheckGrant(ctx context.Context, userID, assetID, accountID 
 
 // OpsCredential 是建立目标连接所需的凭据（仅在下发瞬间存在）。
 type OpsCredential struct {
-	AssetID       int64  `json:"asset_id"`
-	AssetName     string `json:"asset_name"`
-	Host          string `json:"host"`
-	Port          int    `json:"port"`
-	Protocol      string `json:"protocol"`
-	AccountID     int64  `json:"account_id"`
-	AccountName   string `json:"account_name"`
-	AccountType   string `json:"account_type"`
+	AssetID     int64  `json:"asset_id"`
+	AssetName   string `json:"asset_name"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol"`
+	AccountID   int64  `json:"account_id"`
+	AccountName string `json:"account_name"`
+	AccountType string `json:"account_type"`
 	// CredentialMode 凭据模式：managed / manual
 	CredentialMode string `json:"credential_mode"`
 	// RequiresUserInput 为 true 时表示该账号凭据不由堡垒机托管，
 	// 服务端需要向运维人员索取，此处不下发任何口令材料。
 	RequiresUserInput bool   `json:"requires_user_input"`
-	Password      string `json:"password,omitempty"`
-	PrivateKey    string `json:"private_key,omitempty"`
-	SudoPassword  string `json:"sudo_password,omitempty"`
-	PrivilegeMode string `json:"privilege_mode,omitempty"`
-	GrantID       int64  `json:"grant_id"`
-	GrantSource   string `json:"grant_source"`
-	TicketID      *int64 `json:"ticket_id,omitempty"`
-	CanFile       bool   `json:"can_file"`
-	CanCopy       bool   `json:"can_copy"`
-	CanPaste      bool   `json:"can_paste"`
+	Password          string `json:"password,omitempty"`
+	PrivateKey        string `json:"private_key,omitempty"`
+	SudoPassword      string `json:"sudo_password,omitempty"`
+	PrivilegeMode     string `json:"privilege_mode,omitempty"`
+	GrantID           int64  `json:"grant_id"`
+	GrantSource       string `json:"grant_source"`
+	TicketID          *int64 `json:"ticket_id,omitempty"`
+	CanFile           bool   `json:"can_file"`
+	CanCopy           bool   `json:"can_copy"`
+	CanPaste          bool   `json:"can_paste"`
 	// HostKeyFingerprint / HostKeyPolicy 目标主机 SSH 指纹校验（与资产台账对齐）
 	HostKeyFingerprint string `json:"host_key_fingerprint,omitempty"`
 	HostKeyPolicy      string `json:"host_key_policy,omitempty"`
+	// OracleServiceName / OracleSID 目标库连接标识。口令字段与它们分开，
+	// 网关用完口令即丢，连接标识可以留在会话路径上。
+	OracleServiceName string `json:"oracle_service_name,omitempty"`
+	OracleSID         string `json:"oracle_sid,omitempty"`
 }
 
 // FetchCredential 校验授权并解密下发连接凭据。
@@ -340,6 +348,7 @@ func (s *OpsService) FetchCredential(ctx context.Context, op OperatorContext, us
 			GrantID:       check.GrantID, GrantSource: check.GrantSource, TicketID: check.TicketID,
 			CanFile: check.CanFile, CanCopy: check.CanCopy, CanPaste: check.CanPaste,
 			HostKeyFingerprint: asset.SSHHostKeyFP, HostKeyPolicy: asset.SSHHostKeyPolicy,
+			OracleServiceName: asset.OracleServiceName, OracleSID: asset.OracleSID,
 		}, nil
 	}
 
@@ -357,6 +366,7 @@ func (s *OpsService) FetchCredential(ctx context.Context, op OperatorContext, us
 		GrantID:        check.GrantID, GrantSource: check.GrantSource, TicketID: check.TicketID,
 		CanFile: check.CanFile, CanCopy: check.CanCopy, CanPaste: check.CanPaste,
 		HostKeyFingerprint: asset.SSHHostKeyFP, HostKeyPolicy: asset.SSHHostKeyPolicy,
+		OracleServiceName: asset.OracleServiceName, OracleSID: asset.OracleSID,
 	}
 	if acc.PasswordCipher != "" {
 		plain, err := s.crypto.DecryptWith(ctx, keyID, acc.PasswordCipher)

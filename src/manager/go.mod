@@ -4,11 +4,12 @@ go 1.27
 
 require (
 	bastion.local/shared v0.0.0
+	github.com/emmansun/gmsm v0.44.1
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/sijms/go-ora/v2 v2.9.0
 )
 
 require (
-	github.com/emmansun/gmsm v0.44.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

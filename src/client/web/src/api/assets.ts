@@ -85,11 +85,15 @@ export function deleteAccount(accountId: number) {
   return request<Record<string, unknown>>(`/accounts/${accountId}`, { method: 'DELETE' })
 }
 
-/** 重置账号口令 */
-export function updateAccountPassword(accountId: number, password: string) {
+/** 重置账号口令。Oracle 可同时 ALTER USER，见 sync_db_password。 */
+export function updateAccountPassword(
+  accountId: number,
+  password: string,
+  extra?: { sync_db_password?: boolean },
+) {
   return request<Record<string, unknown>>(`/accounts/${accountId}/password`, {
     method: 'POST',
-    body: { password },
+    body: { password, ...extra },
   })
 }
 

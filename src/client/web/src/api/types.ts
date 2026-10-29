@@ -218,6 +218,11 @@ export interface AccountPayload {
    * 口令或私钥，否则账号建出来也连不上。
    */
   credential_mode?: 'managed' | 'manual'
+  /**
+   * 仅 Oracle 新建账号：true 时在目标库 CREATE USER 并授予 CONNECT、RESOURCE。
+   * 不传或 false 只在堡垒机登记。界面默认勾选，并显式传 true。
+   */
+  provision_db_user?: boolean
 }
 
 /* ---------------------------------------------------------------- 用户角色 */

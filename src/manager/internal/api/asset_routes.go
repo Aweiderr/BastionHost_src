@@ -316,8 +316,9 @@ func (s *Server) handleUpdateAccountPassword(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		Password   string `json:"password"`
-		ChangeType string `json:"change_type"`
+		Password       string `json:"password"`
+		ChangeType     string `json:"change_type"`
+		SyncDBPassword *bool  `json:"sync_db_password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
@@ -327,7 +328,7 @@ func (s *Server) handleUpdateAccountPassword(w http.ResponseWriter, r *http.Requ
 	if changeType == "" {
 		changeType = "manual"
 	}
-	if err := s.asset.UpdateAccountPassword(r.Context(), id, req.Password, changeType, operatorFrom(r)); err != nil {
+	if err := s.asset.UpdateAccountPassword(r.Context(), id, req.Password, changeType, req.SyncDBPassword, operatorFrom(r)); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -368,9 +369,9 @@ func (s *Server) handleCredentialKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, map[string]any{
-		"key_id":  keyID,
-		"usage":   "credential_encrypt",
-		"note":    "账号口令使用该密钥加密（SM4），密钥材料由密码服务托管",
+		"key_id":   keyID,
+		"usage":    "credential_encrypt",
+		"note":     "账号口令使用该密钥加密（SM4），密钥材料由密码服务托管",
 		"provider": providerName(s),
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"bastion.local/manager/internal/model"
+	"bastion.local/manager/internal/oracleprov"
 	"bastion.local/manager/internal/repo"
 	"bastion.local/shared/auth"
 )
@@ -20,11 +21,51 @@ import (
 //   - 口令指纹（SM3）单独存储，用于核对但不可逆；
 //   - 查看明文口令是高敏操作，需权限校验且强制记录审计。
 type AssetService struct {
-	assetRepo   *repo.AssetRepo
-	groupRepo   *repo.AssetGroupRepo
-	accountRepo *repo.AccountRepo
-	crypto      *CryptoHelper
-	oplog       *repo.OperationLogRepo
+	assetRepo   assetStore
+	groupRepo   assetGroupStore
+	accountRepo accountStore
+	crypto      credentialCipher
+	oplog       opLogWriter
+	// oracleOpen 为空时使用 oracleprov.Open。测试注入，避免真的拨号。
+	oracleOpen oracleprov.Opener
+}
+
+// 仓储与密码服务收成接口，生产实现仍是原来的具体类型。
+// 这样建库用户的失败路径可以在没有数据库的情况下测到。
+type assetStore interface {
+	Create(ctx context.Context, a *model.Asset) error
+	Get(ctx context.Context, assetID int64) (*model.Asset, error)
+	ExistsByName(ctx context.Context, tenantID int64, name string, excludeID int64) (bool, error)
+	List(ctx context.Context, f repo.AssetFilter) ([]*model.Asset, int64, error)
+	Update(ctx context.Context, a *model.Asset) error
+	Delete(ctx context.Context, assetID int64) error
+}
+
+type assetGroupStore interface {
+	Create(ctx context.Context, g *model.AssetGroup) error
+	Tree(ctx context.Context, tenantID int64) ([]*model.AssetGroup, error)
+	Delete(ctx context.Context, groupID int64) error
+}
+
+type accountStore interface {
+	Create(ctx context.Context, a *model.Account) error
+	Get(ctx context.Context, accountID int64) (*model.Account, error)
+	ListByAsset(ctx context.Context, assetID int64) ([]*model.Account, error)
+	ExistsByName(ctx context.Context, assetID int64, name string, excludeID int64) (bool, error)
+	Update(ctx context.Context, a *model.Account) error
+	SetCredentialMode(ctx context.Context, accountID int64, mode, passwordCipher, privateKeyCipher string, rotateDays int) error
+	UpdatePassword(ctx context.Context, accountID int64, cipher, digest, changeType string) error
+	Delete(ctx context.Context, accountID int64) error
+}
+
+type opLogWriter interface {
+	Write(ctx context.Context, l *model.OperationLog) error
+}
+
+type credentialCipher interface {
+	EncryptString(ctx context.Context, plain string) (string, error)
+	DecryptString(ctx context.Context, cipherB64 string) ([]byte, error)
+	CredentialKeyID(ctx context.Context) (string, error)
 }
 
 // NewAssetService 创建资产服务。
@@ -308,6 +349,10 @@ type CreateAccountRequest struct {
 	PrivilegeMode  string `json:"privilege_mode"`
 	RotateDays     int    `json:"rotate_days"`
 	Remark         string `json:"remark"`
+	// ProvisionDBUser 为 true 时，在目标 Oracle 中创建同名用户。
+	// 不传或 false 只在堡垒机登记（与改动前的「新建账号」相同）。
+	// 界面默认勾选，并显式传 true。库中已有同名用户时失败，不改该用户口令。
+	ProvisionDBUser *bool `json:"provision_db_user"`
 }
 
 // CreateAccount 创建托管账号（口令加密存储）。
@@ -335,6 +380,10 @@ func (s *AssetService) CreateAccount(ctx context.Context, assetID int64, req Cre
 		req.CredentialMode = model.CredentialManaged
 	}
 	if err := validateCredentialMode(req.CredentialMode, req.Password, req.PrivateKey, req.SudoPassword); err != nil {
+		return nil, err
+	}
+	provisionedAdmin, err := s.provisionOracleUser(ctx, asset, req, op)
+	if err != nil {
 		return nil, err
 	}
 	a := &model.Account{
@@ -381,13 +430,28 @@ func (s *AssetService) CreateAccount(ctx context.Context, assetID int64, req Cre
 	}
 
 	if err := s.accountRepo.Create(ctx, a); err != nil {
+		if provisionedAdmin != "" {
+			err = fmt.Errorf("Oracle 用户 %s 已创建，但堡垒机登记失败：%v。请取消「同时在库中创建用户」后重新登记，不要再次创建库用户",
+				oracleprov.CanonicalUsername(req.AccountName), err)
+		}
 		s.writeLog(ctx, op, "asset", "create_account", "account", "", req.AccountName, "", "", err)
 		return nil, err
 	}
 	// 审计：记录账号创建，但**不记录口令内容**
+	after := fmt.Sprintf(`{"asset_id":%d,"account_name":%q,"has_password":%v}`,
+		assetID, a.AccountName, a.PasswordCipher != "")
+	if provisionedAdmin != "" {
+		after = toJSON(map[string]any{
+			"asset_id":                assetID,
+			"account_name":            a.AccountName,
+			"has_password":            a.PasswordCipher != "",
+			"oracle_user_provisioned": true,
+			"oracle_admin":            provisionedAdmin,
+			"oracle_grants":           []string{"CONNECT", "RESOURCE"},
+		})
+	}
 	s.writeLog(ctx, op, "asset", "create_account", "account", fmt.Sprint(a.AccountID),
-		asset.AssetName+"/"+a.AccountName, "", fmt.Sprintf(`{"asset_id":%d,"account_name":%q,"has_password":%v}`,
-			assetID, a.AccountName, a.PasswordCipher != ""), nil)
+		asset.AssetName+"/"+a.AccountName, "", after, nil)
 	return a, nil
 }
 
@@ -397,11 +461,18 @@ func (s *AssetService) ListAccounts(ctx context.Context, assetID int64) ([]*mode
 }
 
 // UpdateAccountPassword 更新账号口令。
-func (s *AssetService) UpdateAccountPassword(ctx context.Context, accountID int64, newPassword, changeType string, op OperatorContext) error {
+//
+// syncDB 为 true 时，先在 Oracle 上 ALTER USER，成功后再写堡垒机。
+// 不传或 false 只改堡垒机。库中没有该用户，或管理员口令不可用时，堡垒机口令保持不变。
+func (s *AssetService) UpdateAccountPassword(ctx context.Context, accountID int64, newPassword, changeType string, syncDB *bool, op OperatorContext) error {
 	if newPassword == "" {
 		return fmt.Errorf("新口令不能为空")
 	}
 	acc, err := s.accountRepo.Get(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	synced, err := s.syncOraclePassword(ctx, acc, newPassword, syncDB, op)
 	if err != nil {
 		return err
 	}
@@ -411,11 +482,30 @@ func (s *AssetService) UpdateAccountPassword(ctx context.Context, accountID int6
 	}
 	digest := auth.SM3Hex([]byte(newPassword))
 	if err := s.accountRepo.UpdatePassword(ctx, accountID, cipher, digest, changeType); err != nil {
+		if synced != nil {
+			if rbErr := s.rollbackOraclePassword(ctx, synced, newPassword); rbErr != nil {
+				s.writeLog(ctx, op, "asset", "sync_oracle_password_rollback", "account", fmt.Sprint(accountID),
+					acc.AccountName, "", synced.auditAfter(), rbErr)
+				return fmt.Errorf("数据库口令已修改，但堡垒机保存失败（%v）。回滚数据库口令也失败：%v", err, rbErr)
+			}
+			s.writeLog(ctx, op, "asset", "sync_oracle_password_rollback", "account", fmt.Sprint(accountID),
+				acc.AccountName, "", synced.auditAfter(), nil)
+			return fmt.Errorf("堡垒机保存口令失败，已把数据库口令改回原值：%v", err)
+		}
 		return err
 	}
 	// 审计：只记录变更事件与指纹，不记录口令
+	after := fmt.Sprintf(`{"change_type":%q,"digest":%q}`, changeType, digest)
+	if synced != nil {
+		after = toJSON(map[string]any{
+			"change_type":            changeType,
+			"digest":                 digest,
+			"oracle_password_synced": true,
+			"oracle_admin":           synced.adminName,
+		})
+	}
 	s.writeLog(ctx, op, "asset", "update_account_password", "account", fmt.Sprint(accountID),
-		acc.AccountName, "", fmt.Sprintf(`{"change_type":%q,"digest":%q}`, changeType, digest), nil)
+		acc.AccountName, "", after, nil)
 	return nil
 }
 

@@ -44,6 +44,14 @@ import {
   dictTone,
 } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
+import { isOracleProtocol } from '@/utils/oracleConnect'
+import {
+  defaultProvisionDbUser,
+  defaultSyncDbPassword,
+  provisionDbUserField,
+  showProvisionDbUser,
+  syncDbPasswordField,
+} from './oracleAccountForm'
 
 const app = useAppStore()
 const auth = useAuthStore()
@@ -403,6 +411,8 @@ const accountForm = reactive({
   privileged: false,
   privilege_mode: 'none',
   rotate_days: 0,
+  /** Oracle 新建时默认在目标库执行 CREATE USER。其它协议不使用。 */
+  provision_db_user: false,
 })
 
 function openAccountDialog(account?: Account): void {
@@ -415,8 +425,20 @@ function openAccountDialog(account?: Account): void {
   accountForm.privileged = account?.privileged ?? false
   accountForm.privilege_mode = account?.privilege_mode || 'none'
   accountForm.rotate_days = account?.rotate_days ?? 0
+  accountForm.provision_db_user = defaultProvisionDbUser(
+    currentAsset.value?.protocol,
+    account != null,
+  )
   accountDialogVisible.value = true
 }
+
+const showProvisionDbUserOption = computed(() =>
+  showProvisionDbUser(
+    currentAsset.value?.protocol,
+    editingAccountId.value != null,
+    accountForm.credential_mode,
+  ),
+)
 
 async function submitAccount(): Promise<void> {
   if (!currentAsset.value) return
@@ -426,6 +448,14 @@ async function submitAccount(): Promise<void> {
   }
   // 从「不托管」切回「托管」必须同时给出凭据：
   // 否则会造出"托管但没有任何凭据"的账号 —— 界面正常，连接时才失败。
+  if (
+    showProvisionDbUserOption.value &&
+    accountForm.provision_db_user &&
+    !accountForm.password
+  ) {
+    app.error('在库中创建用户必须填写口令')
+    return
+  }
   if (accountForm.credential_mode === 'managed' && editingAccountId.value) {
     const original = accounts.value.find((a) => a.account_id === editingAccountId.value)
     if (original?.credential_mode === 'manual' && !accountForm.password && !accountForm.private_key) {
@@ -442,6 +472,12 @@ async function submitAccount(): Promise<void> {
     privileged: accountForm.privileged,
     privilege_mode: accountForm.privilege_mode,
     rotate_days: Number(accountForm.rotate_days) || 0,
+    provision_db_user: provisionDbUserField(
+      currentAsset.value?.protocol,
+      editingAccountId.value != null,
+      accountForm.credential_mode,
+      accountForm.provision_db_user,
+    ),
   }
   accountSubmitting.value = true
   try {
@@ -450,7 +486,11 @@ async function submitAccount(): Promise<void> {
       app.success('账号已更新')
     } else {
       await createAccount(currentAsset.value.asset_id, payload)
-      app.success('账号创建成功')
+      app.success(
+        payload.provision_db_user
+          ? '账号已创建，并已在 Oracle 中创建同名用户'
+          : '账号创建成功',
+      )
     }
     accountDialogVisible.value = false
     await loadAccounts()
@@ -483,12 +523,16 @@ async function confirmRemoveAccount(): Promise<void> {
 const pwdDialogVisible = ref(false)
 const pwdSubmitting = ref(false)
 const pwdTarget = ref<Account | null>(null)
-const pwdForm = reactive({ password: '', confirm: '' })
+const pwdForm = reactive({ password: '', confirm: '', sync_db_password: false })
 
 function openPwdDialog(account: Account): void {
   pwdTarget.value = account
   pwdForm.password = ''
   pwdForm.confirm = ''
+  pwdForm.sync_db_password = defaultSyncDbPassword(
+    currentAsset.value?.protocol,
+    account.credential_mode,
+  )
   pwdDialogVisible.value = true
 }
 
@@ -504,8 +548,13 @@ async function submitPwd(): Promise<void> {
   }
   pwdSubmitting.value = true
   try {
-    await updateAccountPassword(pwdTarget.value.account_id, pwdForm.password)
-    app.success('账号口令已更新')
+    const syncDb = syncDbPasswordField(currentAsset.value?.protocol, pwdForm.sync_db_password)
+    await updateAccountPassword(
+      pwdTarget.value.account_id,
+      pwdForm.password,
+      syncDb === undefined ? undefined : { sync_db_password: syncDb },
+    )
+    app.success(syncDb ? '账号口令已更新，并已同步到 Oracle' : '账号口令已更新')
     pwdDialogVisible.value = false
     await loadAccounts()
   } catch {
@@ -869,7 +918,9 @@ onMounted(async () => {
         </div>
         <template v-if="accountForm.credential_mode === 'managed'">
           <div class="form-item">
-            <label class="form-label">口令</label>
+            <label class="form-label">
+              口令<span v-if="showProvisionDbUserOption && accountForm.provision_db_user" class="required">*</span>
+            </label>
             <input v-model="accountForm.password" class="input" type="password" placeholder="留空表示不修改" />
           </div>
           <div class="form-item">
@@ -887,6 +938,17 @@ onMounted(async () => {
           <label class="form-label">口令轮换周期（天）</label>
           <input v-model="accountForm.rotate_days" class="input text-mono" placeholder="0 表示不轮换" />
           <div class="form-hint">不托管账号不参与轮换：口令不在堡垒机手里。</div>
+        </div>
+        <div v-if="showProvisionDbUserOption" class="form-item span-2">
+          <label class="checkbox">
+            <input v-model="accountForm.provision_db_user" type="checkbox" />
+            <span>同时在库中创建用户</span>
+          </label>
+          <div class="form-hint">
+            使用本资产上已托管的管理员账号连接 Oracle（优先 SYSTEM，其次 SYS，或已标记为特权的账号），
+            执行 CREATE USER，并授予 CONNECT、RESOURCE。库中已有同名用户时会失败，不会改它的口令，也不会在堡垒机登记。
+            只登记已有库用户，或这是第一个管理员账号时，请取消勾选。
+          </div>
         </div>
         <div class="form-item span-2">
           <label class="checkbox">
@@ -915,6 +977,15 @@ onMounted(async () => {
         <div class="form-item">
           <label class="form-label">确认新口令<span class="required">*</span></label>
           <input v-model="pwdForm.confirm" class="input" type="password" autocomplete="new-password" />
+        </div>
+        <div v-if="isOracleProtocol(currentAsset?.protocol)" class="form-item">
+          <label class="checkbox">
+            <input v-model="pwdForm.sync_db_password" type="checkbox" />
+            <span>同时修改数据库口令</span>
+          </label>
+          <div class="form-hint">
+            使用管理员账号执行 ALTER USER。库中没有该用户，或没有可用的管理员口令时会失败，堡垒机里的口令保持不变。
+          </div>
         </div>
       </div>
       <template #footer>

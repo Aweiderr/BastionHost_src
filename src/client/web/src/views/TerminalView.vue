@@ -10,6 +10,7 @@ import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebsshUrl, PROTOCOL_MAP, dictLabel } from '@/utils/constants'
+import { isOracleProtocol } from '@/utils/oracleConnect'
 
 interface TermTab {
   key: string
@@ -176,6 +177,12 @@ function connectTab(key: string): void {
   const tab = tabByKey(key)
   const rt = runtimes.get(key)
   if (!tab || !rt) return
+  if (isOracleProtocol(tab.protocol)) {
+    tab.status = 'error'
+    tab.statusText = '请用客户端'
+    tab.errorText = 'Oracle 不使用 Web 终端。请回到「我的资源」，点「连接」查看 sqlplus / DBeaver 说明。'
+    return
+  }
   if (tab.status === 'connecting' || tab.status === 'connected') return
   if (tab.needApproval) {
     tab.status = 'error'
@@ -436,7 +443,8 @@ async function restoreTabs(): Promise<void> {
   }
 }
 
-function openAsset(asset: OpsAsset, autoConnect: boolean): void {
+function openAsset(asset: OpsAsset, autoConnect: boolean): boolean {
+  if (isOracleProtocol(asset.protocol)) return false
   const existing = tabs.value.find((tab) => tab.assetId === asset.asset_id)
   if (existing) {
     activeKey.value = existing.key
@@ -447,7 +455,7 @@ function openAsset(asset: OpsAsset, autoConnect: boolean): void {
         existing.statusText = '需审批'
         existing.errorText = '该资源已绑定，但需要先提交工单并审批通过后才能连接'
         persistTabs()
-        return
+        return true
       }
       if (autoConnect) {
         existing.pendingConnect = true
@@ -455,7 +463,7 @@ function openAsset(asset: OpsAsset, autoConnect: boolean): void {
       }
     }
     persistTabs()
-    return
+    return true
   }
   const tab: TermTab = {
     key: `${asset.asset_id}-${Date.now()}`,
@@ -486,6 +494,7 @@ function openAsset(asset: OpsAsset, autoConnect: boolean): void {
   tabs.value.push(tab)
   activeKey.value = tab.key
   persistTabs()
+  return true
 }
 
 async function openFromRoute(): Promise<void> {
@@ -518,7 +527,9 @@ async function openFromRoute(): Promise<void> {
     app.error('该资源不在你的授权列表中')
     return
   }
-  openAsset(asset, autoConnect)
+  if (!openAsset(asset, autoConnect)) {
+    app.info('Oracle 不使用 Web 终端，请回到「我的资源」查看客户端连接说明')
+  }
 }
 
 watch(
@@ -555,13 +566,15 @@ onBeforeUnmount(() => {
       <div>
         <div class="page-title">Web 终端</div>
         <div class="page-subtitle">
-          每个资源单独一个页签，可以同时开着。口令已托管的账号会直接连接；不托管的账号会再问一次目标口令。
+          每个资源单独一个页签，可以同时开着。口令已托管的账号会直接连接；不托管的账号会再问一次目标口令。Oracle 不在此连接，请回到「我的资源」查看客户端说明。
         </div>
       </div>
     </div>
 
     <div v-if="!tabs.length" class="card">
-      <div class="card-body">还没有打开的资源。请从「我的资源」点「连接」。</div>
+      <div class="card-body">
+        还没有打开的资源。SSH 等协议请从「我的资源」点「连接」。Oracle 请在该页查看客户端连接说明。
+      </div>
     </div>
 
     <template v-else>

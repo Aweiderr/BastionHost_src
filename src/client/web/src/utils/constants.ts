@@ -7,6 +7,32 @@
 export const WEBSSH_PORT = 8081
 export const WEBSSH_PATH = '/api/v1/webssh'
 
+/**
+ * Oracle SQL 客户端要连接的堡垒机网关。
+ *
+ * 数据面监听是 BASTION_ORACLE_LISTEN（默认 :1521）。管理端目前不下发
+ * 对外地址，Web 也没有对应的环境变量，因此先用前端常量。
+ * 页面若开在堡垒机的非回环地址上，则用该主机名覆盖常量，端口仍是 1521。
+ * 这不是资产台账里的 host:port（那是堡垒机到数据库的目标）。
+ */
+export const ORACLE_GATEWAY_HOST = '192.168.106.114'
+export const ORACLE_GATEWAY_PORT = 1521
+
+const ORACLE_GATEWAY_LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+
+/** 解析 SQL 客户端应填写的网关主机。回环地址与空值回退到常量。 */
+export function resolveOracleGatewayHost(pageHost?: string | null): string {
+  const host = (pageHost ?? '').trim()
+  if (!host || ORACLE_GATEWAY_LOOPBACK.has(host.toLowerCase())) return ORACLE_GATEWAY_HOST
+  return host
+}
+
+/** 当前页面所在主机；本地开发（localhost）仍给出常量里的堡垒机地址。 */
+export function oracleGatewayHost(): string {
+  if (typeof window === 'undefined') return ORACLE_GATEWAY_HOST
+  return resolveOracleGatewayHost(window.location.hostname)
+}
+
 /** 拼接 WebSSH 的 WebSocket 地址（同源主机名 + 固定端口） */
 export function buildWebsshUrl(): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'

@@ -9,7 +9,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "build:only": "vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test src/api/http.passwordExpired.test.ts src/utils/constants.session.test.ts"
+    "test": "node --experimental-strip-types --test src/api/http.passwordExpired.test.ts src/utils/constants.session.test.ts src/utils/oracleConnect.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

@@ -83,8 +83,9 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
-        // 运维视角的「已授权资源」列表。Web 终端本身只承载会话标签，
-        // 资源从本页点「连接」带 asset/connect 打开。operator 看不到资产管理台账。
+        // 运维视角的「已授权资源」列表。Web 终端本身只承载会话标签。
+        // SSH 等协议从本页点「连接」带 asset/connect 打开；Oracle 只弹出客户端说明。
+        // operator 看不到资产管理台账。
         path: 'resources',
         name: 'resources',
         component: () => import('@/views/OpsResourcesView.vue'),

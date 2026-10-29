@@ -1,15 +1,17 @@
 <script setup lang="ts">
 /**
  * 我的资源：仅展示绑定给当前用户的资产（/ops/assets）。
- * 可直连的跳 Web 终端；需审批的引导去工单申请。
+ * SSH 等协议跳 Web 终端；Oracle 只弹出客户端连接说明；需审批的引导去工单申请。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { listOpsAssets, type OpsAsset } from '@/api/ops'
 import DataTable from '@/components/DataTable.vue'
+import OracleConnectDialog from '@/components/OracleConnectDialog.vue'
 import type { TableColumn } from '@/types/ui'
 import { PROTOCOL_MAP, dictLabel } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
+import { isOracleProtocol } from '@/utils/oracleConnect'
 
 defineOptions({ name: 'OpsResourcesView' })
 
@@ -17,6 +19,8 @@ const router = useRouter()
 const loading = ref(false)
 const items = ref<OpsAsset[]>([])
 const keyword = ref('')
+const oracleOpen = ref(false)
+const oracleAsset = ref<OpsAsset | null>(null)
 
 const columns: TableColumn[] = [
   { key: 'asset', title: '资产' },
@@ -70,6 +74,12 @@ function connect(row: OpsAsset): void {
     void router.push({ path: '/tickets' })
     return
   }
+  // Oracle 走本地 SQL 客户端。Web 终端会按 SSH 握手，连数据库必然失败。
+  if (isOracleProtocol(row.protocol)) {
+    oracleAsset.value = row
+    oracleOpen.value = true
+    return
+  }
   void router.push({
     path: '/terminal',
     query: { asset: String(row.asset_id), connect: '1' },
@@ -85,7 +95,7 @@ onMounted(load)
       <div>
         <div class="page-title">我的资源</div>
         <div class="page-subtitle">
-          仅列出已授权给您的资产。可直连的点「连接」打开 Web 终端；需审批的请先提交工单。
+          仅列出已授权给您的资产。SSH 等协议点「连接」打开 Web 终端；Oracle 点「连接」查看本机客户端连接说明，不进入 Web 终端。需审批的请先提交工单。
         </div>
       </div>
       <button class="btn" type="button" :disabled="loading" @click="load">
@@ -163,6 +173,8 @@ onMounted(load)
         </td>
       </tr>
     </DataTable>
+
+    <OracleConnectDialog v-model="oracleOpen" :asset="oracleAsset" />
   </div>
 </template>
 

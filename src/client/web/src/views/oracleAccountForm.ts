@@ -1,10 +1,12 @@
 /**
  * Oracle 建库用户的界面默认值。
  * 勾选只出现在 Oracle 新建托管账号上，默认开启；SSH 不带这个字段。
+ * 协议判断与「我的资源」里的客户端说明共用 isOracleProtocol。
  */
+import { isOracleProtocol } from '../utils/oracleConnect.ts'
 
 export function defaultProvisionDbUser(protocol: string | undefined, editing: boolean): boolean {
-  return !editing && protocol === 'oracle'
+  return !editing && isOracleProtocol(protocol)
 }
 
 export function showProvisionDbUser(
@@ -12,7 +14,7 @@ export function showProvisionDbUser(
   editing: boolean,
   credentialMode: string,
 ): boolean {
-  return protocol === 'oracle' && !editing && credentialMode === 'managed'
+  return isOracleProtocol(protocol) && !editing && credentialMode === 'managed'
 }
 
 /**
@@ -26,7 +28,7 @@ export function provisionDbUserField(
   credentialMode: string,
   checked: boolean,
 ): boolean | undefined {
-  if (protocol !== 'oracle' || editing) return undefined
+  if (!isOracleProtocol(protocol) || editing) return undefined
   return credentialMode === 'managed' && checked
 }
 
@@ -34,7 +36,7 @@ export function defaultSyncDbPassword(
   protocol: string | undefined,
   credentialMode: string | undefined,
 ): boolean {
-  return protocol === 'oracle' && credentialMode !== 'manual'
+  return isOracleProtocol(protocol) && credentialMode !== 'manual'
 }
 
 /** 非 Oracle 不提交，避免 SSH 重置口令被当成改库口令。 */
@@ -42,6 +44,6 @@ export function syncDbPasswordField(
   protocol: string | undefined,
   checked: boolean,
 ): boolean | undefined {
-  if (protocol !== 'oracle') return undefined
+  if (!isOracleProtocol(protocol)) return undefined
   return checked
 }

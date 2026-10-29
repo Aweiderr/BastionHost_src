@@ -44,6 +44,7 @@ import {
   dictTone,
 } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
+import { isOracleProtocol } from '@/utils/oracleConnect'
 import {
   defaultProvisionDbUser,
   defaultSyncDbPassword,
@@ -977,7 +978,7 @@ onMounted(async () => {
           <label class="form-label">确认新口令<span class="required">*</span></label>
           <input v-model="pwdForm.confirm" class="input" type="password" autocomplete="new-password" />
         </div>
-        <div v-if="currentAsset?.protocol === 'oracle'" class="form-item">
+        <div v-if="isOracleProtocol(currentAsset?.protocol)" class="form-item">
           <label class="checkbox">
             <input v-model="pwdForm.sync_db_password" type="checkbox" />
             <span>同时修改数据库口令</span>

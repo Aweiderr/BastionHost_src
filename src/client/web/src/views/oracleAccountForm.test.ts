@@ -10,6 +10,7 @@ import {
 
 test('Oracle 新建账号默认同时在库中创建用户', () => {
   assert.equal(defaultProvisionDbUser('oracle', false), true)
+  assert.equal(defaultProvisionDbUser('Oracle', false), true)
   assert.equal(showProvisionDbUser('oracle', false, 'managed'), true)
   assert.equal(provisionDbUserField('oracle', false, 'managed', true), true)
 })

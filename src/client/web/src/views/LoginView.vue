@@ -147,6 +147,11 @@ async function redirectAfterLogin(): Promise<void> {
 }
 
 async function afterLoginSuccess(result: LoginResult): Promise<void> {
+  // 与桌面端一致：临期文案由服务端生成，这里原样用醒目 toast 提示，不挡后续跳转。
+  // 全局 toast 挂在 App 根上，离开登录页后仍然看得到。
+  const expiryHint = result.cert_expiry_hint?.trim()
+  if (expiryHint) app.push(expiryHint, 'error', 8000)
+
   if (result.must_change_password || result.password_expired) {
     // 先闩住，避免紧接着的 AUTH_4008 再弹一次同样的话
     auth.notePasswordExpired()

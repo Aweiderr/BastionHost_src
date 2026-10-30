@@ -23,6 +23,7 @@ import type {
   UKeyCertQuery,
   UKeyCertRecord,
   UKeyChallenge,
+  UKeyExpiringCertsResult,
   UKeyIssueByPubkeyPayload,
   UKeyIssuePayload,
   UKeyLoginAssertion,
@@ -88,6 +89,20 @@ export function ukeyLogin(assertion: UKeyLoginAssertion) {
 /** 证书分页查询；用户管理页按 owner_id 过滤即可得到"某人的证书" */
 export function listUKeyCerts(query: UKeyCertQuery = {}) {
   return request<PageResult<UKeyCertRecord>>('/ukey/certs', { params: { ...query } })
+}
+
+/**
+ * 临期 / 已过期的用户 UKey 证书。
+ *
+ * 默认窗口与登录提示一致（约 30 天）。服务端在返回列表之前会把已经过了
+ * not_after 的 active client 证书标成 expired，因此进入证书链页或点刷新
+ * 就会顺带完成这次状态修正，前端不用再打别的接口。
+ * 权限点是 key:cert:manage。
+ */
+export function listExpiringUKeyCerts(withinDays = 30) {
+  return request<UKeyExpiringCertsResult>('/ukey/certs/expiring', {
+    params: { within_days: withinDays },
+  })
 }
 
 /**

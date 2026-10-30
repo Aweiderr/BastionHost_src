@@ -11,10 +11,20 @@
  * 的操作，统一在用户管理页的「证书链」按钮里完成，两处并存会让"这张证书到底
  * 绑给谁"变得难以回答。内部 CA 的**初始化入口也不在本页**（由部署流程另行指定
  * 位置），本页只如实显示"当前是否已初始化"，不放置任何触发按钮。
+ *
+ * 用户证书的临期 / 过期不在上面这条链台账里（那是 CA），单独拉
+ * `GET /ukey/certs/expiring`。打开本页或点刷新时服务端会顺带把已过期的
+ * 用户证书标成 expired。
  */
 import { computed, onMounted, ref } from 'vue'
-import { UKEY_CHAIN_PERMISSION, getUKeyCA, importExternalCA, listUKeyCerts } from '@/api/ukey'
-import type { UKeyCAStatus, UKeyCertRecord } from '@/api/types'
+import {
+  UKEY_CHAIN_PERMISSION,
+  getUKeyCA,
+  importExternalCA,
+  listExpiringUKeyCerts,
+  listUKeyCerts,
+} from '@/api/ukey'
+import type { UKeyCAStatus, UKeyCertRecord, UKeyExpiringCert } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import Modal from '@/components/Modal.vue'
 import StatusTag from '@/components/StatusTag.vue'
@@ -108,8 +118,37 @@ async function loadCerts(): Promise<void> {
   }
 }
 
+/** 与登录提示、后端默认窗口一致 */
+const EXPIRING_WITHIN_DAYS = 30
+
+const expiringLoading = ref(false)
+const expiringCerts = ref<UKeyExpiringCert[]>([])
+const expiringWithinDays = ref(EXPIRING_WITHIN_DAYS)
+const expiringError = ref('')
+
+/**
+ * 临期用户证书。
+ *
+ * 失败时清空列表并记下原因：否则界面会继续显示「近 N 天内没有临期证书」，
+ * 把接口失败看成一切正常。request 已经弹过全局 toast，这里不再重复弹一次。
+ */
+async function loadExpiring(): Promise<void> {
+  expiringLoading.value = true
+  expiringError.value = ''
+  try {
+    const res = await listExpiringUKeyCerts(EXPIRING_WITHIN_DAYS)
+    expiringCerts.value = res.items ?? []
+    expiringWithinDays.value = res.within_days > 0 ? res.within_days : EXPIRING_WITHIN_DAYS
+  } catch (err) {
+    expiringCerts.value = []
+    expiringError.value = err instanceof Error ? err.message : '临期证书读取失败'
+  } finally {
+    expiringLoading.value = false
+  }
+}
+
 async function refreshAll(): Promise<void> {
-  await Promise.all([loadCA(), loadCerts()])
+  await Promise.all([loadCA(), loadCerts(), loadExpiring()])
 }
 
 onMounted(() => {
@@ -344,6 +383,39 @@ function statusTone(status: string): 'success' | 'danger' | 'warning' | 'default
   return 'default'
 }
 
+/** 临期列表里的状态：即将过期与已过期都标红，避免混在普通「可用」里被看漏 */
+function expiringTagText(item: UKeyExpiringCert): string {
+  if (item.status === 'expired' || item.days_left < 0) return '已过期'
+  return '即将过期'
+}
+
+function daysLeftText(item: UKeyExpiringCert): string {
+  if (item.status === 'expired' || item.days_left < 0) {
+    return item.days_left < 0 ? `已过期 ${-item.days_left} 天` : '已过期'
+  }
+  if (item.days_left === 0) return '今天到期'
+  return `剩余 ${item.days_left} 天`
+}
+
+function expiringName(item: UKeyExpiringCert): string {
+  const name = (item.cert_name || '').trim()
+  return name || `证书 #${item.cert_id}`
+}
+
+function expiringOwner(item: UKeyExpiringCert): string {
+  const name = (item.owner_name || '').trim()
+  if (name) return name
+  if (item.owner_id) return `用户 #${item.owner_id}`
+  return '—'
+}
+
+function shortFingerprint(value: string): string {
+  const fp = (value || '').trim()
+  if (!fp) return '—'
+  if (fp.length <= 18) return fp
+  return `${fp.slice(0, 8)}…${fp.slice(-8)}`
+}
+
 function shortDN(dn: string): string {
   if (!dn) return '—'
   return dn.length > 64 ? `…${dn.slice(-62)}` : dn
@@ -416,11 +488,13 @@ const caChains = computed(() => {
         <div class="page-title">证书链管理</div>
         <div class="page-subtitle">
           管理与维护用户 UKey 证书的信任基础：SM2 / RSA 两套内部 CA、外部信任锚，以及各条证书链的构成。
-          用户与证书的绑定关系在用户管理页的「证书链」入口维护。
+          临期或已过期的用户证书列在本页上方；证书与用户的绑定在用户管理页的「证书链」入口维护。
         </div>
       </div>
       <div class="btn-group">
-        <button class="btn" :disabled="caLoading || certLoading" @click="refreshAll">刷新</button>
+        <button class="btn" :disabled="caLoading || certLoading || expiringLoading" @click="refreshAll">
+          刷新
+        </button>
       </div>
     </div>
 
@@ -431,6 +505,75 @@ const caChains = computed(() => {
     </div>
 
     <template v-else>
+      <!-- 用户证书临期：与上面的 CA 链台账不是同一份数据。
+           打开本页 / 点刷新都会打 GET /ukey/certs/expiring，服务端顺带标记已过期证书。 -->
+      <div
+        class="card mb-16"
+        :style="expiringCerts.length ? 'border-color: var(--color-danger)' : undefined"
+      >
+        <div class="card-body">
+          <div class="flex-center gap-8 mb-12" style="flex-wrap: wrap">
+            <span class="form-label" style="margin: 0">用户证书临期提醒</span>
+            <StatusTag
+              v-if="expiringCerts.length"
+              :text="`${expiringCerts.length} 张需处理`"
+              tone="danger"
+            />
+            <span class="text-muted" style="font-size: 12.5px">
+              近 {{ expiringWithinDays }} 天内到期或已过期的用户 UKey 证书
+            </span>
+          </div>
+
+          <div
+            v-if="expiringLoading && !expiringCerts.length && !expiringError"
+            class="text-secondary"
+            style="font-size: 12.5px"
+          >
+            正在检查临期证书…
+          </div>
+          <div v-else-if="expiringError" class="text-danger" style="font-size: 12.5px; line-height: 1.6">
+            {{ expiringError }}
+          </div>
+          <div v-else-if="!expiringCerts.length" class="text-secondary" style="font-size: 12.5px">
+            近 {{ expiringWithinDays }} 天内没有即将过期或已过期的用户证书。
+          </div>
+          <div v-else class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>证书名称</th>
+                  <th style="width: 140px">归属用户</th>
+                  <th style="width: 180px">指纹</th>
+                  <th style="width: 170px">到期时间</th>
+                  <th style="width: 120px">剩余时间</th>
+                  <th style="width: 110px">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in expiringCerts" :key="item.cert_id">
+                  <td>{{ expiringName(item) }}</td>
+                  <td>{{ expiringOwner(item) }}</td>
+                  <td class="text-mono" style="font-size: 12px" :title="item.fingerprint || ''">
+                    {{ shortFingerprint(item.fingerprint) }}
+                  </td>
+                  <td class="text-danger" style="font-size: 12.5px">
+                    {{ formatTime(item.not_after) }}
+                  </td>
+                  <td class="text-danger" style="font-size: 12.5px">{{ daysLeftText(item) }}</td>
+                  <td>
+                    <StatusTag :text="expiringTagText(item)" tone="danger" />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="text-muted mt-8" style="font-size: 12px; line-height: 1.6">
+            打开本页或点击刷新时，服务端会把已过期的用户证书标为「已过期」。换发请到用户管理页的「证书链」。
+          </div>
+        </div>
+      </div>
+
       <!-- 全局状态：ukey.enabled 与"CA 是否初始化"是两件不同的事，分开显示。
            本页**不提供**初始化入口（初始化位置由部署流程另行指定），只如实显示状态 -->
       <div v-if="caStatus" class="card mb-16">

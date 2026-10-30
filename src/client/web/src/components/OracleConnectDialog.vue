@@ -148,18 +148,32 @@ async function copyText(text: string, label: string): Promise<void> {
 
       <div class="snippet-block">
         <div class="snippet-head">
-          <span class="form-label">sqlplus</span>
+          <span class="form-label">sqlplus（Windows cmd）</span>
           <button class="btn btn-sm" type="button" @click="copyText(guide.sqlplus, 'sqlplus 命令')">
             复制
           </button>
         </div>
         <pre class="snippet text-mono">{{ guide.sqlplus }}</pre>
         <div class="form-hint">
-          在运维工作站执行。服务名已按当前账号填好；请把
+          运维工作站默认用 Windows Instant Client。把这一行粘贴到 cmd.exe。整段连接串放在双引号里，圆括号会原样交给 sqlplus。
+          请把
           <span class="text-mono">{{ DB_PASSWORD_PLACEHOLDER }}</span>
           换成数据库口令，把
           <span class="text-mono">{{ BASTION_PASSWORD_PLACEHOLDER }}</span>
           换成堡垒机登录口令。
+        </div>
+      </div>
+
+      <div class="snippet-block">
+        <div class="snippet-head">
+          <span class="form-label">sqlplus（bash）</span>
+          <button class="btn btn-sm" type="button" @click="copyText(guide.sqlplusBash, 'bash sqlplus 命令')">
+            复制
+          </button>
+        </div>
+        <pre class="snippet text-mono">{{ guide.sqlplusBash }}</pre>
+        <div class="form-hint">
+          Linux 或 macOS 终端用这一行。整段连接串放在单引号里，服务名中的 # 会原样保留。占位符替换方式与上面相同。
         </div>
       </div>
 

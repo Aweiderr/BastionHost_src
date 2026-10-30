@@ -107,7 +107,7 @@ export function readClipboardEnvironment(source: ClipboardGlobals = browserGloba
 
 /**
  * 在当前文档放一个不可见 textarea，选中后执行 copy。
- * 必须由点击事件同步调用。display:none 的节点无法被选中，所以只移出视线。
+ * 必须由点击事件同步调用。display:none 的节点无法被选中，所以留在视口里并设为透明。
  */
 export function copyWithExecCommand(text: string, doc?: CopyCommandDocument): boolean {
   const target = doc ?? browserDocument()

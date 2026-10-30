@@ -39,12 +39,28 @@ export interface OracleConnectGuide {
   /** 已选账号时为账号名，否则为空，界面改用占位说明 */
   dbUsername: string
   description: string
+  /**
+   * Windows cmd 可直接粘贴的命令，复制按钮默认用这一行。
+   * 整段登录串用双引号。cmd 会去掉这对引号，圆括号不会被当成分组符。
+   */
   sqlplus: string
+  /** bash。整段单引号，避免服务名里的 # 被当成注释。 */
+  sqlplusBash: string
   jdbcUrl: string
 }
 
+/** bash 单引号。值里的单引号写成 '\'' 。 */
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * cmd.exe 用双引号分组参数，不认单引号。
+ * 引号内的圆括号是字面量；嵌入的双引号写成 ""。
+ * sqlplus 看到的是去掉外层引号之后的登录串。
+ */
+function cmdDoubleQuote(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
 }
 
 export function buildOracleConnectGuide(input: OracleConnectInput): OracleConnectGuide {
@@ -62,9 +78,9 @@ export function buildOracleConnectGuide(input: OracleConnectInput): OracleConnec
     `(CONNECT_DATA=(SERVICE_NAME=${serviceName})(BASTION_PASSWORD=${BASTION_PASSWORD_PLACEHOLDER})))`
   const dbUsername = accountName
   const sqlUser = accountName || DB_USERNAME_PLACEHOLDER
-  const sqlplus = `sqlplus ${shellSingleQuote(
-    `${sqlUser}/${DB_PASSWORD_PLACEHOLDER}@${description}`,
-  )}`
+  const logon = `${sqlUser}/${DB_PASSWORD_PLACEHOLDER}@${description}`
+  const sqlplus = `sqlplus ${cmdDoubleQuote(logon)}`
+  const sqlplusBash = `sqlplus ${shellSingleQuote(logon)}`
   const jdbcUrl = `jdbc:oracle:thin:@${description}`
   return {
     gatewayHost,
@@ -74,6 +90,7 @@ export function buildOracleConnectGuide(input: OracleConnectInput): OracleConnec
     dbUsername,
     description,
     sqlplus,
+    sqlplusBash,
     jdbcUrl,
   }
 }

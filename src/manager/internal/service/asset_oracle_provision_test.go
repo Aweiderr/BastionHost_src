@@ -302,15 +302,120 @@ func TestResetOraclePasswordSyncsAndRollsBack(t *testing.T) {
 		}
 		assertNoSecrets(t, logs)
 	})
-	t.Run("unchecked and ssh stay local", func(t *testing.T) {
-		svc, acc, _, opener := setupOracle()
+	t.Run("omitted flag still syncs oracle managed", func(t *testing.T) {
+		svc, acc, logs, opener := setupOracle()
+		acc.add(systemAccount(3))
 		acc.add(appAccount())
-		if err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", boolPtr(false), OperatorContext{Username: "sysadmin"}); err != nil {
+		opener.sess.exists = true
+		err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(opener.calls) != 1 || opener.calls[0].Username != "SYSTEM" || opener.calls[0].Password != adminPass || opener.calls[0].SysDBA {
+			t.Fatalf("admin = %+v", opener.calls)
+		}
+		if len(opener.sess.stmts) != 1 || opener.sess.stmts[0] != `ALTER USER APP IDENTIFIED BY "`+newPass+`"` {
+			t.Fatalf("sql = %#v", opener.sess.stmts)
+		}
+		if len(acc.passwords) != 1 || acc.passwords[0] != "enc:"+newPass {
+			t.Fatalf("stored = %#v", acc.passwords)
+		}
+		assertNoSecrets(t, logs)
+	})
+	t.Run("uses SYS as sysdba when SYSTEM is absent", func(t *testing.T) {
+		svc, acc, logs, opener := setupOracle()
+		acc.add(&model.Account{
+			AccountID: 2, AssetID: 3, AccountName: "SYS", CredentialMode: model.CredentialManaged,
+			PasswordCipher: "enc:" + adminPass, Status: "active",
+		})
+		acc.add(&model.Account{
+			AccountID: 8, AssetID: 3, AccountName: "dbadmin", Privileged: true,
+			CredentialMode: model.CredentialManaged, PasswordCipher: "enc:" + adminPass, Status: "active",
+		})
+		acc.add(appAccount())
+		opener.sess.exists = true
+		if err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(opener.calls) != 1 || opener.calls[0].Username != "SYS" || !opener.calls[0].SysDBA || opener.calls[0].Password != adminPass {
+			t.Fatalf("admin = %+v", opener.calls)
+		}
+		assertNoSecrets(t, logs)
+	})
+	t.Run("manual account without the flag stays local", func(t *testing.T) {
+		svc, acc, _, opener := setupOracle()
+		acc.add(&model.Account{
+			AccountID: 9, AssetID: 3, AccountName: "app",
+			CredentialMode: model.CredentialManual, Status: "active",
+		})
+		if err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"}); err != nil {
 			t.Fatal(err)
 		}
 		if len(opener.calls) != 0 || len(acc.passwords) != 1 {
 			t.Fatalf("calls=%d stored=%d", len(opener.calls), len(acc.passwords))
 		}
+	})
+	t.Run("explicit false does not leave vault and database apart", func(t *testing.T) {
+		svc, acc, logs, opener := setupOracle()
+		acc.add(systemAccount(3))
+		acc.add(appAccount())
+		err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", boolPtr(false), OperatorContext{Username: "sysadmin"})
+		if err == nil || !strings.Contains(err.Error(), "必须同时修改数据库口令") || strings.Contains(err.Error(), newPass) {
+			t.Fatal(err)
+		}
+		if len(opener.calls) != 0 || len(acc.passwords) != 0 {
+			t.Fatalf("calls=%d stored=%d", len(opener.calls), len(acc.passwords))
+		}
+		if findLog(logs, "sync_oracle_password") == nil || findLog(logs, "update_account_password") != nil {
+			t.Fatalf("audit = %s", logs.dump())
+		}
+		assertNoSecrets(t, logs)
+	})
+	t.Run("missing admin leaves bastion password", func(t *testing.T) {
+		svc, acc, logs, opener := setupOracle()
+		acc.add(appAccount())
+		err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"})
+		if err == nil || !strings.Contains(err.Error(), "高权限托管账号") || !strings.Contains(err.Error(), "未保存") {
+			t.Fatal(err)
+		}
+		if len(opener.calls) != 0 || len(acc.passwords) != 0 {
+			t.Fatalf("calls=%d stored=%d", len(opener.calls), len(acc.passwords))
+		}
+		if findLog(logs, "sync_oracle_password") == nil || findLog(logs, "sync_oracle_password").Result != "fail" {
+			t.Fatalf("audit = %s", logs.dump())
+		}
+		assertNoSecrets(t, logs)
+	})
+	t.Run("dial failure leaves bastion password", func(t *testing.T) {
+		svc, acc, logs, opener := setupOracle()
+		acc.add(systemAccount(3))
+		acc.add(appAccount())
+		opener.openErr = errors.New("dial oracle://SYSTEM:" + adminPass + "@10.1.1.9:1521/ORCLPDB IDENTIFIED BY \"" + newPass + "\"")
+		err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"})
+		if err == nil || !strings.Contains(err.Error(), "连接 Oracle") || len(acc.passwords) != 0 {
+			t.Fatal(err)
+		}
+		if strings.Contains(err.Error(), adminPass) || strings.Contains(err.Error(), newPass) || strings.Contains(err.Error(), userPass) {
+			t.Fatal(err)
+		}
+		assertNoSecrets(t, logs)
+	})
+	t.Run("alter failure leaves bastion password", func(t *testing.T) {
+		svc, acc, logs, opener := setupOracle()
+		acc.add(systemAccount(3))
+		acc.add(appAccount())
+		opener.sess.exists = true
+		opener.sess.execErr = errors.New("ORA-01031: insufficient privileges for " + newPass)
+		err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"})
+		if err == nil || !strings.Contains(err.Error(), "权限不足") || len(acc.passwords) != 0 {
+			t.Fatal(err)
+		}
+		if strings.Contains(err.Error(), newPass) || strings.Contains(err.Error(), adminPass) {
+			t.Fatal(err)
+		}
+		assertNoSecrets(t, logs)
+	})
+	t.Run("ssh stays local", func(t *testing.T) {
 		asset := oracleAsset()
 		asset.Protocol = "ssh"
 		svc, acc, logs, opener := setup(asset)
@@ -318,11 +423,14 @@ func TestResetOraclePasswordSyncsAndRollsBack(t *testing.T) {
 		if err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", nil, OperatorContext{Username: "sysadmin"}); err != nil {
 			t.Fatal(err)
 		}
-		if len(opener.calls) != 0 || strings.Contains(logs.dump(), "oracle") {
-			t.Fatalf("ssh reset called oracle: %s", logs.dump())
+		if err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", boolPtr(false), OperatorContext{Username: "sysadmin"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(opener.calls) != 0 || len(acc.passwords) != 2 || strings.Contains(logs.dump(), "oracle") {
+			t.Fatalf("ssh reset called oracle: stored=%d %s", len(acc.passwords), logs.dump())
 		}
 		err := svc.UpdateAccountPassword(context.Background(), 9, newPass, "manual", boolPtr(true), OperatorContext{Username: "sysadmin"})
-		if err == nil || !strings.Contains(err.Error(), "仅支持 Oracle") || len(acc.passwords) != 1 {
+		if err == nil || !strings.Contains(err.Error(), "仅支持 Oracle") || len(acc.passwords) != 2 || len(opener.calls) != 0 {
 			t.Fatal(err)
 		}
 	})
@@ -561,8 +669,9 @@ func (stubAssets) Update(context.Context, *model.Asset) error { return errors.Ne
 func (stubAssets) Delete(context.Context, int64) error        { return errors.New("unused") }
 
 type recordingSession struct {
-	exists bool
-	stmts  []string
+	exists  bool
+	execErr error
+	stmts   []string
 }
 
 func (s *recordingSession) UserExists(context.Context, string) (bool, error) {
@@ -571,6 +680,9 @@ func (s *recordingSession) UserExists(context.Context, string) (bool, error) {
 
 func (s *recordingSession) Exec(_ context.Context, statement string) error {
 	s.stmts = append(s.stmts, statement)
+	if s.execErr != nil {
+		return s.execErr
+	}
 	return nil
 }
 
@@ -578,6 +690,7 @@ func (s *recordingSession) Close() error { return nil }
 
 type recordingOpener struct {
 	sess    *recordingSession
+	openErr error
 	calls   []oracleprov.Admin
 	targets []oracleprov.Target
 }
@@ -585,5 +698,8 @@ type recordingOpener struct {
 func (r *recordingOpener) open(_ context.Context, target oracleprov.Target, admin oracleprov.Admin) (oracleprov.Session, error) {
 	r.calls = append(r.calls, admin)
 	r.targets = append(r.targets, target)
+	if r.openErr != nil {
+		return nil, r.openErr
+	}
 	return r.sess, nil
 }

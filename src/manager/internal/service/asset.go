@@ -462,8 +462,11 @@ func (s *AssetService) ListAccounts(ctx context.Context, assetID int64) ([]*mode
 
 // UpdateAccountPassword 更新账号口令。
 //
-// syncDB 为 true 时，先在 Oracle 上 ALTER USER，成功后再写堡垒机。
-// 不传或 false 只改堡垒机。库中没有该用户，或管理员口令不可用时，堡垒机口令保持不变。
+// Oracle 托管账号会先用同一资产上的高权限托管账号执行 ALTER USER
+// （优先 SYSTEM，其次 SYS，再次其它已托管口令的特权账号），成功后再写堡垒机。
+// 没有可用管理员、连接失败或 ALTER 失败时，堡垒机口令保持不变。
+// 堡垒机落库失败时，会把数据库口令改回原值。
+// 非 Oracle 资产只更新堡垒机记录。显式要求改库口令时会拒绝，不会改库。
 func (s *AssetService) UpdateAccountPassword(ctx context.Context, accountID int64, newPassword, changeType string, syncDB *bool, op OperatorContext) error {
 	if newPassword == "" {
 		return fmt.Errorf("新口令不能为空")

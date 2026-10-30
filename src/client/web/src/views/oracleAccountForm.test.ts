@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   defaultProvisionDbUser,
-  defaultSyncDbPassword,
+  oraclePasswordResetSyncsDb,
   provisionDbUserField,
   showProvisionDbUser,
   syncDbPasswordField,
@@ -29,11 +29,13 @@ test('不托管、编辑、SSH 都不去创建库用户', () => {
   assert.equal(provisionDbUserField('ssh', false, 'managed', true), undefined)
 })
 
-test('Oracle 重置口令默认同步到库，SSH 不带这个字段', () => {
-  assert.equal(defaultSyncDbPassword('oracle', 'managed'), true)
-  assert.equal(defaultSyncDbPassword('oracle', 'manual'), false)
-  assert.equal(syncDbPasswordField('oracle', true), true)
-  assert.equal(syncDbPasswordField('oracle', false), false)
-  assert.equal(defaultSyncDbPassword('ssh', 'managed'), false)
-  assert.equal(syncDbPasswordField('ssh', true), undefined)
+test('Oracle 托管账号重置口令必须同步到库，不能只改堡垒机', () => {
+  assert.equal(oraclePasswordResetSyncsDb('oracle', 'managed'), true)
+  assert.equal(oraclePasswordResetSyncsDb('Oracle', undefined), true)
+  assert.equal(syncDbPasswordField('oracle', 'managed'), true)
+  assert.equal(syncDbPasswordField('oracle', undefined), true)
+  assert.equal(oraclePasswordResetSyncsDb('oracle', 'manual'), false)
+  assert.equal(syncDbPasswordField('oracle', 'manual'), undefined)
+  assert.equal(oraclePasswordResetSyncsDb('ssh', 'managed'), false)
+  assert.equal(syncDbPasswordField('ssh', 'managed'), undefined)
 })

@@ -85,7 +85,7 @@ export function deleteAccount(accountId: number) {
   return request<Record<string, unknown>>(`/accounts/${accountId}`, { method: 'DELETE' })
 }
 
-/** 重置账号口令。Oracle 可同时 ALTER USER，见 sync_db_password。 */
+/** 重置账号口令。Oracle 托管账号带 sync_db_password，服务端执行 ALTER USER。 */
 export function updateAccountPassword(
   accountId: number,
   password: string,

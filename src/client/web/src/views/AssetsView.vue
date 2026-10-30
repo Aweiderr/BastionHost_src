@@ -27,6 +27,7 @@ import StatusTag from '@/components/StatusTag.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '@/utils/clipboard'
 import {
   ACCOUNT_TYPE_MAP,
   ASSET_LEVELS,
@@ -589,12 +590,9 @@ async function confirmReveal(): Promise<void> {
 }
 
 async function copyPassword(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(revealedPassword.value)
-    app.success('口令已复制到剪贴板')
-  } catch {
-    app.error('浏览器拒绝了剪贴板访问，请手动复制')
-  }
+  const copied = await copyToClipboard(revealedPassword.value)
+  if (copied) app.success('口令已复制到剪贴板')
+  else app.error(CLIPBOARD_DENIED_MESSAGE)
 }
 
 onMounted(async () => {

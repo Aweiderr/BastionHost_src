@@ -143,12 +143,15 @@ func (r *SelftestRepo) List(ctx context.Context, triggerType string, limit int) 
 }
 
 // Cleanup 清理超出保留期的记录。
+//
+// 截止条件用 make_interval(days => $1::int)。($1 || ' days')::interval
+// 会把 $1 定为 text（OID 25），pgx 无法编码 Go int。
 func (r *SelftestRepo) Cleanup(ctx context.Context, keepDays int) (int64, error) {
 	if keepDays <= 0 {
 		keepDays = 365
 	}
 	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM sys_selftest_record WHERE create_time < now() - ($1 || ' days')::interval`, keepDays)
+		`DELETE FROM sys_selftest_record WHERE create_time < now() - make_interval(days => $1::int)`, keepDays)
 	if err != nil {
 		return 0, fmt.Errorf("清理自检记录失败: %w", err)
 	}

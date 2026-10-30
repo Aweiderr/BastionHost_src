@@ -178,12 +178,15 @@ func (r *ChallengeRepo) InvalidateByUser(ctx context.Context, userID int64) erro
 }
 
 // CleanupExpired 清理过期的挑战记录。
+//
+// 截止条件用 make_interval(hours => $1::int)。($1 || ' hours')::interval
+// 与按天拼接相同，会把 $1 定为 text（OID 25），pgx 无法编码 Go int。
 func (r *ChallengeRepo) CleanupExpired(ctx context.Context, keepHours int) (int64, error) {
 	if keepHours <= 0 {
 		keepHours = 24
 	}
 	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM sys_login_challenge WHERE create_time < now() - ($1 || ' hours')::interval`, keepHours)
+		`DELETE FROM sys_login_challenge WHERE create_time < now() - make_interval(hours => $1::int)`, keepHours)
 	if err != nil {
 		return 0, fmt.Errorf("清理登录挑战失败: %w", err)
 	}

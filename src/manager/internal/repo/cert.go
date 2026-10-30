@@ -549,6 +549,11 @@ type ExpiringCert struct {
 }
 
 // ListExpiringSoon 列出 withinDays 天内到期（含已过期）的 client 证书。
+//
+// 窗口必须写成 make_interval(days => $1::int)。($1 || ' days')::interval
+// 会让 PostgreSQL 把 $1 定为 text（OID 25），pgx 无法把 Go int 编码进去
+// （unable to encode … into text format for text (OID 25)），
+// 查询失败后接口只显示「系统内部错误」。
 func (r *CertRepo) ListExpiringSoon(ctx context.Context, withinDays int) ([]ExpiringCert, error) {
 	if withinDays <= 0 {
 		withinDays = 30
@@ -562,7 +567,7 @@ func (r *CertRepo) ListExpiringSoon(ctx context.Context, withinDays int) ([]Expi
 		WHERE c.cert_type = 'client'
 		  AND c.status IN ('active','expired')
 		  AND c.not_after IS NOT NULL
-		  AND c.not_after <= now() + ($1 || ' days')::interval
+		  AND c.not_after <= now() + make_interval(days => $1::int)
 		ORDER BY c.not_after ASC
 		LIMIT 500`, withinDays)
 	if err != nil {

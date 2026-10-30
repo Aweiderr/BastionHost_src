@@ -44,10 +44,9 @@ import {
   dictTone,
 } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
-import { isOracleProtocol } from '@/utils/oracleConnect'
 import {
   defaultProvisionDbUser,
-  defaultSyncDbPassword,
+  oraclePasswordResetSyncsDb,
   provisionDbUserField,
   showProvisionDbUser,
   syncDbPasswordField,
@@ -523,21 +522,20 @@ async function confirmRemoveAccount(): Promise<void> {
 const pwdDialogVisible = ref(false)
 const pwdSubmitting = ref(false)
 const pwdTarget = ref<Account | null>(null)
-const pwdForm = reactive({ password: '', confirm: '', sync_db_password: false })
+const pwdError = ref('')
+const pwdForm = reactive({ password: '', confirm: '' })
 
 function openPwdDialog(account: Account): void {
   pwdTarget.value = account
   pwdForm.password = ''
   pwdForm.confirm = ''
-  pwdForm.sync_db_password = defaultSyncDbPassword(
-    currentAsset.value?.protocol,
-    account.credential_mode,
-  )
+  pwdError.value = ''
   pwdDialogVisible.value = true
 }
 
 async function submitPwd(): Promise<void> {
   if (!pwdTarget.value) return
+  pwdError.value = ''
   if (!pwdForm.password) {
     app.error('请输入新口令')
     return
@@ -547,8 +545,8 @@ async function submitPwd(): Promise<void> {
     return
   }
   pwdSubmitting.value = true
+  const syncDb = syncDbPasswordField(currentAsset.value?.protocol, pwdTarget.value.credential_mode)
   try {
-    const syncDb = syncDbPasswordField(currentAsset.value?.protocol, pwdForm.sync_db_password)
     await updateAccountPassword(
       pwdTarget.value.account_id,
       pwdForm.password,
@@ -557,8 +555,9 @@ async function submitPwd(): Promise<void> {
     app.success(syncDb ? '账号口令已更新，并已同步到 Oracle' : '账号口令已更新')
     pwdDialogVisible.value = false
     await loadAccounts()
-  } catch {
-    /* 已提示 */
+  } catch (error) {
+    // 接口层已经弹出提示。这里再留在对话框里，关闭提示后仍能看到失败原因。
+    pwdError.value = error instanceof Error ? error.message : '重置口令失败'
   } finally {
     pwdSubmitting.value = false
   }
@@ -978,14 +977,17 @@ onMounted(async () => {
           <label class="form-label">确认新口令<span class="required">*</span></label>
           <input v-model="pwdForm.confirm" class="input" type="password" autocomplete="new-password" />
         </div>
-        <div v-if="isOracleProtocol(currentAsset?.protocol)" class="form-item">
-          <label class="checkbox">
-            <input v-model="pwdForm.sync_db_password" type="checkbox" />
-            <span>同时修改数据库口令</span>
-          </label>
+        <div
+          v-if="oraclePasswordResetSyncsDb(currentAsset?.protocol, pwdTarget?.credential_mode)"
+          class="form-item"
+        >
           <div class="form-hint">
-            使用管理员账号执行 ALTER USER。库中没有该用户，或没有可用的管理员口令时会失败，堡垒机里的口令保持不变。
+            将同时修改 Oracle 中该用户的口令。使用本资产上已托管的管理员账号连接（优先 SYSTEM，其次 SYS，或已标记为特权的账号）并执行 ALTER USER。
+            没有可用的管理员、连接失败或改口令失败时，本次重置不会保存，堡垒机口令保持原值。
           </div>
+        </div>
+        <div v-if="pwdError" class="form-item">
+          <div class="form-hint text-danger" role="alert">{{ pwdError }}</div>
         </div>
       </div>
       <template #footer>

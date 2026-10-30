@@ -32,18 +32,22 @@ export function provisionDbUserField(
   return credentialMode === 'managed' && checked
 }
 
-export function defaultSyncDbPassword(
+/** Oracle 托管账号重置必须改库口令。不托管与非 Oracle 不提交该字段。 */
+export function oraclePasswordResetSyncsDb(
   protocol: string | undefined,
   credentialMode: string | undefined,
 ): boolean {
   return isOracleProtocol(protocol) && credentialMode !== 'manual'
 }
 
-/** 非 Oracle 不提交，避免 SSH 重置口令被当成改库口令。 */
+/**
+ * Oracle 托管账号固定传 true，服务端会 ALTER USER。
+ * 不托管与非 Oracle 不带这个字段：前者没有保管库口令可对齐，后者保持只改堡垒机。
+ */
 export function syncDbPasswordField(
   protocol: string | undefined,
-  checked: boolean,
+  credentialMode: string | undefined,
 ): boolean | undefined {
-  if (!isOracleProtocol(protocol)) return undefined
-  return checked
+  if (!oraclePasswordResetSyncsDb(protocol, credentialMode)) return undefined
+  return true
 }

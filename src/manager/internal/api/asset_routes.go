@@ -305,6 +305,8 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]any{"deleted": true, "account_id": id})
 }
 
+// handleUpdateAccountPassword 重置托管口令。
+// Oracle 托管账号会同时 ALTER USER；失败时响应里是原因，响应体不含口令。
 func (s *Server) handleUpdateAccountPassword(w http.ResponseWriter, r *http.Request) {
 	if s.asset == nil {
 		httpx.FailCode(w, "SYS_5001")

@@ -114,22 +114,60 @@ func (s *AssetService) provisionOracleUser(ctx context.Context, asset *model.Ass
 	return adminAcc.AccountName, nil
 }
 
-func (s *AssetService) syncOraclePassword(ctx context.Context, acc *model.Account, newPassword string, flag *bool, op OperatorContext) (*oracleSync, error) {
-	// 未传或显式关闭：只改堡垒机记录，连资产都不必再查。
-	if flag == nil || !*flag {
-		return nil, nil
+// oracleSyncDecision 决定这次重置要不要改目标库口令。
+type oracleSyncDecision int
+
+const (
+	// oracleSyncSkip 只改堡垒机。非 Oracle，以及 Oracle 不托管账号走这里。
+	oracleSyncSkip oracleSyncDecision = iota
+	// oracleSyncRun 先 ALTER USER，成功后再写堡垒机。
+	oracleSyncRun
+	// oracleSyncRefuse 调用方要求只改堡垒机，但那样会让库口令和保管库不一致。
+	oracleSyncRefuse
+)
+
+// decideOraclePasswordSync 规定 Oracle 托管账号的重置必须改库。
+//
+// 不传 sync_db_password 也要改：管理界面和直接调接口都不能只改保管库。
+// 显式传 false 同样拒绝，避免静默留下 ORA-01017。
+// 非 Oracle 维持原样：不传或 false 只改堡垒机；true 报错，不去连库。
+func decideOraclePasswordSync(protocol, credentialMode string, flag *bool) (oracleSyncDecision, error) {
+	oracle := strings.EqualFold(strings.TrimSpace(protocol), "oracle")
+	managed := strings.TrimSpace(credentialMode) != model.CredentialManual
+	if !oracle {
+		if flag != nil && *flag {
+			return oracleSyncSkip, fmt.Errorf("「同时修改数据库口令」仅支持 Oracle 资产")
+		}
+		return oracleSyncSkip, nil
 	}
+	if !managed {
+		if flag != nil && *flag {
+			return oracleSyncSkip, fmt.Errorf("不托管账号的口令不保存在堡垒机，无法同步到 Oracle。请改为托管后再重置")
+		}
+		return oracleSyncSkip, nil
+	}
+	if flag != nil && !*flag {
+		return oracleSyncRefuse, fmt.Errorf("Oracle 托管账号重置口令必须同时修改数据库口令，不能只更新堡垒机记录")
+	}
+	return oracleSyncRun, nil
+}
+
+func (s *AssetService) syncOraclePassword(ctx context.Context, acc *model.Account, newPassword string, flag *bool, op OperatorContext) (*oracleSync, error) {
 	asset, err := s.assetRepo.Get(ctx, acc.AssetID)
 	if err != nil {
 		return nil, fmt.Errorf("资产不存在: %w", err)
 	}
-	want, err := wantOracleDBSync(asset.Protocol, flag)
-	if err != nil || !want {
+	targetName := asset.AssetName + "/" + acc.AccountName
+	decision, err := decideOraclePasswordSync(asset.Protocol, acc.CredentialMode, flag)
+	if err != nil {
+		if decision == oracleSyncRefuse {
+			s.writeLog(ctx, op, "asset", "sync_oracle_password", "account", fmt.Sprint(acc.AccountID),
+				targetName, "", oracleAttemptAfter(acc.AccountName, ""), err)
+		}
 		return nil, err
 	}
-	targetName := asset.AssetName + "/" + acc.AccountName
-	if acc.CredentialMode == model.CredentialManual {
-		return nil, fmt.Errorf("不托管账号的口令不保存在堡垒机，无法同步到 Oracle。请改为托管后再重置，或取消「同时修改数据库口令」")
+	if decision != oracleSyncRun {
+		return nil, nil
 	}
 	if err := oracleprov.ValidateUsername(acc.AccountName); err != nil {
 		return nil, err
@@ -152,7 +190,7 @@ func (s *AssetService) syncOraclePassword(ctx context.Context, acc *model.Accoun
 		self = true
 	}
 	if adminAcc == nil {
-		err := errNoOracleAdmin("修改库口令")
+		err := fmt.Errorf("该 Oracle 资产没有可用于修改库口令的高权限托管账号。请先登记已托管口令的 SYSTEM（优先）或 SYS，也可以是已标记为特权的管理员账号。本次重置未保存，堡垒机口令保持不变")
 		s.writeLog(ctx, op, "asset", "sync_oracle_password", "account", fmt.Sprint(acc.AccountID),
 			targetName, "", oracleAttemptAfter(acc.AccountName, ""), err)
 		return nil, err
@@ -178,7 +216,7 @@ func (s *AssetService) syncOraclePassword(ctx context.Context, acc *model.Accoun
 	}
 	err = oracleprov.AlterPassword(ctx, s.oracleOpener(), target, admin, acc.AccountName, newPassword)
 	if errors.Is(err, oracleprov.ErrUserMissing) {
-		err = fmt.Errorf("Oracle 用户 %s 不存在，无法修改库口令。堡垒机中的口令未更改。若只需更新堡垒机记录，请取消「同时修改数据库口令」",
+		err = fmt.Errorf("Oracle 用户 %s 不存在，无法修改库口令。堡垒机中的口令未更改",
 			oracleprov.CanonicalUsername(acc.AccountName))
 	} else if err != nil {
 		err = scrubOracleErr(err, adminPass, newPassword, oldPass)
@@ -223,16 +261,6 @@ func wantOracleProvision(protocol string, flag *bool) (bool, error) {
 	}
 	if !strings.EqualFold(strings.TrimSpace(protocol), "oracle") {
 		return false, fmt.Errorf("「同时在库中创建用户」仅支持 Oracle 资产")
-	}
-	return true, nil
-}
-
-func wantOracleDBSync(protocol string, flag *bool) (bool, error) {
-	if flag == nil || !*flag {
-		return false, nil
-	}
-	if !strings.EqualFold(strings.TrimSpace(protocol), "oracle") {
-		return false, fmt.Errorf("「同时修改数据库口令」仅支持 Oracle 资产")
 	}
 	return true, nil
 }

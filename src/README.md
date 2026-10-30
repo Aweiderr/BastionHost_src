@@ -294,7 +294,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/setup/seal -H "Authorization: Bearer $
 | POST | `/api/v1/assets/{id}/accounts` | `asset:account:manage` | 创建账号（`credential_mode` 指定托管 / 不托管；托管账号口令加密入库） |
 | PUT | `/api/v1/accounts/{id}` | `asset:account:manage` | 更新账号属性，**含托管 ↔ 不托管切换**（切回托管必须同时给凭据） |
 | DELETE | `/api/v1/accounts/{id}` | `asset:account:manage` | 删除账号 |
-| POST | `/api/v1/accounts/{id}/password` | `asset:account:manage` | 更新口令（保留历史版本） |
+| POST | `/api/v1/accounts/{id}/password` | `asset:account:manage` | 更新口令（保留历史版本）。Oracle 托管账号同时 `ALTER USER`；没有管理员、连接失败或改库失败时堡垒机口令不变 |
 | POST | `/api/v1/accounts/{id}/reveal` | **`asset:account:viewpwd`** | **查看明文口令（高敏，强制审计）** |
 | GET | `/api/v1/assets/credential-key` | `asset:account:list` | 查询凭据加密密钥 ID |
 

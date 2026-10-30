@@ -118,6 +118,10 @@ onMounted(load)
       <input v-model.trim="query.session_id" class="input" style="width: 130px" placeholder="会话 ID" />
       <button class="btn btn-primary" @click="search">查询</button>
       <button class="btn" @click="resetQuery">重置</button>
+      <button class="btn" type="button" :disabled="loading" @click="load()">
+        <span v-if="loading" class="spinner" />
+        刷新
+      </button>
     </SearchBar>
 
     <div class="mt-16">

@@ -4,6 +4,7 @@ import Modal from '@/components/Modal.vue'
 import type { OpsAsset } from '@/api/ops'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '@/utils/clipboard'
 import { oracleGatewayHost } from '@/utils/constants'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
@@ -63,12 +64,9 @@ function close(): void {
 async function copyText(text: string, label: string): Promise<void> {
   const value = text.trim()
   if (!value) return
-  try {
-    await navigator.clipboard.writeText(value)
-    app.success(`已复制${label}`)
-  } catch {
-    app.error('浏览器拒绝了剪贴板访问，请手动复制')
-  }
+  const copied = await copyToClipboard(value)
+  if (copied) app.success(`已复制${label}`)
+  else app.error(CLIPBOARD_DENIED_MESSAGE)
 }
 </script>
 

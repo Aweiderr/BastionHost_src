@@ -24,6 +24,7 @@ import UkeyCertDialog from '@/components/UkeyCertDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '@/utils/clipboard'
 import { USER_STATUS_MAP, dictLabel, dictTone, roleLabel } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
 
@@ -398,12 +399,9 @@ async function confirmReset(): Promise<void> {
 
 async function copyResetPassword(): Promise<void> {
   if (!resetResult.value) return
-  try {
-    await navigator.clipboard.writeText(resetResult.value)
-    app.success('临时口令已复制到剪贴板')
-  } catch {
-    app.error('浏览器拒绝了剪贴板访问，请手动复制')
-  }
+  const copied = await copyToClipboard(resetResult.value)
+  if (copied) app.success('临时口令已复制到剪贴板')
+  else app.error(CLIPBOARD_DENIED_MESSAGE)
 }
 
 onMounted(async () => {

@@ -144,12 +144,14 @@ func (r *SmsCodeRepo) LastSendTime(ctx context.Context, phone, scene string) (ti
 // CleanupExpired 清理过期记录，避免表无限增长。
 //
 // 保留天数不宜太短：这些记录同时承担"发送审计"的职责。
+// 截止条件用 make_interval(days => $1::int)。($1 || ' days')::interval
+// 会把 $1 定为 text（OID 25），pgx 无法编码 Go int。
 func (r *SmsCodeRepo) CleanupExpired(ctx context.Context, keepDays int) (int64, error) {
 	if keepDays <= 0 {
 		keepDays = 30
 	}
 	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM sys_sms_code WHERE create_time < now() - ($1 || ' days')::interval`, keepDays)
+		`DELETE FROM sys_sms_code WHERE create_time < now() - make_interval(days => $1::int)`, keepDays)
 	if err != nil {
 		return 0, fmt.Errorf("清理验证码失败: %w", err)
 	}

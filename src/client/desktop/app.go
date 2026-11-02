@@ -126,7 +126,7 @@ func (a *App) GetDeviceInfo() *device.Info { return a.deviceInfo() }
 func (a *App) Login(username, password, totp string) (*coreapi.LoginResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	res, err := a.api.Login(ctx, username, password, totp)
+	res, err := a.api.Login(ctx, username, password, totp, a.deviceInfo().DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +225,33 @@ type SessionBrief struct {
 	Gateway  string `json:"gateway"`
 	Login    string `json:"login"`
 	OpenedAt string `json:"opened_at"`
+	// Protocol 是资产协议（小写）。Kind 为 ssh 时走网关终端；
+	// 为 unsupported 时只是占位标签，没有 SSH 会话。
+	Protocol string `json:"protocol"`
+	Kind     string `json:"kind"`
+	Message  string `json:"message"`
+}
+
+// 工作台连接通路。只有 ssh 会拨号；其余协议留在界面上作为占位标签。
+const (
+	sessionKindSSH         = "ssh"
+	sessionKindUnsupported = "unsupported"
+)
+
+// routeProtocol 按资产协议选择连接通路。
+//
+// 空协议与 ssh 沿用现有网关终端。rdp、sftp、vnc 以及其他取值返回占位说明，
+// 调用方不得据此去拨 SSH。
+func routeProtocol(protocol string) (kind, normalized, message string) {
+	p := strings.ToLower(strings.TrimSpace(protocol))
+	if p == "" || p == "ssh" {
+		return sessionKindSSH, "ssh", ""
+	}
+	label := strings.ToUpper(p)
+	return sessionKindUnsupported, p, fmt.Sprintf(
+		"%s 尚未接入。此标签只展示协议说明。SSH 会话请从协议为 SSH 的资产打开。",
+		label,
+	)
 }
 
 // OpenSession 建立到指定资产的运维会话。
@@ -235,21 +262,33 @@ type SessionBrief struct {
 // assetName 用资产名（网关按名称/ID/主机地址匹配）；accountID 为 0 表示由
 // 网关自动选择可用账号。口令复用登录时保存的凭据 —— 桌面端与网关使用同一套
 // 账号体系，因此不需要二次输入（口令仅存内存）。
-func (a *App) OpenSession(key, assetName, accountName string, assetID, accountID int64, cols, rows int) (*SessionBrief, error) {
+//
+// protocol 决定通路：ssh（或空）走网关终端；其他协议返回占位摘要，不拨号。
+func (a *App) OpenSession(key, assetName, accountName string, assetID, accountID int64, cols, rows int, protocol string) (*SessionBrief, error) {
 	a.mu.Lock()
 	user, password := a.user, a.password
 	a.mu.Unlock()
 	if user == nil {
 		return nil, fmt.Errorf("尚未登录")
 	}
-	if password == "" {
-		return nil, fmt.Errorf("登录凭据已失效，请重新登录")
-	}
 	if strings.TrimSpace(assetName) == "" {
 		return nil, fmt.Errorf("未指定资产")
 	}
 	if key == "" {
 		key = fmt.Sprintf("s%d", time.Now().UnixNano())
+	}
+
+	kind, proto, routedMsg := routeProtocol(protocol)
+	if kind != sessionKindSSH {
+		slog.Info("会话按协议留在占位页", "key", key, "asset", assetName, "protocol", proto)
+		return &SessionBrief{
+			Key: key, AssetID: assetID, Asset: assetName, Account: accountName,
+			Protocol: proto, Kind: kind, Message: routedMsg,
+			OpenedAt: time.Now().Format(time.RFC3339),
+		}, nil
+	}
+	if password == "" {
+		return nil, fmt.Errorf("登录凭据已失效，请重新登录")
 	}
 
 	gateway := a.gatewayAddr()
@@ -277,6 +316,7 @@ func (a *App) OpenSession(key, assetName, accountName string, assetID, accountID
 	brief := &SessionBrief{
 		Key: key, AssetID: assetID, Asset: assetName, Account: accountName,
 		Gateway: gateway, Login: login, OpenedAt: time.Now().Format(time.RFC3339),
+		Protocol: proto, Kind: sessionKindSSH,
 	}
 	a.mu.Lock()
 	a.sessions[key] = sess

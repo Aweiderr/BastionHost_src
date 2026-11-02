@@ -38,8 +38,8 @@ export function MySessions() {
   return window['go']['main']['App']['MySessions']();
 }
 
-export function OpenSession(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
-  return window['go']['main']['App']['OpenSession'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+export function OpenSession(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
+  return window['go']['main']['App']['OpenSession'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
 }
 
 export function Ping() {

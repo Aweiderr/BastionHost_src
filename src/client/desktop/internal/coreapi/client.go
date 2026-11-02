@@ -2,7 +2,7 @@
 //
 // 与 Web 客户端走同一套 HTTP 接口与统一响应信封，因此两侧行为一致；
 // 差别在于桌面端把令牌保存在进程内存（而非浏览器 localStorage），
-// 并且会把设备指纹一并发给服务端用于准入判断。
+// 并在登录请求里上报 device_id。准入拒绝由服务端决定，客户端只负责上报。
 package coreapi
 
 import (
@@ -178,10 +178,16 @@ type SessionInfo struct {
 // ---------------------------------------------------------------------------
 
 // Login 登录并保存令牌。
-func (c *Client) Login(ctx context.Context, username, password, totp string) (*LoginResult, error) {
+//
+// deviceID 是本机已算好的设备指纹（SM3 十六进制）。登录请求体始终带上
+// device_id，供服务端登记；这里不做准入拒绝，空字符串也照实上报。
+func (c *Client) Login(ctx context.Context, username, password, totp, deviceID string) (*LoginResult, error) {
 	var out LoginResult
 	if err := c.do(ctx, http.MethodPost, "/api/v1/auth/login", map[string]any{
-		"username": username, "password": password, "totp_code": totp,
+		"username":  username,
+		"password":  password,
+		"totp_code": totp,
+		"device_id": deviceID,
 	}, &out); err != nil {
 		return nil, err
 	}

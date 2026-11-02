@@ -120,9 +120,10 @@ watch(
       </header>
 
       <div class="content" :class="{ flush: state.view === 'workbench' }">
-        <WorkbenchView v-if="state.view === 'workbench'" />
-        <SessionsView v-else-if="state.view === 'sessions'" />
-        <DeviceView v-else />
+        <!-- 工作台保持挂载，切到其他页再回来时标签和终端缓冲还在。 -->
+        <WorkbenchView v-show="state.view === 'workbench'" :visible="state.view === 'workbench'" />
+        <SessionsView v-if="state.view === 'sessions'" />
+        <DeviceView v-if="state.view === 'device'" />
       </div>
     </div>
   </div>

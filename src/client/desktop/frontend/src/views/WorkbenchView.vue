@@ -1,21 +1,25 @@
 <script lang="ts" setup>
 /**
- * 运维工作台：左侧可选资产，右侧 xterm 终端。
+ * 运维工作台：左侧可选资产，右侧按标签打开会话。
  *
- * 数据流：
+ * 数据流（仅 SSH）：
  *   键盘输入 → WriteSession(key, base64)  → Go 写入 SSH 网关
- *   网关输出 → Go 触发 term:data 事件      → 前端 term.write
+ *   网关输出 → Go 触发 term:data 事件      → 对应标签的 xterm
  *   窗口变化 → ResizeSession(key, cols, rows)
+ *
+ * 协议分流与 Go 的 routeProtocol 一致：空协议与 ssh 走网关；
+ * rdp / sftp / vnc 以及其他协议只打开占位标签，不建立 SSH 会话。
+ * 每个标签有自己的 key，和 Go 侧 sessions map 对齐。
  *
  * 事件监听必须在 OpenSession **之前**注册：会话一旦建立，网关会立刻
  * 推送欢迎信息（含资产列表或连接提示），晚注册会丢掉这一段输出。
  */
-import { onBeforeUnmount, onMounted, ref, nextTick } from 'vue'
+import { onBeforeUnmount, onMounted, ref, computed, nextTick, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
-import { bytesToBase64, base64ToBytes, strToBase64 } from '../utils/base64'
+import { base64ToBytes, strToBase64 } from '../utils/base64'
 import {
   CloseSession,
   GetAssets,
@@ -25,31 +29,66 @@ import {
 } from '../../wailsjs/go/main/App'
 import { EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 
+const props = defineProps<{ visible: boolean }>()
+
+type TabStatus = 'connecting' | 'connected' | 'closed' | 'unsupported'
+
+interface SessionTab {
+  key: string
+  assetId: number
+  assetName: string
+  accountName: string
+  host: string
+  port: number
+  protocol: string
+  kind: 'ssh' | 'unsupported'
+  status: TabStatus
+  message: string
+}
+
+interface TermRuntime {
+  term: Terminal
+  fit: FitAddon
+  observer: ResizeObserver
+}
+
 const assets = ref<Asset[]>([])
 const loading = ref(false)
 const connecting = ref(false)
 const selected = ref<Asset | null>(null)
+const tabs = ref<SessionTab[]>([])
 const activeKey = ref('')
-const activeLabel = ref('')
-const connected = ref(false)
 
-const termHost = ref<HTMLElement | null>(null)
-// hasTerm 必须是 ref：模板要据此在「占位提示」与「终端」之间切换
-const hasTerm = ref(false)
-let term: Terminal | null = null
-let fit: FitAddon | null = null
-let resizeObserver: ResizeObserver | null = null
+const hosts = new Map<string, HTMLElement>()
+const runtimes = new Map<string, TermRuntime>()
+
+const activeTab = computed(() => tabs.value.find((t) => t.key === activeKey.value) || null)
+
+/** 与 app.go routeProtocol 保持同一规则：只有空协议和 ssh 走终端。 */
+function isSSH(protocol: string) {
+  const p = (protocol || '').trim().toLowerCase()
+  return p === '' || p === 'ssh'
+}
+
+function protocolLabel(protocol: string) {
+  const p = (protocol || '').trim()
+  return (p || 'ssh').toUpperCase()
+}
 
 onMounted(async () => {
-  // 事件监听先注册，避免首屏输出丢失
+  // 事件按 key 写入对应终端，后台标签的输出也留在各自的回滚缓冲里。
   EventsOn('term:data', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value || !term) return
-    term.write(base64ToBytes(payload.data))
+    if (!payload?.key) return
+    const rt = runtimes.get(payload.key)
+    if (!rt) return
+    rt.term.write(base64ToBytes(payload.data))
   })
   EventsOn('term:closed', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value) return
-    connected.value = false
-    notify(`会话已结束（${payload.reason || '未知原因'}）`, 'info')
+    if (!payload?.key) return
+    const tab = tabs.value.find((t) => t.key === payload.key)
+    if (!tab || tab.kind !== 'ssh' || tab.status === 'closed') return
+    tab.status = 'closed'
+    notify(`${tab.assetName} 的会话已结束（${payload.reason || '未知原因'}）`, 'info')
   })
   await loadAssets()
 })
@@ -57,9 +96,21 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   EventsOff('term:data')
   EventsOff('term:closed')
-  resizeObserver?.disconnect()
-  destroyTerm()
+  for (const tab of tabs.value) {
+    if (tab.kind === 'ssh') {
+      CloseSession(tab.key).catch(() => {})
+    }
+  }
+  for (const key of [...runtimes.keys()]) destroyTerm(key)
 })
+
+watch(
+  () => props.visible,
+  (visible) => {
+    if (!visible) return
+    void nextTick(() => fitActive())
+  },
+)
 
 async function loadAssets() {
   loading.value = true
@@ -78,74 +129,112 @@ async function loadAssets() {
 }
 
 function pick(a: Asset) {
-  if (connected.value) {
-    notify('请先断开当前会话再切换资产', 'info')
-    return
-  }
   selected.value = a
 }
 
-async function connect(acc?: Account) {
-  // 已连接时不允许再次连接：本函数用新的 key 建立会话，旧连接不会被关闭，
-  // 连续点击会累积会话 —— 每个都占着一条到目标主机的连接并各写一份录像。
-  // 需要换目标时请先点「断开会话」。
-  if (connected.value || connecting.value) {
-    notify('当前已有会话，请先断开再连接', 'info')
+function bindHost(key: string, el: unknown) {
+  if (el instanceof HTMLElement) {
+    hosts.set(key, el)
     return
   }
-  const a = selected.value
-  if (!a) {
+  if (el == null) hosts.delete(key)
+}
+
+async function connect(acc?: Account) {
+  if (connecting.value) return
+  const asset = selected.value
+  if (!asset) {
     notify('请先选择资产', 'err')
     return
   }
-  if (!a.accounts?.length) {
+  if (!asset.accounts?.length) {
     notify('该资产没有可用账号，请联系管理员', 'err')
     return
   }
-  const account = acc || a.accounts[0]
+  const account = acc || asset.accounts[0]
+  const ssh = isSSH(asset.protocol)
+  const key = `s${Date.now()}${Math.floor(Math.random() * 1000)}`
+  const tab: SessionTab = {
+    key,
+    assetId: asset.asset_id,
+    assetName: asset.asset_name,
+    accountName: account.account_name,
+    host: asset.host,
+    port: asset.port,
+    protocol: ssh ? 'ssh' : (asset.protocol || '').trim().toLowerCase(),
+    kind: ssh ? 'ssh' : 'unsupported',
+    status: ssh ? 'connecting' : 'unsupported',
+    message: '',
+  }
+  tabs.value.push(tab)
+  activate(key)
 
   connecting.value = true
   try {
-    // 先建终端拿到真实行列数，再按此建立会话，避免远端一开始就折行错乱
-    await nextTick()
-    ensureTerm()
-    fit?.fit()
-    const cols = term?.cols || 120
-    const rows = term?.rows || 32
-
-    // 先占好会话 key 再建立连接：网关在连接成功瞬间就会推送欢迎信息，
-    // 晚设置会导致这段首屏输出因 key 不匹配被丢弃。
-    const key = `s${Date.now()}${Math.floor(Math.random() * 1000)}`
-    activeKey.value = key
-    state.activeKey = key
+    let cols = 120
+    let rows = 32
+    if (ssh) {
+      await nextTick()
+      ensureTerm(key)
+      if (!runtimes.has(key)) {
+        await nextTick()
+        ensureTerm(key)
+      }
+      const rt = runtimes.get(key)
+      try {
+        rt?.fit.fit()
+      } catch {
+        /* 容器尚未完成布局时用默认行列 */
+      }
+      cols = rt?.term.cols || 120
+      rows = rt?.term.rows || 32
+    }
 
     const brief: any = await OpenSession(
       key,
-      a.asset_name,
+      asset.asset_name,
       account.account_name,
-      a.asset_id,
+      asset.asset_id,
       account.account_id,
       cols,
       rows,
+      asset.protocol || '',
     )
-    void brief
-    activeLabel.value = `${a.asset_name} · ${account.account_name} · ${a.host}`
-    connected.value = true
-    term?.focus()
-    notify(`已连接 ${a.asset_name}`, 'ok')
+    const current = tabs.value.find((t) => t.key === key)
+    if (!current) {
+      if (brief?.kind !== 'unsupported') {
+        await CloseSession(key).catch(() => {})
+      }
+      return
+    }
+    if (brief?.kind === 'unsupported') {
+      current.kind = 'unsupported'
+      current.status = 'unsupported'
+      current.protocol = brief.protocol || current.protocol
+      current.message = brief.message || `${protocolLabel(current.protocol)} 尚未接入。`
+      destroyTerm(key)
+      notify(`${asset.asset_name}：${protocolLabel(current.protocol)} 尚未接入`, 'info')
+      return
+    }
+    current.kind = 'ssh'
+    current.status = 'connected'
+    current.protocol = brief?.protocol || 'ssh'
+    current.message = ''
+    runtimes.get(key)?.term.focus()
+    notify(`已连接 ${asset.asset_name}`, 'ok')
   } catch (e: any) {
-    // 失败时要把预占的 key 收回，否则界面会停在"已连接"的错觉里
-    activeKey.value = ''
-    state.activeKey = ''
+    dropTab(key)
     notify(String(e?.message || e), 'err')
   } finally {
     connecting.value = false
   }
 }
 
-function ensureTerm() {
-  if (term || !termHost.value) return
-  term = new Terminal({
+function ensureTerm(key: string) {
+  if (runtimes.has(key)) return
+  const host = hosts.get(key)
+  if (!host) return
+  const term = new Terminal({
     fontFamily: "'Cascadia Mono', Consolas, Menlo, monospace",
     fontSize: 14,
     theme: {
@@ -158,52 +247,111 @@ function ensureTerm() {
     scrollback: 5000,
     convertEol: false,
   })
-  fit = new FitAddon()
+  const fit = new FitAddon()
   term.loadAddon(fit)
-  term.open(termHost.value)
-  fit.fit()
-  hasTerm.value = true
+  term.open(host)
+  try {
+    fit.fit()
+  } catch {
+    /* 容器暂时不可见时忽略 */
+  }
 
   term.onData((data: string) => {
-    if (!activeKey.value) return
-    WriteSession(activeKey.value, strToBase64(data)).catch((e: any) => {
+    const tab = tabs.value.find((t) => t.key === key)
+    if (!tab || tab.status !== 'connected') return
+    WriteSession(key, strToBase64(data)).catch((e: any) => {
       console.error(e)
     })
   })
 
-  resizeObserver = new ResizeObserver(() => {
-    if (!fit) return
+  const observer = new ResizeObserver(() => {
+    // 工作台被藏起来或标签在后台时，容器尺寸会变成 0。这时去改远端行列会把 SSH 会话压扁。
+    if (!props.visible || activeKey.value !== key) return
     try {
       fit.fit()
     } catch {
-      /* 容器暂时不可见时忽略 */
+      return
     }
-    if (activeKey.value && term) {
-      ResizeSession(activeKey.value, term.cols, term.rows).catch(() => {})
+    const tab = tabs.value.find((t) => t.key === key)
+    if (tab?.status === 'connected' && term.cols > 0 && term.rows > 0) {
+      ResizeSession(key, term.cols, term.rows).catch(() => {})
     }
   })
-  resizeObserver.observe(termHost.value)
+  observer.observe(host)
+  runtimes.set(key, { term, fit, observer })
 }
 
-function destroyTerm() {
-  term?.dispose()
-  term = null
-  fit = null
-  hasTerm.value = false
+function destroyTerm(key: string) {
+  const rt = runtimes.get(key)
+  if (!rt) return
+  rt.observer.disconnect()
+  rt.term.dispose()
+  runtimes.delete(key)
 }
 
-async function disconnect() {
-  if (!activeKey.value) return
+function activate(key: string) {
+  activeKey.value = key
+  state.activeKey = key
+  void nextTick(() => fitActive())
+}
+
+function fitActive() {
+  if (!props.visible) return
   const key = activeKey.value
-  activeKey.value = ''
-  state.activeKey = ''
-  connected.value = false
+  const rt = key ? runtimes.get(key) : undefined
+  if (!rt) return
   try {
-    await CloseSession(key)
-  } catch (e) {
-    console.error(e)
+    rt.fit.fit()
+  } catch {
+    /* 容器暂时不可见时忽略 */
   }
-  notify('已断开会话', 'info')
+  const tab = tabs.value.find((t) => t.key === key)
+  if (tab?.status === 'connected' && rt.term.cols > 0 && rt.term.rows > 0) {
+    ResizeSession(key, rt.term.cols, rt.term.rows).catch(() => {})
+  }
+  rt.term.focus()
+}
+
+function dropTab(key: string) {
+  destroyTerm(key)
+  const idx = tabs.value.findIndex((t) => t.key === key)
+  if (idx < 0) return
+  tabs.value.splice(idx, 1)
+  if (activeKey.value !== key) return
+  const next = tabs.value[Math.min(idx, tabs.value.length - 1)]
+  activeKey.value = next?.key || ''
+  state.activeKey = activeKey.value
+  void nextTick(() => fitActive())
+}
+
+async function closeTab(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || connecting.value) return
+  const closeRemote = tab.kind === 'ssh'
+  dropTab(key)
+  if (closeRemote) {
+    try {
+      await CloseSession(key)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+  notify('已关闭标签', 'info')
+}
+
+function statusText(tab: SessionTab) {
+  if (tab.kind === 'unsupported') return '尚未接入'
+  if (tab.status === 'connecting') return '连接中'
+  if (tab.status === 'connected') return '已连接'
+  if (tab.status === 'closed') return '已结束'
+  return tab.status
+}
+
+function statusClass(tab: SessionTab) {
+  if (tab.kind === 'unsupported') return 'warn'
+  if (tab.status === 'connected') return 'ok'
+  if (tab.status === 'closed') return 'err'
+  return ''
 }
 
 function levelTag(level: string) {
@@ -245,16 +393,20 @@ function grantText(a: Asset) {
           </div>
           <div class="l2">{{ a.host }}:{{ a.port }}</div>
           <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap">
+            <span class="tag" :class="isSSH(a.protocol) ? 'brand' : 'warn'">{{ protocolLabel(a.protocol) }}</span>
             <span class="tag brand">{{ grantText(a) }}</span>
             <span v-if="a.accounts?.length" class="tag">{{ a.accounts.length }} 个账号</span>
           </div>
-          <div v-if="!connected && selected?.asset_id === a.asset_id" style="margin-top: 9px">
+          <div v-if="selected?.asset_id === a.asset_id" style="margin-top: 9px">
+            <p v-if="!isSSH(a.protocol)" class="hint" style="margin: 0 0 8px">
+              {{ protocolLabel(a.protocol) }} 会打开占位标签，说明该协议尚未接入。
+            </p>
             <button
               v-for="acc in a.accounts"
               :key="acc.account_id"
               class="primary sm"
               style="margin-right: 6px; margin-bottom: 4px"
-              :disabled="connecting || connected"
+              :disabled="connecting"
               @click.stop="connect(acc)"
             >
               连接 {{ acc.account_name }}
@@ -265,22 +417,58 @@ function grantText(a: Asset) {
     </aside>
 
     <section class="term-main">
-      <div class="term-bar">
-        <span v-if="connected">
-          <span class="tag ok">已连接</span>
-          <span style="margin-left: 8px">{{ activeLabel }}</span>
-        </span>
-        <span v-else>
-          <span class="tag">未连接</span>
-          <span style="margin-left: 8px">选择资产后点击「连接」</span>
-        </span>
-        <span class="spacer"></span>
-        <button v-if="connected" class="danger sm" @click="disconnect">断开会话</button>
+      <div v-if="tabs.length" class="tab-bar" role="tablist">
+        <div
+          v-for="t in tabs"
+          :key="t.key"
+          class="sess-tab"
+          role="tab"
+          :aria-selected="t.key === activeKey"
+          :class="{ active: t.key === activeKey, warn: t.kind === 'unsupported' }"
+          :title="`${t.assetName} · ${t.accountName}`"
+          @click="activate(t.key)"
+        >
+          <span class="tag" :class="t.kind === 'unsupported' ? 'warn' : ''">{{ protocolLabel(t.protocol) }}</span>
+          <span class="sess-tab-name">{{ t.assetName }}</span>
+          <button class="tab-x" type="button" title="关闭标签" :disabled="connecting" @click.stop="closeTab(t.key)">
+            ×
+          </button>
+        </div>
       </div>
 
-      <div class="term-host" ref="termHost">
-        <div v-if="!hasTerm" class="term-placeholder">
-          终端将在建立会话后出现
+      <div class="term-bar">
+        <template v-if="activeTab">
+          <span class="tag" :class="statusClass(activeTab)">{{ statusText(activeTab) }}</span>
+          <span>{{ activeTab.assetName }} · {{ activeTab.accountName }} · {{ activeTab.host }}:{{ activeTab.port }}</span>
+        </template>
+        <template v-else>
+          <span class="tag">未连接</span>
+          <span>选择资产后点击「连接」，可同时打开多个标签</span>
+        </template>
+        <span class="spacer"></span>
+        <button v-if="activeTab" class="danger sm" :disabled="connecting" @click="closeTab(activeTab.key)">
+          关闭标签
+        </button>
+      </div>
+
+      <div class="term-stage">
+        <div v-if="!tabs.length" class="term-placeholder">终端将在建立会话后出现</div>
+        <div
+          v-for="t in tabs"
+          :key="t.key"
+          v-show="t.key === activeKey"
+          class="term-pane"
+          role="tabpanel"
+        >
+          <div v-if="t.kind !== 'ssh'" class="term-placeholder">
+            <div class="unsupported-panel">
+              <span class="tag warn">{{ protocolLabel(t.protocol) }}</span>
+              <h3>该协议尚未接入</h3>
+              <p>{{ t.message || '此标签只展示协议说明。SSH 会话请从协议为 SSH 的资产打开。' }}</p>
+              <p class="unsupported-target">{{ t.assetName }} · {{ t.accountName }} · {{ t.host }}:{{ t.port }}</p>
+            </div>
+          </div>
+          <div v-else class="term-host" :ref="(el) => bindHost(t.key, el)"></div>
         </div>
       </div>
     </section>

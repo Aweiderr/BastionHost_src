@@ -174,6 +174,9 @@ export namespace main {
 	    gateway: string;
 	    login: string;
 	    opened_at: string;
+	    protocol: string;
+	    kind: string;
+	    message: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionBrief(source);
@@ -188,6 +191,9 @@ export namespace main {
 	        this.gateway = source["gateway"];
 	        this.login = source["login"];
 	        this.opened_at = source["opened_at"];
+	        this.protocol = source["protocol"];
+	        this.kind = source["kind"];
+	        this.message = source["message"];
 	    }
 	}
 

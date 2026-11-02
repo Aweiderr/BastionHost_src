@@ -22,7 +22,7 @@ export function Logout():Promise<void>;
 
 export function MySessions():Promise<Array<coreapi.SessionInfo>>;
 
-export function OpenSession(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:number,arg7:number):Promise<main.SessionBrief>;
+export function OpenSession(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:number,arg7:number,arg8:string):Promise<main.SessionBrief>;
 
 export function Ping():Promise<Record<string, any>>;
 

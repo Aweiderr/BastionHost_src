@@ -5,12 +5,12 @@ import { captchaRequired, fetchCaptcha } from '@/api/auth'
 import type { LoginResult } from '@/api/types'
 import logo2x from '@/assets/logo@2x.png'
 import logoUrl from '@/assets/logo.png'
-import ClientDownloadDialog from '@/components/ClientDownloadDialog.vue'
 import MfaDialog from '@/components/MfaDialog.vue'
 import UkeyMfaDialog from '@/components/UkeyMfaDialog.vue'
 import { canAccessPath, firstAllowedPath } from '@/router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { WINDOWS_CLIENT_HREF } from '@/utils/clientDownload'
 
 const route = useRoute()
 const router = useRouter()
@@ -21,8 +21,6 @@ const form = ref({ username: '', password: '', totp_code: '' })
 const showTotp = ref(false)
 const submitting = ref(false)
 const errorText = ref('')
-/** 客户端下载弹窗：平台清单收在弹窗内，登录页保持简洁 */
-const showDownload = ref(false)
 
 // ---------------------------------------------------------------------------
 // 图形验证码
@@ -341,11 +339,15 @@ function onMfaCancel(): void {
         </div>
       </form>
 
-      <button class="btn btn-block mt-16" type="button" @click="showDownload = true">
+      <!--
+        直接下载 Windows 桌面客户端，不经过弹窗。
+        地址由管理服务从 BASTION_DOWNLOAD_DIR 提供，登录前即可访问。
+        不使用 download 属性：安装包缺失时服务端返回 JSON 404，
+        若强制按文件名保存，用户会得到一个打不开的“exe”。
+      -->
+      <a class="btn btn-block mt-16" :href="WINDOWS_CLIENT_HREF" title="下载 Windows 桌面客户端">
         下载客户端
-      </button>
-
-      <ClientDownloadDialog v-model="showDownload" />
+      </a>
 
       <!-- 第二因子弹窗：账密通过后才出现 -->
       <MfaDialog

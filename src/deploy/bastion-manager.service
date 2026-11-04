@@ -31,7 +31,11 @@ ProtectHome=true
 # 服务一旦被控就能改 /etc/passwd、sudoers 等敏感文件。
 #
 # 只放开网络配置目录：即便服务被控，影响面也限于网卡配置（可见、可恢复）。
-ReadWritePaths=/opt/bastion/data /opt/bastion/client /var/log/bastion /etc/sysconfig/network-scripts
+#
+# /opt/bastion/downloads 是登录页「下载客户端」读取 bastion-desktop.exe 的目录。
+# ProtectSystem=full 下进程创建不了工作目录里的新子目录，所以这里单独放开，
+# 让启动时的 MkdirAll 能够成功。安装包由运维拷入，服务只负责读出。
+ReadWritePaths=/opt/bastion/data /opt/bastion/client /opt/bastion/downloads /var/log/bastion /etc/sysconfig/network-scripts
 
 [Install]
 WantedBy=multi-user.target

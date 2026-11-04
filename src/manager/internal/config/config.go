@@ -36,8 +36,13 @@ type Config struct {
 	// 系统不占用根路径：便于同机并存其它服务，也让地址自解释。
 	// 必须与前端构建时的 vite base 一致 —— 改这里就要重新构建前端。
 	WebPrefix string
-	// DownloadDir 客户端安装包目录，经 <前缀>/downloads/ 对外提供下载。
-	// 为空或目录不存在时不提供下载（登录页也应相应地不显示下载入口）。
+	// DownloadDir 客户端安装包目录，经 <前缀>/downloads/ 对外提供下载（登录页无需登录）。
+	//
+	// 登录页「下载客户端」固定请求 <前缀>/downloads/bastion-desktop.exe。
+	// 在 Windows 上于 client/desktop 执行 wails build 后，把
+	// build/bin/bastion-desktop.exe 拷到本目录，文件名必须保持 bastion-desktop.exe。
+	// 生产环境工作目录是 /opt/bastion 时，放置路径为 /opt/bastion/downloads/bastion-desktop.exe。
+	// 文件可在服务启动之后再放入，无需重启。本服务只做静态分发，不做自动更新。
 	DownloadDir string
 	// Alert 高危命令告警的外部通知。地址只来自环境变量，不入库。
 	Alert AlertConfig

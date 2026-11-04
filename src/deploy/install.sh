@@ -33,7 +33,7 @@ command -v docker >/dev/null || die "未安装 docker"
 docker info >/dev/null 2>&1 || die "docker 服务未运行"
 
 log "2/7 准备目录"
-mkdir -p "$BASE_DIR"/{bin,etc,data/records,data/server-keys,client/web/dist} /var/log/bastion
+mkdir -p "$BASE_DIR"/{bin,etc,data/records,data/server-keys,client/web/dist,downloads} /var/log/bastion
 chmod 700 "$BASE_DIR/etc"
 
 log "3/7 启动 PostgreSQL 容器（内存上限 $PG_MEMORY）"
@@ -69,6 +69,7 @@ BASTION_DB_USER=bastion
 BASTION_DB_PASSWORD=$PG_PASSWORD
 BASTION_DB_NAME=bastion
 BASTION_WEB_DIR=$BASE_DIR/client/web/dist
+BASTION_DOWNLOAD_DIR=$BASE_DIR/downloads
 EOF
 cat > "$BASE_DIR/etc/server.env" <<EOF
 BASTION_INTERNAL_SECRET=$INTERNAL_SECRET

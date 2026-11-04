@@ -482,8 +482,10 @@ func (r *SessionRepo) Stats(ctx context.Context, tenantID int64) (map[string]any
 
 // CommandFilter 是命令审计查询条件。
 type CommandFilter struct {
-	TenantID     int64
-	SessionID    int64
+	TenantID  int64
+	SessionID int64
+	// SessionNo 按会话号过滤，大小写不敏感的子串匹配（对应 ops_session.session_no）。
+	SessionNo    string
 	UserID       int64
 	AssetID      int64
 	RiskLevel    string
@@ -495,20 +497,33 @@ type CommandFilter struct {
 	PageSize     int
 }
 
-// SearchCommands 跨会话查询命令记录（审计员的"按风险找命令"入口）。
-func (r *SessionRepo) SearchCommands(ctx context.Context, f CommandFilter) ([]*model.SessionCommand, int64, error) {
+// commandSearchSQL 是命令审计列表的计数语句与分页语句。
+// list 语句的最后两个占位符是 LIMIT / OFFSET，由调用方在 args 之后追加。
+type commandSearchSQL struct {
+	countSQL string
+	listSQL  string
+	args     []any
+	pageSize int
+}
+
+// buildCommandSearch 拼出命令审计查询。
+//
+// 始终左连接 ops_session，以便每条命令带回人类可读的 session_no。
+// 会话行缺失时命令仍保留在结果里，session_no 为空。
+func buildCommandSearch(f CommandFilter) commandSearchSQL {
 	where := []string{"c.tenant_id = $1"}
 	args := []any{f.TenantID}
 	add := func(cond string, v any) {
 		args = append(args, v)
 		where = append(where, fmt.Sprintf(cond, len(args)))
 	}
-	join := ""
-	if f.UserID > 0 || f.AssetID > 0 {
-		join = " JOIN ops_session s ON s.session_id = c.session_id"
-	}
+	const join = " LEFT JOIN ops_session s ON s.session_id = c.session_id"
 	if f.SessionID > 0 {
 		add("c.session_id = $%d", f.SessionID)
+	}
+	if sessionNo := strings.TrimSpace(f.SessionNo); sessionNo != "" {
+		args = append(args, "%"+sessionNo+"%")
+		where = append(where, fmt.Sprintf("s.session_no ILIKE $%d", len(args)))
 	}
 	if f.UserID > 0 {
 		add("s.user_id = $%d", f.UserID)
@@ -534,37 +549,47 @@ func (r *SessionRepo) SearchCommands(ctx context.Context, f CommandFilter) ([]*m
 	}
 	cond := strings.Join(where, " AND ")
 
-	var total int64
-	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM ops_session_command c`+join+` WHERE `+cond, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-
-	page, size := f.Page, f.PageSize
-	if page <= 0 {
-		page = 1
-	}
+	size := f.PageSize
 	if size <= 0 {
 		size = 50
 	}
-	args = append(args, size, (page-1)*size)
-	rows, err := r.pool.Query(ctx, fmt.Sprintf(`SELECT c.command_id, c.session_id, c.tenant_id, c.seq_no,
+	listSQL := fmt.Sprintf(`SELECT c.command_id, c.session_id, c.tenant_id, c.seq_no,
 	   c.command_text, coalesce(c.command_digest,''), c.command_type, c.risk_level, c.policy_action,
 	   c.policy_id, coalesce(c.matched_rule,''), c.exec_result, coalesce(c.output_digest,''),
-	   coalesce(c.privilege_chain,''), c.duration_ms, c.command_time
+	   coalesce(c.privilege_chain,''), c.duration_ms, c.command_time,
+	   coalesce(s.session_no,'')
 	 FROM ops_session_command c%s WHERE %s ORDER BY c.command_time DESC LIMIT $%d OFFSET $%d`,
-		join, cond, len(args)-1, len(args)), args...)
+		join, cond, len(args)+1, len(args)+2)
+	countSQL := `SELECT count(*) FROM ops_session_command c` + join + ` WHERE ` + cond
+	return commandSearchSQL{countSQL: countSQL, listSQL: listSQL, args: args, pageSize: size}
+}
+
+// SearchCommands 跨会话查询命令记录（审计员的"按风险找命令"入口）。
+func (r *SessionRepo) SearchCommands(ctx context.Context, f CommandFilter) ([]*model.SessionCommand, int64, error) {
+	q := buildCommandSearch(f)
+	var total int64
+	if err := r.pool.QueryRow(ctx, q.countSQL, q.args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	page := f.Page
+	if page <= 0 {
+		page = 1
+	}
+	args := append(append([]any{}, q.args...), q.pageSize, (page-1)*q.pageSize)
+	rows, err := r.pool.Query(ctx, q.listSQL, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 
-	list := make([]*model.SessionCommand, 0, size)
+	list := make([]*model.SessionCommand, 0, q.pageSize)
 	for rows.Next() {
 		var c model.SessionCommand
 		if err := rows.Scan(&c.CommandID, &c.SessionID, &c.TenantID, &c.SeqNo, &c.CommandText,
 			&c.CommandDigest, &c.CommandType, &c.RiskLevel, &c.PolicyAction, &c.PolicyID,
 			&c.MatchedRule, &c.ExecResult, &c.OutputDigest, &c.PrivilegeChain,
-			&c.DurationMs, &c.CommandTime); err != nil {
+			&c.DurationMs, &c.CommandTime, &c.SessionNo); err != nil {
 			return nil, 0, err
 		}
 		list = append(list, &c)

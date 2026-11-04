@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { getAuditSessionDetail, listAuditSessions } from '@/api/audit'
 import type { AuditSession, AuditSessionDetail } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
@@ -9,6 +10,7 @@ import RecordPlayer from '@/components/RecordPlayer.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useAuthStore } from '@/stores/auth'
+import { sessionIdFromQueryValue } from '@/views/auditSessionLink'
 import type { TableColumn } from '@/types/ui'
 import {
   EXEC_RESULT_MAP,
@@ -27,6 +29,7 @@ import {
 import { formatBytes, formatDuration, formatTime } from '@/utils/format'
 
 const auth = useAuthStore()
+const route = useRoute()
 const canPlay = computed(() => auth.has('audit:record:play'))
 
 const columns: TableColumn[] = [
@@ -97,18 +100,32 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref<AuditSessionDetail | null>(null)
 
-async function openDetail(row: AuditSession): Promise<void> {
+async function openDetailById(id: number): Promise<void> {
   detail.value = null
   detailVisible.value = true
   detailLoading.value = true
   try {
-    detail.value = await getAuditSessionDetail(row.session_id)
+    detail.value = await getAuditSessionDetail(id)
   } catch {
     detail.value = null
   } finally {
     detailLoading.value = false
   }
 }
+
+function openDetail(row: AuditSession): Promise<void> {
+  return openDetailById(row.session_id)
+}
+
+// 命令审计等页面用 ?session_id= 打开同一张会话详情抽屉。
+watch(
+  () => route.query.session_id,
+  (raw) => {
+    const id = sessionIdFromQueryValue(raw)
+    if (id) void openDetailById(id)
+  },
+  { immediate: true },
+)
 
 const playUrl = computed(() => detail.value?.record_play_url || '')
 const playerVisible = ref(false)

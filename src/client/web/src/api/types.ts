@@ -533,6 +533,8 @@ export interface AuditSessionStats {
 export interface AuditCommand {
   command_id: number
   session_id: number
+  /** 人类可读会话号，来自 ops_session.session_no */
+  session_no?: string
   seq_no: number
   command_text: string
   policy_action: string
@@ -547,6 +549,8 @@ export interface AuditCommandQuery extends PageQuery {
   policy_action?: string
   keyword?: string
   session_id?: number
+  /** 按会话号子串过滤，大小写不敏感 */
+  session_no?: string
   user_id?: number
 }
 

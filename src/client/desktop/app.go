@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -135,6 +136,10 @@ func (a *App) GetDeviceInfo() *device.Info { return a.deviceInfo() }
 // ---------------------------------------------------------------------------
 
 // Login 登录管理服务。
+//
+// 认证成功后立刻做运维角色校验：系统管理员、安全管理员及其他非运维角色
+// 会被拒绝，令牌与内存口令一并清掉，不会进入工作台。Web 控制台不受影响。
+// 短信 / UKey 等二次认证尚未完成时先放行挑战，等 VerifyMFA 拿到最终身份再判。
 func (a *App) Login(username, password, totp string) (*coreapi.LoginResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
@@ -142,7 +147,12 @@ func (a *App) Login(username, password, totp string) (*coreapi.LoginResult, erro
 	if err != nil {
 		return nil, err
 	}
-	// 口令先记下：MFA 通过后建会话仍需用它连 SSH 网关
+	if err := a.ensureOps(res); err != nil {
+		slog.Warn("拒绝非运维账号登录桌面客户端", "user", username, "roles", rolesOf(res))
+		a.discardLogin()
+		return nil, err
+	}
+	// 口令只在允许继续时记下：MFA 通过后建会话仍需用它连 SSH 网关
 	a.mu.Lock()
 	a.password = password
 	if res != nil && !res.MFARequired {
@@ -154,6 +164,59 @@ func (a *App) Login(username, password, totp string) (*coreapi.LoginResult, erro
 			"device_id", a.deviceInfo().DeviceID)
 	}
 	return res, nil
+}
+
+// ensureOps 确认已完成认证的账号持有运维角色（role_code=operator）。
+//
+// 登录响应偶尔不带 roles 时，再用 /api/v1/auth/me 补一次。已明确返回
+// 非运维角色则不再询问，避免把管理员放进来。
+func (a *App) ensureOps(res *coreapi.LoginResult) error {
+	if res == nil {
+		return errors.New("登录结果为空")
+	}
+	if res.MFARequired {
+		return nil
+	}
+	if !coreapi.HasOpsRole(res.Roles) && !coreapi.HasAnyRole(res.Roles) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		me, err := a.api.Me(ctx)
+		if err != nil {
+			slog.Warn("登录响应未包含角色，查询当前用户失败", "err", err, "user", res.Username)
+		} else if me != nil {
+			res.Roles = me.Roles
+			if res.DisplayName == "" {
+				res.DisplayName = me.DisplayName
+			}
+			if res.Username == "" {
+				res.Username = me.Username
+			}
+		}
+	}
+	if coreapi.HasOpsRole(res.Roles) {
+		return nil
+	}
+	return coreapi.NewOpsDeniedError(res.Roles)
+}
+
+// discardLogin 丢掉刚签发的会话：服务端登出，并清除内存中的用户与口令。
+func (a *App) discardLogin() {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := a.api.Logout(ctx); err != nil {
+		slog.Warn("拒绝登录后登出失败", "err", err)
+	}
+	a.mu.Lock()
+	a.user = nil
+	a.password = ""
+	a.mu.Unlock()
+}
+
+func rolesOf(res *coreapi.LoginResult) []string {
+	if res == nil {
+		return nil
+	}
+	return res.Roles
 }
 
 // Logout 登出并清理所有会话与内存中的口令。
@@ -507,9 +570,18 @@ func (a *App) VerifyMFA(challengeID, code string) (*coreapi.LoginResult, error) 
 	if err != nil {
 		return nil, err
 	}
+	if err := a.ensureOps(res); err != nil {
+		slog.Warn("拒绝非运维账号登录桌面客户端", "roles", rolesOf(res))
+		a.discardLogin()
+		return nil, err
+	}
 	a.mu.Lock()
 	a.user = res
 	a.mu.Unlock()
+	if res != nil {
+		slog.Info("登录成功", "user", res.Username, "roles", res.Roles,
+			"device_id", a.deviceInfo().DeviceID)
+	}
 	return res, nil
 }
 

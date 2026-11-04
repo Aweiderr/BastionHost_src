@@ -7,8 +7,9 @@
  * 以什么身份登记的（后续许可绑定、换机重登记都以它为准）。
  */
 import { onMounted, ref } from 'vue'
-import { state, notify, type Profile } from '../store'
-import { Login, Ping, SetCoreURL, VerifyMFA, ResendMFA, ChangePassword } from '../../wailsjs/go/main/App'
+import { state, notify, rejectLogin, clearLoginError, type Profile } from '../store'
+import { isOpsUser, opsDeniedMessage } from '../opsRole'
+import { Login, Ping, SetCoreURL, VerifyMFA, ResendMFA, ChangePassword, Logout } from '../../wailsjs/go/main/App'
 
 const emit = defineEmits<{ (e: 'logged-in', p: Profile): void }>()
 
@@ -54,6 +55,18 @@ async function probe() {
 }
 
 async function finishLogin(p: any) {
+  if (p?.mfa_required) return
+  // Go 侧已按 operator 拒绝非运维账号。这里再拦一次，避免漏网账号进入工作台。
+  if (!isOpsUser(p?.roles)) {
+    try {
+      await Logout()
+    } catch (e) {
+      console.error(e)
+    }
+    rejectLogin(opsDeniedMessage(p?.roles))
+    return
+  }
+  clearLoginError()
   if (p?.cert_expiry_hint) {
     notify(p.cert_expiry_hint, 'err')
   }
@@ -73,6 +86,7 @@ async function submit() {
     return
   }
   busy.value = true
+  clearLoginError()
   try {
     await SetCoreURL(coreInput.value)
     const p: any = await Login(username.value, password.value, totp.value)
@@ -88,7 +102,7 @@ async function submit() {
     if (msg.includes('多因素') || msg.includes('验证码') || msg.includes('动态')) {
       showTOTP.value = true
     }
-    notify(msg, 'err')
+    rejectLogin(msg)
   } finally {
     busy.value = false
   }
@@ -100,12 +114,13 @@ async function submitMFA() {
     return
   }
   busy.value = true
+  clearLoginError()
   try {
     const p: any = await VerifyMFA(mfaChallenge.value, mfaCode.value)
     mfaChallenge.value = ''
     await finishLogin(p)
   } catch (e: any) {
-    notify(String(e?.message || e), 'err')
+    rejectLogin(String(e?.message || e))
   } finally {
     busy.value = false
   }
@@ -156,6 +171,7 @@ function copyDeviceId() {
         <div>
           <h1>堡垒机 · 运维客户端</h1>
           <p>本机设备指纹将用于运维准入登记，所有操作全程审计。</p>
+          <p>仅运维人员可登录。系统管理员、安全管理员及其他角色请使用 Web 控制台。</p>
         </div>
       </div>
 
@@ -212,6 +228,7 @@ function copyDeviceId() {
         <label class="field"><span>确认新口令</span><input v-model="newPwd2" type="password" @keyup.enter="submitChangePwd" /></label>
         <button type="button" class="primary" style="width:100%;margin-top:8px" :disabled="busy" @click="submitChangePwd">提交新口令</button>
       </div>
+      <div v-if="state.loginError" class="form-error" role="alert">{{ state.loginError }}</div>
       <button class="primary" style="width: 100%" :disabled="busy" @click="submit">
         {{ busy ? '登录中…' : '登 录' }}
       </button>

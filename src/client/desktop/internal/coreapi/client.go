@@ -8,11 +8,13 @@ package coreapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -113,6 +115,15 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // 数据结构
 // ---------------------------------------------------------------------------
 
+// CaptchaImage 是登录页可直接展示的一张图形验证码。
+//
+// 管理服务把 PNG 放在响应体、把标识放在 X-Captcha-Id，与 Web 端同一接口。
+// DataURL 形如 data:image/png;base64,...，前端用作 img 的 src。
+type CaptchaImage struct {
+	ID      string `json:"id"`
+	DataURL string `json:"data_url"`
+}
+
 // LoginResult 是登录结果。
 type LoginResult struct {
 	AccessToken        string   `json:"access_token"`
@@ -177,12 +188,86 @@ type SessionInfo struct {
 // 接口
 // ---------------------------------------------------------------------------
 
+// CaptchaRequired 询问管理服务当前是否要求图形验证码。
+//
+// username 可为空：always 模式下判定与账号无关，登录页一打开就能问。
+// 接口本身不鉴权，与 Web 端 /auth/captcha/required 一致。
+func (c *Client) CaptchaRequired(ctx context.Context, username string) (bool, error) {
+	q := url.Values{}
+	q.Set("username", username)
+	var out struct {
+		Required bool `json:"required"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/auth/captcha/required?"+q.Encode(), nil, &out); err != nil {
+		return false, err
+	}
+	return out.Required, nil
+}
+
+// FetchCaptcha 领取一张新的图形验证码。点击图片刷新时再调一次。
+//
+// 不走 do()：成功响应是 PNG 二进制而不是 JSON 信封，按 JSON 解包会把图片读坏。
+// 标识在 X-Captcha-Id。校验失败或过期后服务端会作废旧图，必须换一张新的。
+func (c *Client) FetchCaptcha(ctx context.Context) (*CaptchaImage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v1/auth/captcha", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("无法连接管理服务 %s：%w", c.base, err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("读取图形验证码失败: %w", err)
+	}
+	if !captchaImageOK(resp, raw) {
+		var env envelope
+		if json.Unmarshal(raw, &env) == nil && strings.TrimSpace(env.Message) != "" && env.Code != "OK" {
+			return nil, &APIError{Code: env.Code, Message: env.Message, Status: resp.StatusCode}
+		}
+		return nil, fmt.Errorf("图形验证码获取失败")
+	}
+	id := strings.TrimSpace(resp.Header.Get("X-Captcha-Id"))
+	if id == "" {
+		return nil, fmt.Errorf("图形验证码获取失败")
+	}
+	return &CaptchaImage{
+		ID:      id,
+		DataURL: "data:image/png;base64," + base64.StdEncoding.EncodeToString(raw),
+	}, nil
+}
+
+func captchaImageOK(resp *http.Response, raw []byte) bool {
+	if resp.StatusCode != http.StatusOK || len(raw) == 0 {
+		return false
+	}
+	ctype := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(ctype, "image/") {
+		return true
+	}
+	return bytes.HasPrefix(raw, []byte("\x89PNG\r\n\x1a\n"))
+}
+
 // Login 登录并保存令牌。
-func (c *Client) Login(ctx context.Context, username, password, totp string) (*LoginResult, error) {
-	var out LoginResult
-	if err := c.do(ctx, http.MethodPost, "/api/v1/auth/login", map[string]any{
+//
+// captchaID / captchaCode 是图形验证码。管理服务在 captcha.mode=always
+// （当前默认）时每次登录都校验；缺了会返回「请输入图形验证码」。
+// 空字段不写入请求体，避免把「不需要验证码」和「提交了空验证码」混在一起。
+func (c *Client) Login(ctx context.Context, username, password, totp, captchaID, captchaCode string) (*LoginResult, error) {
+	body := map[string]any{
 		"username": username, "password": password, "totp_code": totp,
-	}, &out); err != nil {
+	}
+	if id := strings.TrimSpace(captchaID); id != "" {
+		body["captcha_id"] = id
+	}
+	if code := strings.TrimSpace(captchaCode); code != "" {
+		body["captcha_code"] = code
+	}
+	var out LoginResult
+	if err := c.do(ctx, http.MethodPost, "/api/v1/auth/login", body, &out); err != nil {
 		return nil, err
 	}
 	c.token = out.AccessToken

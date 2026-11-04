@@ -70,6 +70,20 @@ export namespace coreapi {
 		    return a;
 		}
 	}
+	export class CaptchaImage {
+	    id: string;
+	    data_url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CaptchaImage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.data_url = source["data_url"];
+	    }
+	}
 	export class LoginResult {
 	    access_token: string;
 	    refresh_token: string;

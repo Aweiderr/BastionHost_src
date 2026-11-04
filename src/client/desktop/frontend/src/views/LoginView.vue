@@ -9,7 +9,8 @@
 import { onMounted, ref } from 'vue'
 import { state, notify, rejectLogin, clearLoginError, type Profile } from '../store'
 import { isOpsUser, opsDeniedMessage } from '../opsRole'
-import { Login, Ping, SetCoreURL, VerifyMFA, ResendMFA, ChangePassword, Logout } from '../../wailsjs/go/main/App'
+import { isGraphicCaptchaMessage, shouldShowTotp } from '../loginError'
+import { Login, Ping, SetCoreURL, VerifyMFA, ResendMFA, ChangePassword, Logout, CaptchaRequired, FetchCaptcha } from '../../wailsjs/go/main/App'
 
 const emit = defineEmits<{ (e: 'logged-in', p: Profile): void }>()
 
@@ -29,10 +30,72 @@ const busy = ref(false)
 const probing = ref(false)
 const probeResult = ref<{ ok: boolean; text: string } | null>(null)
 
+// 图形验证码。管理服务 captcha.mode=always 时一进登录页就要，
+// after_failures 时要等服务端在登录错误里点名才出现。
+const captchaNeeded = ref(false)
+const captchaId = ref('')
+const captchaImage = ref('')
+const captchaCode = ref('')
+const captchaBusy = ref(false)
+let captchaForURL = ''
+
 onMounted(() => {
   coreInput.value = state.coreURL || 'http://127.0.0.1:8080'
   probe()
 })
+
+function resetCaptcha() {
+  captchaId.value = ''
+  captchaImage.value = ''
+  captchaCode.value = ''
+  captchaForURL = ''
+}
+
+/** 向当前管理服务要一张新图。clearError 为真时（用户点击图片）清掉旧的登录错误。 */
+async function refreshCaptcha(clearError: boolean): Promise<boolean> {
+  if (captchaBusy.value) return false
+  captchaBusy.value = true
+  captchaId.value = ''
+  captchaImage.value = ''
+  captchaCode.value = ''
+  try {
+    const img = await FetchCaptcha()
+    const id = String(img?.id || '').trim()
+    const url = String(img?.data_url || '').trim()
+    if (!id || !url) throw new Error('图形验证码获取失败')
+    captchaId.value = id
+    captchaImage.value = url
+    captchaForURL = coreInput.value.trim()
+    if (clearError) clearLoginError()
+    return true
+  } catch (e: any) {
+    const msg = String(e?.message || e || '图形验证码获取失败')
+    if (clearError) rejectLogin(msg)
+    else notify(msg, 'err')
+    return false
+  } finally {
+    captchaBusy.value = false
+  }
+}
+
+/** 按管理服务的策略决定要不要展示图形验证码。探测失败时先不展示，登录错误里再补。 */
+async function syncCaptcha() {
+  let required = false
+  try {
+    required = !!(await CaptchaRequired(username.value.trim()))
+  } catch {
+    return
+  }
+  captchaNeeded.value = required
+  if (!required) {
+    resetCaptcha()
+    return
+  }
+  const url = coreInput.value.trim()
+  if (captchaForURL !== url || !captchaImage.value) {
+    await refreshCaptcha(false)
+  }
+}
 
 async function probe() {
   probing.value = true
@@ -51,6 +114,7 @@ async function probe() {
     probeResult.value = { ok: false, text: String(e?.message || e) }
   } finally {
     probing.value = false
+    await syncCaptcha()
   }
 }
 
@@ -82,14 +146,27 @@ async function finishLogin(p: any) {
 
 async function submit() {
   if (!username.value || !password.value) {
-    notify('请输入用户名与口令', 'err')
+    rejectLogin('请输入用户名与口令')
+    return
+  }
+  if (!captchaImage.value) {
+    await syncCaptcha()
+  }
+  if (captchaNeeded.value && !captchaCode.value.trim()) {
+    rejectLogin('请输入图形验证码')
     return
   }
   busy.value = true
   clearLoginError()
   try {
     await SetCoreURL(coreInput.value)
-    const p: any = await Login(username.value, password.value, totp.value)
+    const p: any = await Login(
+      username.value,
+      password.value,
+      totp.value,
+      captchaNeeded.value ? captchaId.value : '',
+      captchaNeeded.value ? captchaCode.value.trim() : '',
+    )
     if (p?.mfa_required && p?.challenge_id) {
       mfaChallenge.value = p.challenge_id
       mfaHint.value = p.mfa_hint || `请输入发往 ${p.phone_masked || '手机'} 的验证码`
@@ -99,7 +176,22 @@ async function submit() {
     await finishLogin(p)
   } catch (e: any) {
     const msg = String(e?.message || e)
-    if (msg.includes('多因素') || msg.includes('验证码') || msg.includes('动态')) {
+    // 「请输入图形验证码」也含「验证码」。不能据此展开动态令牌，
+    // 否则输入框被占掉，用户看不到图形验证码。
+    if (isGraphicCaptchaMessage(msg)) {
+      captchaNeeded.value = true
+      rejectLogin(msg)
+      await refreshCaptcha(false)
+      try {
+        const required = !!(await CaptchaRequired(username.value.trim()))
+        captchaNeeded.value = required
+        if (!required) resetCaptcha()
+      } catch {
+        /* 探测失败时保持当前状态，用户仍可重试 */
+      }
+      return
+    }
+    if (shouldShowTotp(msg)) {
       showTOTP.value = true
     }
     rejectLogin(msg)
@@ -210,7 +302,30 @@ function copyDeviceId() {
         <input v-model="totp" maxlength="6" placeholder="例如 123456" @keyup.enter="submit" />
       </label>
 
-      
+      <label v-if="captchaNeeded" class="field">
+        <span>图形验证码</span>
+        <div class="row captcha-row">
+          <input
+            v-model="captchaCode"
+            maxlength="6"
+            autocomplete="off"
+            placeholder="请输入图中字符"
+            @keyup.enter="submit"
+          />
+          <button
+            type="button"
+            class="captcha-refresh"
+            title="看不清？点击刷新"
+            :disabled="captchaBusy"
+            @click="refreshCaptcha(true)"
+          >
+            <img v-if="captchaImage" :src="captchaImage" alt="点击刷新验证码" />
+            <span v-else>{{ captchaBusy ? '加载中…' : '点击获取' }}</span>
+          </button>
+        </div>
+        <p class="hint">连续登录失败较多，请输入图形验证码以继续。看不清可点击图片刷新。</p>
+      </label>
+
       <div v-if="mfaChallenge" class="mfa-box">
         <label class="field">
           <span>短信验证码</span>

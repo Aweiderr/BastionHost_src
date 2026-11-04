@@ -22,7 +22,11 @@ export function GetProfile():Promise<coreapi.LoginResult>;
 
 export function ListSessions():Promise<Array<Record<string, any>>>;
 
-export function Login(arg1:string,arg2:string,arg3:string):Promise<coreapi.LoginResult>;
+export function CaptchaRequired(arg1:string):Promise<boolean>;
+
+export function FetchCaptcha():Promise<coreapi.CaptchaImage>;
+
+export function Login(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<coreapi.LoginResult>;
 
 export function Logout():Promise<void>;
 

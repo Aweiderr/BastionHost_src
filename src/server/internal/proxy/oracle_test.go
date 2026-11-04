@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"bastion.local/server/internal/managerclient"
+	sharedmodel "bastion.local/shared/model"
 	"bastion.local/shared/policy"
 )
 
@@ -333,6 +334,9 @@ func TestOracleTunnelRewritesAndAudits(t *testing.T) {
 	if len(fake.cmds) != 1 || fake.cmds[0].CommandText != "SELECT 1 FROM dual" || fake.cmds[0].CommandType != "sql" {
 		t.Fatalf("审计不对: %#v", fake.cmds)
 	}
+	if fake.cmds[0].CommandOrigin != sharedmodel.CommandOriginUser {
+		t.Fatalf("普通语句不应标成客户端自动: %#v", fake.cmds[0])
+	}
 	if fake.cmds[0].PolicyAction != policy.ActionAllow {
 		t.Fatalf("放行动作不对: %#v", fake.cmds[0])
 	}
@@ -535,6 +539,9 @@ func TestOraclePolicyDenyDropsPacket(t *testing.T) {
 	defer fake.mu.Unlock()
 	if len(fake.cmds) != 1 || fake.cmds[0].ExecResult != "blocked" || fake.cmds[0].PolicyAction != policy.ActionDeny {
 		t.Fatalf("阻断审计不对: %#v", fake.cmds)
+	}
+	if fake.cmds[0].CommandOrigin != sharedmodel.CommandOriginUser {
+		t.Fatalf("人工 SQL 被阻断后仍应记为用户输入: %#v", fake.cmds[0])
 	}
 	if strings.Contains(fake.cmds[0].CommandText, "Vault") {
 		t.Fatal("审计带了口令")

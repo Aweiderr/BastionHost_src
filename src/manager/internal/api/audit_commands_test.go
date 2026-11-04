@@ -27,6 +27,32 @@ func TestAuditCommandFilterKeepsSessionIDWhenSessionNoEmpty(t *testing.T) {
 	}
 }
 
+func TestAuditCommandFilterReadsOrigin(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit/commands?command_origin=%20client_auto%20", nil)
+	f := auditCommandFilter(req, 1)
+	if f.CommandOrigin != "client_auto" {
+		t.Fatalf("filter = %+v", f)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/audit/commands?command_origin=user", nil)
+	f = auditCommandFilter(req, 1)
+	if f.CommandOrigin != "user" {
+		t.Fatalf("filter = %+v", f)
+	}
+}
+
+func TestAuditCommandFilterDropsUnknownOrigin(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit/commands?command_origin=auto", nil)
+	f := auditCommandFilter(req, 1)
+	if f.CommandOrigin != "" {
+		t.Fatalf("unknown origin must not filter: %+v", f)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/audit/commands", nil)
+	f = auditCommandFilter(req, 1)
+	if f.CommandOrigin != "" {
+		t.Fatalf("missing origin must show all: %+v", f)
+	}
+}
+
 func TestAuditCommandFilterIgnoresNonPositiveSessionID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/audit/commands?session_id=0&user_id=-1", nil)
 	f := auditCommandFilter(req, 1)

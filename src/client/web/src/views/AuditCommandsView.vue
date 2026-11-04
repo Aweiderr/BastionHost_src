@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import type { RouteLocationRaw } from 'vue-router'
 import { listAuditCommands } from '@/api/audit'
 import type { AuditCommand } from '@/api/types'
+import CommandOriginTag from '@/components/CommandOriginTag.vue'
 import DataTable from '@/components/DataTable.vue'
 import Pagination from '@/components/Pagination.vue'
 import SearchBar from '@/components/SearchBar.vue'
@@ -19,6 +20,7 @@ import {
   dictTone,
   type TagTone,
 } from '@/utils/constants'
+import { COMMAND_ORIGIN_FILTERS, commandOriginQuery } from '@/utils/commandOrigin'
 import { formatTime } from '@/utils/format'
 
 const auth = useAuthStore()
@@ -28,6 +30,7 @@ const columns: TableColumn[] = [
   { key: 'session_no', title: '会话号', width: '200px' },
   { key: 'seq_no', title: '序号', width: '70px', align: 'center' },
   { key: 'command_text', title: '命令内容' },
+  { key: 'command_origin', title: '来源', width: '120px' },
   { key: 'policy_action', title: '处置动作', width: '110px' },
   { key: 'risk_level', title: '风险等级', width: '100px' },
   { key: 'exec_result', title: '执行结果', width: '100px' },
@@ -44,6 +47,7 @@ const query = reactive({
   keyword: '',
   risk_level: '',
   policy_action: '',
+  command_origin: '',
   session_no: '',
   session_id: '',
 })
@@ -55,6 +59,7 @@ async function load(): Promise<void> {
       keyword: query.keyword,
       risk_level: query.risk_level,
       policy_action: query.policy_action,
+      command_origin: commandOriginQuery(query.command_origin),
       session_no: query.session_no || undefined,
       session_id: query.session_id ? Number(query.session_id) : undefined,
       page: page.value,
@@ -79,6 +84,7 @@ function resetQuery(): void {
   query.keyword = ''
   query.risk_level = ''
   query.policy_action = ''
+  query.command_origin = ''
   query.session_no = ''
   query.session_id = ''
   search()
@@ -115,7 +121,7 @@ onMounted(load)
       <div>
         <div class="page-title">命令审计</div>
         <div class="page-subtitle">
-          按风险等级、处置动作或会话号检索命令留痕。点击会话号可打开对应会话详情。
+          按风险等级、处置动作、来源或会话号检索命令留痕。客户端自动发出的语句会标成「客户端自动」，默认仍全部展示。点击会话号可打开对应会话详情。
         </div>
       </div>
     </div>
@@ -134,6 +140,11 @@ onMounted(load)
       <select v-model="query.policy_action" class="select">
         <option value="">全部处置动作</option>
         <option v-for="item in POLICY_ACTIONS" :key="item.value" :value="item.value">{{ item.label }}</option>
+      </select>
+      <select v-model="query.command_origin" class="select">
+        <option v-for="item in COMMAND_ORIGIN_FILTERS" :key="item.label" :value="item.value">
+          {{ item.label }}
+        </option>
       </select>
       <input
         v-model.trim="query.session_no"
@@ -177,6 +188,7 @@ onMounted(load)
           </td>
           <td class="text-center">{{ row.seq_no }}</td>
           <td class="text-mono" style="word-break: break-all">{{ row.command_text }}</td>
+          <td><CommandOriginTag :origin="row.command_origin" /></td>
           <td>
             <StatusTag
               :text="dictLabel(POLICY_ACTION_MAP, row.policy_action)"

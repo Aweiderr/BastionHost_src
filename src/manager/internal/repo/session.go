@@ -392,12 +392,14 @@ func (r *SessionRepo) AddCommand(ctx context.Context, c *model.SessionCommand) e
 	if c.ExecResult == "" {
 		c.ExecResult = "unknown"
 	}
+	// 空值和无法识别的来源记为用户输入。留痕本身不能因为这个字段失败。
+	c.CommandOrigin = model.NormalizeCommandOrigin(c.CommandOrigin)
 	return r.pool.QueryRow(ctx, `INSERT INTO ops_session_command
-	  (session_id, tenant_id, seq_no, command_text, command_digest, command_type, risk_level,
+	  (session_id, tenant_id, seq_no, command_text, command_digest, command_type, command_origin, risk_level,
 	   policy_action, policy_id, matched_rule, exec_result, output_digest, privilege_chain, duration_ms)
-	 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+	 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 	 RETURNING command_id, command_time`,
-		c.SessionID, c.TenantID, c.SeqNo, c.CommandText, c.CommandDigest, c.CommandType, c.RiskLevel,
+		c.SessionID, c.TenantID, c.SeqNo, c.CommandText, c.CommandDigest, c.CommandType, c.CommandOrigin, c.RiskLevel,
 		c.PolicyAction, c.PolicyID, c.MatchedRule, c.ExecResult, c.OutputDigest, c.PrivilegeChain, c.DurationMs,
 	).Scan(&c.CommandID, &c.CommandTime)
 }
@@ -408,7 +410,7 @@ func (r *SessionRepo) ListCommands(ctx context.Context, sessionID int64, limit i
 		limit = 200
 	}
 	rows, err := r.pool.Query(ctx, `SELECT command_id, session_id, tenant_id, seq_no, command_text,
-	   coalesce(command_digest,''), command_type, risk_level, policy_action, policy_id,
+	   coalesce(command_digest,''), command_type, coalesce(command_origin,'user'), risk_level, policy_action, policy_id,
 	   coalesce(matched_rule,''), exec_result, coalesce(output_digest,''), coalesce(privilege_chain,''),
 	   duration_ms, command_time
 	 FROM ops_session_command WHERE session_id = $1 ORDER BY seq_no LIMIT $2`, sessionID, limit)
@@ -420,7 +422,7 @@ func (r *SessionRepo) ListCommands(ctx context.Context, sessionID int64, limit i
 	for rows.Next() {
 		var c model.SessionCommand
 		if err := rows.Scan(&c.CommandID, &c.SessionID, &c.TenantID, &c.SeqNo, &c.CommandText,
-			&c.CommandDigest, &c.CommandType, &c.RiskLevel, &c.PolicyAction, &c.PolicyID,
+			&c.CommandDigest, &c.CommandType, &c.CommandOrigin, &c.RiskLevel, &c.PolicyAction, &c.PolicyID,
 			&c.MatchedRule, &c.ExecResult, &c.OutputDigest, &c.PrivilegeChain,
 			&c.DurationMs, &c.CommandTime); err != nil {
 			return nil, err
@@ -490,11 +492,13 @@ type CommandFilter struct {
 	AssetID      int64
 	RiskLevel    string
 	PolicyAction string
-	Keyword      string
-	StartTime    string
-	EndTime      string
-	Page         int
-	PageSize     int
+	// CommandOrigin 只接受 user / client_auto。空值表示不过滤，默认仍返回全部语句。
+	CommandOrigin string
+	Keyword       string
+	StartTime     string
+	EndTime       string
+	Page          int
+	PageSize      int
 }
 
 // commandSearchSQL 是命令审计列表的计数语句与分页语句。
@@ -537,6 +541,9 @@ func buildCommandSearch(f CommandFilter) commandSearchSQL {
 	if f.PolicyAction != "" {
 		add("c.policy_action = $%d", f.PolicyAction)
 	}
+	if origin := model.CommandOriginFilter(f.CommandOrigin); origin != "" {
+		add("c.command_origin = $%d", origin)
+	}
 	if f.Keyword != "" {
 		args = append(args, "%"+f.Keyword+"%")
 		where = append(where, fmt.Sprintf("c.command_text ILIKE $%d", len(args)))
@@ -554,7 +561,8 @@ func buildCommandSearch(f CommandFilter) commandSearchSQL {
 		size = 50
 	}
 	listSQL := fmt.Sprintf(`SELECT c.command_id, c.session_id, c.tenant_id, c.seq_no,
-	   c.command_text, coalesce(c.command_digest,''), c.command_type, c.risk_level, c.policy_action,
+	   c.command_text, coalesce(c.command_digest,''), c.command_type, coalesce(c.command_origin,'user'),
+	   c.risk_level, c.policy_action,
 	   c.policy_id, coalesce(c.matched_rule,''), c.exec_result, coalesce(c.output_digest,''),
 	   coalesce(c.privilege_chain,''), c.duration_ms, c.command_time,
 	   coalesce(s.session_no,'')
@@ -587,7 +595,7 @@ func (r *SessionRepo) SearchCommands(ctx context.Context, f CommandFilter) ([]*m
 	for rows.Next() {
 		var c model.SessionCommand
 		if err := rows.Scan(&c.CommandID, &c.SessionID, &c.TenantID, &c.SeqNo, &c.CommandText,
-			&c.CommandDigest, &c.CommandType, &c.RiskLevel, &c.PolicyAction, &c.PolicyID,
+			&c.CommandDigest, &c.CommandType, &c.CommandOrigin, &c.RiskLevel, &c.PolicyAction, &c.PolicyID,
 			&c.MatchedRule, &c.ExecResult, &c.OutputDigest, &c.PrivilegeChain,
 			&c.DurationMs, &c.CommandTime, &c.SessionNo); err != nil {
 			return nil, 0, err

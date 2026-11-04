@@ -501,6 +501,8 @@ export interface AuditSession {
 export interface SessionCommand {
   seq_no: number
   command_text: string
+  /** user：用户输入；client_auto：客户端自动。历史记录可能缺省，按用户输入展示。 */
+  command_origin?: string
   policy_action: string
   risk_level: string
   exec_result: string
@@ -537,6 +539,8 @@ export interface AuditCommand {
   session_no?: string
   seq_no: number
   command_text: string
+  /** user：用户输入；client_auto：客户端自动。历史记录可能缺省，按用户输入展示。 */
+  command_origin?: string
   policy_action: string
   risk_level: string
   exec_result: string
@@ -547,6 +551,8 @@ export interface AuditCommand {
 export interface AuditCommandQuery extends PageQuery {
   risk_level?: string
   policy_action?: string
+  /** user 或 client_auto。不传则返回全部语句。 */
+  command_origin?: string
   keyword?: string
   session_id?: number
   /** 按会话号子串过滤，大小写不敏感 */

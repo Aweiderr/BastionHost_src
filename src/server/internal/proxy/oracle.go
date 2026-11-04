@@ -614,9 +614,11 @@ func (g *OracleGateway) forwardClientPacket(pkt []byte, st *oraState) bool {
 			st.blocked++
 		}
 		st.seq++
+		// 来源只是审计标记。允许、阻断、确认仍按语句本身判定，客户端自动语句不会被放过。
 		payload := managerclient.SessionCommandPayload{
 			SeqNo: st.seq, CommandText: sql, CommandType: "sql",
-			ExecResult: result, PolicyAction: actionOf(d), RiskLevel: riskOf(d),
+			CommandOrigin: oracleCommandOrigin(sql),
+			ExecResult:    result, PolicyAction: actionOf(d), RiskLevel: riskOf(d),
 			MatchedRule: ruleNameOf(d),
 		}
 		if d != nil && d.MatchedRule != nil {

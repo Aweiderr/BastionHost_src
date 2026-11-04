@@ -15,6 +15,26 @@ npm run preview  # 预览构建产物
 - WebSSH 直连：`ws://<当前页面主机名>:8081/api/v1/webssh`，不走代理（见 `src/utils/constants.ts` 的 `buildWebsshUrl`）
 - RDP/VNC 画面：同一主机的 `8081`，路径 `/api/v1/webdesktop`（`buildWebdesktopUrl`）
 
+## 下载 Windows 桌面客户端
+
+登录页「下载客户端」是一个链接，地址为：
+
+`/bastion/downloads/bastion-desktop.exe`
+
+（前缀与 `vite.config.ts` 的 `base`、管理服务的 `BASTION_WEB_PREFIX` 一致。）
+
+管理服务从 `BASTION_DOWNLOAD_DIR` 读这个文件，默认是进程工作目录下的 `downloads/`。
+生产环境工作目录为 `/opt/bastion` 时，放置路径是：
+
+`/opt/bastion/downloads/bastion-desktop.exe`
+
+在 Windows 上进入 `client/desktop` 执行 `wails build`，把 `build/bin/bastion-desktop.exe`
+拷到该目录，文件名不要改。放好后无需重启。未放置时该地址返回 JSON 404。
+登录前即可下载。这里没有自动更新。
+
+开发服务器把 `/bastion/downloads` 代理到 `http://127.0.0.1:8080`，
+避免本地点击时把登录页保存成客户端。
+
 ## 生产部署
 
 1. 将 `dist/` 作为静态资源目录交由 Nginx / Caddy 托管，并配置 SPA 回退到 `index.html`。

@@ -40,7 +40,21 @@
 | --- | --- |
 | `bin/manager`、`bin/server`、`bin/migrate` | `.\build.ps1 linux`（Windows）或 `make linux`（Linux/macOS） |
 | 前端 `client/web/dist/` | `cd client/web && npm install && npm run build` |
+| `downloads/bastion-desktop.exe` | 在 Windows 上 `cd client/desktop && wails build`，拷贝 `build/bin/bastion-desktop.exe`。云端环境编不出该文件 |
 | `record-verify`（可选） | `go build -o bin/record-verify ./cmd/record-verify` |
+
+登录页「下载客户端」请求 `http://<服务器IP>:8080/bastion/downloads/bastion-desktop.exe`，无需登录。
+`install.sh` 会创建 `/opt/bastion/downloads/` 并写入 `BASTION_DOWNLOAD_DIR`。已部署的机器补放文件即可，不必重装：
+
+```bash
+install -d -m 0755 /opt/bastion/downloads
+install -m 0644 bastion-desktop.exe /opt/bastion/downloads/bastion-desktop.exe
+curl -fsS -D - -o /tmp/bastion-desktop.exe \
+  http://127.0.0.1:8080/bastion/downloads/bastion-desktop.exe
+# 期望：HTTP 200，Content-Disposition 含 bastion-desktop.exe，文件与拷入的一致
+```
+
+目录里还没有该文件时，同一地址返回 JSON `API_4040`，而不是登录页。本版本不做客户端自动更新。
 
 二进制是**纯静态**（`CGO_ENABLED=0`），不依赖 glibc 版本：
 

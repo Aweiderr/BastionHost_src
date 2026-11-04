@@ -738,6 +738,13 @@ npm run build    # 产物 dist/
 
 SPA 路由会回落到 `index.html`，而 `/api`、`/internal`、探针前缀仍返回 JSON 404。
 
+登录页「下载客户端」指向 `http://<manager>:8080/<前缀>/downloads/bastion-desktop.exe`
+（前缀默认 `bastion`）。该地址不校验登录。文件放在 `BASTION_DOWNLOAD_DIR`
+（默认 `./downloads`；生产为 `/opt/bastion/downloads/bastion-desktop.exe`）。
+在 Windows 上执行 `wails build` 后，把 `client/desktop/build/bin/bastion-desktop.exe`
+按这个文件名拷入该目录即可，不必重启。文件不存在时返回 JSON 404，不会把登录页当成安装包。
+这里只做静态分发，不做客户端自动更新。
+
 ### 服务端（`server`，默认 :8081，SSH 网关默认 :2222）
 
 | 方法 | 路径 | 说明 |
@@ -866,6 +873,8 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 | `BASTION_RECORD_DIR` | ./data/records | 录像存储目录 |
 | `BASTION_KEYSTORE_DIR` | ./data/keys | 密钥库目录 |
 | `BASTION_ALERT_WEBHOOK_URL` | （空） | 高危命令告警 Webhook。空则只落库 |
+| `BASTION_DOWNLOAD_DIR` | ./downloads | 桌面客户端目录。登录页下载 `bastion-desktop.exe`，URL 为 `/<前缀>/downloads/bastion-desktop.exe`。生产放置路径 `/opt/bastion/downloads/bastion-desktop.exe` |
+| `BASTION_WEB_PREFIX` | bastion | Web 控制台与客户端下载的 URL 前缀，须与前端 `vite` `base` 一致 |
 
 ### 高危命令告警通知
 

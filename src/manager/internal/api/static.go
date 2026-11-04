@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -137,18 +139,13 @@ func registerStaticRoutes(mux *http.ServeMux, dir, prefix, downloadDir string) {
 		// 若回落到 SPA，访问不存在的安装包会得到 200 + index.html ——
 		// 浏览器"下载成功"一个 HTML 当客户端，打开是登录页而非程序，
 		// 这种问题很难往"文件不存在"上想。
+		//
+		// 登录页「下载客户端」请求的是 <前缀>/downloads/bastion-desktop.exe，
+		// 对应 BASTION_DOWNLOAD_DIR 里的同名文件。这里不硬编码文件名：
+		// 目录里放什么就提供什么，但只提供普通文件，并且强制按附件下载。
 		if clean == "downloads" || strings.HasPrefix(clean, "downloads/") {
 			dlPath := strings.TrimPrefix(strings.TrimPrefix(clean, "downloads"), "/")
-			if dlDir == "" || dlPath == "" {
-				jsonNotFound(w)
-				return
-			}
-			// 实时判断文件是否存在（见上方关于启动顺序的说明）
-			if _, serr := os.Stat(filepath.Join(dlDir, filepath.FromSlash(dlPath))); serr == nil {
-				http.StripPrefix(base+"downloads/", http.FileServer(http.Dir(dlDir))).ServeHTTP(w, r)
-				return
-			}
-			httpx.FailCode(w, "API_4040")
+			serveClientDownload(w, r, dlDir, dlPath)
 			return
 		}
 
@@ -171,4 +168,42 @@ func registerStaticRoutes(mux *http.ServeMux, dir, prefix, downloadDir string) {
 		}
 		writeIndex(w)
 	})
+}
+
+// serveClientDownload 从下载目录提供一个普通文件，并强制浏览器另存。
+//
+// 不存在、是目录、或经符号链接跳出下载目录时，一律 JSON 404。
+// 不能把这些情况交给 FileServer：目录会被列出来，符号链接会读到目录外，
+// 缺失文件若再回落 SPA，用户会把登录页保存成 .exe。
+func serveClientDownload(w http.ResponseWriter, r *http.Request, dlDir, dlPath string) {
+	if dlDir == "" || dlPath == "" || dlPath == "." {
+		httpx.FailCode(w, "API_4040")
+		return
+	}
+	root, err := filepath.EvalSymlinks(dlDir)
+	if err != nil {
+		httpx.FailCode(w, "API_4040")
+		return
+	}
+	target := filepath.Join(dlDir, filepath.FromSlash(dlPath))
+	real, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		httpx.FailCode(w, "API_4040")
+		return
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		httpx.FailCode(w, "API_4040")
+		return
+	}
+	st, err := os.Stat(real)
+	if err != nil || !st.Mode().IsRegular() {
+		httpx.FailCode(w, "API_4040")
+		return
+	}
+	name := filepath.Base(real)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", name, url.PathEscape(name)))
+	// 安装包会被替换。no-cache 只要求重新校验，仍可配合 ServeFile 的条件请求。
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeFile(w, r, real)
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -103,13 +104,10 @@ func (s *Session) Start() {
 
 func (s *Session) loop(ctx context.Context, onControl, onFrame func([]byte)) {
 	defer func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
-		_ = s.conn.CloseNow()
-		if s.onClose != nil {
-			s.onClose("closed")
+		if rec := recover(); rec != nil {
+			slog.Error("图形会话读取中断", "err", rec)
 		}
+		s.finish()
 	}()
 	for {
 		typ, data, err := s.conn.Read(ctx)
@@ -118,42 +116,78 @@ func (s *Session) loop(ctx context.Context, onControl, onFrame func([]byte)) {
 		}
 		switch typ {
 		case websocket.MessageText:
-			if onControl != nil {
-				onControl(append([]byte(nil), data...))
-			}
+			call(onControl, data)
 		case websocket.MessageBinary:
-			if onFrame != nil {
-				onFrame(append([]byte(nil), data...))
-			}
+			call(onFrame, data)
 		}
 	}
+}
+
+func call(fn func([]byte), data []byte) {
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("图形会话回调异常", "err", rec)
+		}
+	}()
+	fn(append([]byte(nil), data...))
+}
+
+func (s *Session) finish() {
+	s.mu.Lock()
+	s.closed = true
+	conn := s.conn
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.CloseNow()
+	}
+	if s.onClose == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("图形会话结束回调异常", "err", rec)
+		}
+	}()
+	s.onClose("closed")
 }
 
 // WriteText 把一条 JSON 控制消息写回代理（键鼠或手动口令）。
 func (s *Session) WriteText(text string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || s.conn == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("会话已结束")
 	}
+	conn := s.conn
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return s.conn.Write(ctx, websocket.MessageText, []byte(text))
+	return conn.Write(ctx, websocket.MessageText, []byte(text))
 }
 
 // Close 结束会话。
+//
+// 先取消读循环再关闭连接。读循环还阻塞在 Read 时去做关闭握手，
+// 会和 coder/websocket 自己的读抢同一把锁，界面上的「断开」就会停住。
+// 空闲超时或对端直接断开时，读循环已经退出，这里只是把状态收干净。
 func (s *Session) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
-	if s.cancel != nil {
-		s.cancel()
+	cancel := s.cancel
+	conn := s.conn
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
-	if s.conn != nil {
-		return s.conn.Close(websocket.StatusNormalClosure, "closed")
+	if conn == nil {
+		return nil
 	}
-	return nil
+	return conn.CloseNow()
 }

@@ -1,6 +1,8 @@
 /**
  * 与 Web 端 src/utils/desktopFrame.ts、keysym.ts 同一套画面帧和键鼠换算。
  * 改协议时两边一起改。
+ *
+ * 代理把 TigerVNC 的 LastRect 伪编码拆掉之后，这里只收到普通 BM 脏矩形。
  */
 
 export interface Box {

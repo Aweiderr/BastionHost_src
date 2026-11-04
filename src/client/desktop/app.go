@@ -226,12 +226,20 @@ func (a *App) Logout() error {
 	for _, s := range a.sessions {
 		sessions = append(sessions, s)
 	}
+	desktops := make([]*desk.Session, 0, len(a.desktops))
+	for _, s := range a.desktops {
+		desktops = append(desktops, s)
+	}
 	a.sessions = map[string]*term.Session{}
+	a.desktops = map[string]*desk.Session{}
 	a.user = nil
 	a.password = ""
 	a.mu.Unlock()
 
 	for _, s := range sessions {
+		_ = s.Close()
+	}
+	for _, s := range desktops {
 		_ = s.Close()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -416,16 +424,16 @@ func (a *App) OpenDesktopSession(key, protocol string, assetID, accountID int64,
 	}
 
 	onControl := func(b []byte) {
-		runtime.EventsEmit(a.ctx, "desk:control", map[string]any{"key": key, "data": string(b)})
+		a.emit("desk:control", map[string]any{"key": key, "data": string(b)})
 	}
 	onFrame := func(b []byte) {
-		runtime.EventsEmit(a.ctx, "desk:frame", map[string]any{
+		a.emit("desk:frame", map[string]any{
 			"key":  key,
 			"data": base64.StdEncoding.EncodeToString(b),
 		})
 	}
 	onClose := func(reason string) {
-		runtime.EventsEmit(a.ctx, "desk:closed", map[string]any{"key": key, "reason": reason})
+		a.emit("desk:closed", map[string]any{"key": key, "reason": reason})
 	}
 	var sess *desk.Session
 	var err error
@@ -479,6 +487,17 @@ func (a *App) CloseDesktopSession(key string) error {
 		return nil
 	}
 	return sess.Close()
+}
+
+// emit 把图形会话事件交给 Wails。
+//
+// 窗口还没起来、或测试里没有前端事件总线时，Wails 会直接退出进程。
+// 画面回调发生在读循环里，不能因为界面没接上就把客户端打掉。
+func (a *App) emit(event string, payload map[string]any) {
+	if a == nil || a.ctx == nil || a.ctx.Value("events") == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, event, payload)
 }
 
 // desktopSocketURL 由管理服务地址推导代理 HTTP 的画面 WebSocket。

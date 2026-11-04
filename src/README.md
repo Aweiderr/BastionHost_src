@@ -769,7 +769,7 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 
 会话建立即开始录像；危险命令被阻断、需确认的命令进入 y/n 确认流程，全部命令（含被阻断的）写入 `ops_session_command`。
 
-**RDP / VNC 画面**（Web「图形会话」、桌面客户端工作台）：资产协议为 `rdp` 或 `vnc` 时，走 `GET /api/v1/webdesktop`。令牌、授权、`ops_session` 开始/结束、强制中断和空闲超时与 WebSSH 相同。VNC 在代理侧完成 Password 认证（口令不下发浏览器，只使用前 8 字节）；RDP 由代理拨号并把位图推到画布。剪贴板、磁盘映射和画面录像尚未做。3389/5900 仍不是给 mstsc / vncviewer 用的代理。
+**RDP / VNC 画面**（Web「图形会话」、桌面客户端工作台）：资产协议为 `rdp` 或 `vnc` 时，走 `GET /api/v1/webdesktop`。令牌、授权、`ops_session` 开始/结束、强制中断和空闲超时与 WebSSH 相同。VNC 在代理侧完成 Password 认证（口令不下发浏览器，只使用前 8 字节）；RDP 由代理拨号并把位图推到画布。桌面客户端用同一条通道：Go 拨 WebSocket（不带浏览器 Origin），标签里的画布消费 `BM` 脏矩形，键鼠 JSON 与 Web「图形会话」相同。TigerVNC 的 LastRect 在代理拆掉，客户端只画矩形。剪贴板、磁盘映射和画面录像尚未做，Ctrl+C / Ctrl+V 只作为按键发给远端。3389/5900 仍不是给 mstsc / vncviewer 用的代理。怎么在桌面客户端里对一台 VNC 资产点验，见 `client/desktop/README.md`。
 
 **会话录像**：分片加密落盘（SM4-CBC，密文自带 IV），哈希链保证任意分片被删除、重排或篡改都能被发现：
 

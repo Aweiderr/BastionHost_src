@@ -41,3 +41,30 @@ To build a redistributable, production mode package, use `wails build`.
 
 `wails build -nsis` 生成的安装包不是当前按钮的默认文件。若要改发安装包，
 仍将安装程序命名为 `bastion-desktop.exe` 后放到上表路径。
+
+## 图形会话（RDP / VNC）
+
+工作台里 SSH 仍是终端标签。协议为 `vnc` 或 `rdp` 时打开图形标签，不再显示「该协议尚未接入」。
+Oracle、SFTP 等没有客户端通路的协议仍只展示说明，不会拿去拨 SSH。
+
+桌面进程连接代理的 `GET /api/v1/webdesktop`（默认由管理服务地址推导为 `ws://<主机>:8081/api/v1/webdesktop`，
+分离部署时用 `BASTION_DESKTOP_GATEWAY` 写成完整的 `ws://` 或 `wss://`）。认证、像素和键鼠与 Web「图形会话」是同一套：
+
+- 首条文本是 `auth`（`client_type` 为 `desktop`）。口令留在代理里。
+- 文本帧：`ready`、`credential-required`、`error`、`exit`。
+- 二进制帧：`BM` 头加大端坐标和 RGBA。代理已经消化 VNC LastRect，这里按脏矩形画到画布。
+- 键鼠文本：`pointer`、`key`（keysym + `KeyboardEvent.code`）、`wheel`。画面通道没有剪贴板消息。
+
+### 对一台 VNC 资产点验
+
+在 Windows 上于本目录执行 `wails dev`（或 `wails build` 后运行 `build/bin/bastion-desktop.exe`）。
+管理服务（默认 `:8080`）和代理（默认 `:8081`）已启动，当前账号是运维角色，并且该 VNC 资产已授权。
+
+1. 登录后留在「运维工作台」。资产卡片上的 VNC 说明应是「将打开图形会话标签」，而不是「尚未接入」。
+2. 选中例如 `192.168.106.114:5901` 这种 VNC 资产，点「连接」。新标签的协议是 VNC，状态从「连接中」变为「已连接」，中间是远端画面，而不是说明卡片。
+3. 点击画面后移动鼠标、敲键盘。远端应跟着动。Ctrl+C / Ctrl+V 会作为按键送到远端自己的剪贴板，本机剪贴板不会自动同步。
+4. 点「关闭标签」，或让会话空闲到被代理掐断。客户端应留在工作台，标签变为「已结束」或被关掉，进程不退出。
+5. 再连一台 RDP 资产。它走同一个图形标签；没有可连的 RDP 目标时，标签里是连接失败说明，而不是「该协议尚未接入」。
+
+前端帧与分流测试：在 `frontend` 目录执行 `npm test`。
+Go 侧画面拨号和断开：在本目录执行 `go test ./internal/desk .`。

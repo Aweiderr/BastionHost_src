@@ -38,8 +38,16 @@ export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
 }
 
-export function Login(arg1, arg2, arg3) {
-  return window['go']['main']['App']['Login'](arg1, arg2, arg3);
+export function CaptchaRequired(arg1) {
+  return window['go']['main']['App']['CaptchaRequired'](arg1);
+}
+
+export function FetchCaptcha() {
+  return window['go']['main']['App']['FetchCaptcha']();
+}
+
+export function Login(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['Login'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function Logout() {

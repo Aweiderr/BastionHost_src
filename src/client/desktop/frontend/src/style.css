@@ -183,6 +183,24 @@ td.mono { font-family: var(--mono); }
 }
 .device-chip code { font-family: var(--mono); color: #bfdbfe; }
 
+.captcha-row { align-items: center; gap: 8px; }
+.captcha-row input { flex: 1; min-width: 0; }
+button.captcha-refresh {
+  flex: 0 0 auto;
+  height: 40px;
+  min-width: 120px;
+  padding: 0;
+  border-radius: 6px;
+  background: #f5f7fa;
+  color: #1e293b;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+button.captcha-refresh:hover:not(:disabled) { background: #e8eef6; border-color: var(--brand); }
+button.captcha-refresh img { display: block; height: 40px; width: auto; }
+button.captcha-refresh span { font-size: 12px; padding: 0 8px; }
+
 /* ---------- 资产列表 ---------- */
 .asset-list { display: grid; gap: 8px; }
 .asset-item {

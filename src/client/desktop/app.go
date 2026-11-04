@@ -135,15 +135,33 @@ func (a *App) GetDeviceInfo() *device.Info { return a.deviceInfo() }
 // 认证
 // ---------------------------------------------------------------------------
 
+// CaptchaRequired 询问管理服务当前是否要求图形验证码。
+// username 可为空：always 模式下与账号无关。
+func (a *App) CaptchaRequired(username string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return a.api.CaptchaRequired(ctx, username)
+}
+
+// FetchCaptcha 拉取一张新的图形验证码。登录页点击图片时调用以刷新。
+func (a *App) FetchCaptcha() (*coreapi.CaptchaImage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return a.api.FetchCaptcha(ctx)
+}
+
 // Login 登录管理服务。
+//
+// captchaID / captchaCode 随账密一起提交。管理服务要求图形验证码时，
+// 缺任一字段都会返回「请输入图形验证码」，调用方应先 FetchCaptcha 再填。
 //
 // 认证成功后立刻做运维角色校验：系统管理员、安全管理员及其他非运维角色
 // 会被拒绝，令牌与内存口令一并清掉，不会进入工作台。Web 控制台不受影响。
 // 短信 / UKey 等二次认证尚未完成时先放行挑战，等 VerifyMFA 拿到最终身份再判。
-func (a *App) Login(username, password, totp string) (*coreapi.LoginResult, error) {
+func (a *App) Login(username, password, totp, captchaID, captchaCode string) (*coreapi.LoginResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	res, err := a.api.Login(ctx, username, password, totp)
+	res, err := a.api.Login(ctx, username, password, totp, captchaID, captchaCode)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +284,7 @@ func (a *App) TryAutoLogin() (*coreapi.LoginResult, error) {
 	}
 	slog.Warn("检测到 BASTION_AUTOLOGIN，执行免交互登录（仅供自动化测试与受控部署使用）",
 		"user", parts[0])
-	return a.Login(parts[0], parts[1], os.Getenv("BASTION_AUTOLOGIN_TOTP"))
+	return a.Login(parts[0], parts[1], os.Getenv("BASTION_AUTOLOGIN_TOTP"), "", "")
 }
 
 // ---------------------------------------------------------------------------

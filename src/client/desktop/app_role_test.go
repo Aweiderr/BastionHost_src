@@ -79,7 +79,7 @@ func TestLoginAllowsOperator(t *testing.T) {
 		}
 	})
 	app := NewApp(srv.URL)
-	res, err := app.Login("ops1", "secret", "")
+	res, err := app.Login("ops1", "secret", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestLoginRejectsNonOps(t *testing.T) {
 				}
 			})
 			app := NewApp(srv.URL)
-			res, err := app.Login(role, "secret", "")
+			res, err := app.Login(role, "secret", "", "", "")
 			if err == nil || res != nil {
 				t.Fatal("expected rejection")
 			}
@@ -162,7 +162,7 @@ func TestLoginFillsRolesFromMe(t *testing.T) {
 			}
 		})
 		app := NewApp(srv.URL)
-		res, err := app.Login("ops1", "secret", "")
+		res, err := app.Login("ops1", "secret", "", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,7 +189,7 @@ func TestLoginFillsRolesFromMe(t *testing.T) {
 			}
 		})
 		app := NewApp(srv.URL)
-		_, err := app.Login("sec", "secret", "")
+		_, err := app.Login("sec", "secret", "", "", "")
 		if err == nil || !strings.Contains(err.Error(), "安全管理员") {
 			t.Fatalf("err = %v", err)
 		}
@@ -204,7 +204,7 @@ func TestLoginAllowsOperatorWithOtherRoles(t *testing.T) {
 		writeOK(w, loginBody("both", "tok", []string{"sys_admin", "operator"}, nil))
 	})
 	app := NewApp(srv.URL)
-	if _, err := app.Login("both", "secret", ""); err != nil {
+	if _, err := app.Login("both", "secret", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if app.GetProfile() == nil {
@@ -230,7 +230,7 @@ func TestLoginMFADefersRoleGate(t *testing.T) {
 		}
 	})
 	app := NewApp(srv.URL)
-	res, err := app.Login("sec", "secret", "")
+	res, err := app.Login("sec", "secret", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestVerifyMFAAllowsOperator(t *testing.T) {
 		}
 	})
 	app := NewApp(srv.URL)
-	if _, err := app.Login("ops1", "secret", ""); err != nil {
+	if _, err := app.Login("ops1", "secret", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	res, err := app.VerifyMFA("ch-1", "123456")
@@ -296,7 +296,7 @@ func TestLoginRejectsWhenRoleLookupFails(t *testing.T) {
 		}
 	})
 	app := NewApp(srv.URL)
-	_, err := app.Login("ghost", "secret", "")
+	_, err := app.Login("ghost", "secret", "", "", "")
 	if err == nil || !strings.Contains(err.Error(), "没有运维角色") {
 		t.Fatalf("err = %v", err)
 	}
@@ -317,7 +317,7 @@ func TestLoginKeepsCredentialError(t *testing.T) {
 		})
 	})
 	app := NewApp(srv.URL)
-	_, err := app.Login("nobody", "bad", "")
+	_, err := app.Login("nobody", "bad", "", "", "")
 	if err == nil || !strings.Contains(err.Error(), "用户名或口令错误") {
 		t.Fatalf("err = %v", err)
 	}

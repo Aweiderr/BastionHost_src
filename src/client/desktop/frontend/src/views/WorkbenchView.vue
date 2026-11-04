@@ -1,22 +1,31 @@
 <script lang="ts" setup>
 /**
- * 运维工作台：SSH 走 xterm；RDP / VNC 走代理画面通道。
+ * 运维工作台：左侧可选资产，右侧按标签打开会话。
  *
- * 数据流：
- *   键盘输入 → WriteSession(key, base64)  → Go 写入 SSH 网关
- *   网关输出 → Go 触发 term:data 事件      → 前端 term.write
- *   窗口变化 → ResizeSession(key, cols, rows)
+ * SSH 走 xterm，经 Go 的 SSH 网关。
+ * RDP / VNC 走同一条 /api/v1/webdesktop：Go 拨号（不带浏览器 Origin），
+ * 像素以 desk:frame 推到画布，键鼠 JSON 原样写回。帧格式与 Web 端
+ * desktopFrame.ts 相同，局部更新（含 TigerVNC LastRect 拆开后的脏矩形）
+ * 直接画到对应坐标。目标口令不下发到界面，未托管时只弹出一次输入框。
  *
- * 事件监听必须在 OpenSession **之前**注册：会话一旦建立，网关会立刻
- * 推送欢迎信息（含资产列表或连接提示），晚注册会丢掉这一段输出。
+ * 其他协议只打开说明标签，不拨 SSH，也不拨画面通道。
+ *
+ * 事件监听必须在 OpenSession / OpenDesktopSession 之前注册。
  */
-import { onBeforeUnmount, onMounted, ref, nextTick } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
-import { bytesToBase64, base64ToBytes, strToBase64 } from '../utils/base64'
+import { base64ToBytes, strToBase64 } from '../utils/base64'
 import { keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
+import {
+  assetConnectHint,
+  protocolLabel,
+  sessionKind,
+  unsupportedExplanation,
+  type SessionKind,
+} from '../sessionRoute'
 import {
   CloseDesktopSession,
   CloseSession,
@@ -29,54 +38,86 @@ import {
 } from '../../wailsjs/go/main/App'
 import { EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 
+const props = defineProps<{ visible: boolean }>()
+
+type TabStatus = 'connecting' | 'connected' | 'closed' | 'unsupported'
+
+interface SessionTab {
+  key: string
+  assetId: number
+  assetName: string
+  accountName: string
+  host: string
+  port: number
+  protocol: string
+  kind: SessionKind
+  status: TabStatus
+  message: string
+  width: number
+  height: number
+  sessionNo: string
+  credOpen: boolean
+  credReason: string
+  credPassword: string
+}
+
+interface TermRuntime {
+  term: Terminal
+  fit: FitAddon
+  observer: ResizeObserver
+}
+
 const assets = ref<Asset[]>([])
 const loading = ref(false)
 const connecting = ref(false)
 const selected = ref<Asset | null>(null)
+const tabs = ref<SessionTab[]>([])
 const activeKey = ref('')
-const activeLabel = ref('')
-const connected = ref(false)
-const graphical = ref(false)
-const deskW = ref(1280)
-const deskH = ref(720)
-const canvasEl = ref<HTMLCanvasElement | null>(null)
-const credOpen = ref(false)
-const credReason = ref('')
-const credPassword = ref('')
-let deskCtx: CanvasRenderingContext2D | null = null
 
-const termHost = ref<HTMLElement | null>(null)
-// hasTerm 必须是 ref：模板要据此在「占位提示」与「终端」之间切换
-const hasTerm = ref(false)
-let term: Terminal | null = null
-let fit: FitAddon | null = null
-let resizeObserver: ResizeObserver | null = null
+const hosts = new Map<string, HTMLElement>()
+const canvases = new Map<string, HTMLCanvasElement>()
+const runtimes = new Map<string, TermRuntime>()
+
+const activeTab = computed(() => tabs.value.find((t) => t.key === activeKey.value) || null)
 
 onMounted(async () => {
-  // 事件监听先注册，避免首屏输出丢失
   EventsOn('term:data', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value || !term) return
-    term.write(base64ToBytes(payload.data))
+    if (!payload?.key) return
+    const rt = runtimes.get(String(payload.key))
+    if (!rt) return
+    try {
+      rt.term.write(base64ToBytes(String(payload.data || '')))
+    } catch (e) {
+      console.error(e)
+    }
   })
   EventsOn('term:closed', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value) return
-    connected.value = false
-    notify(`会话已结束（${payload.reason || '未知原因'}）`, 'info')
+    if (!payload?.key) return
+    const tab = tabs.value.find((t) => t.key === payload.key)
+    if (!tab || tab.kind !== 'ssh' || tab.status === 'closed') return
+    tab.status = 'closed'
+    notify(`${tab.assetName} 的会话已结束（${payload.reason || '未知原因'}）`, 'info')
   })
   EventsOn('desk:frame', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value || !deskCtx) return
-    const frame = parseBitmap(base64ToBytes(payload.data))
-    if (frame) paintBitmap(deskCtx, frame)
+    if (!payload?.key) return
+    try {
+      paintFrame(String(payload.key), base64ToBytes(String(payload.data || '')))
+    } catch (e) {
+      console.error(e)
+    }
   })
   EventsOn('desk:control', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value) return
-    handleDeskControl(String(payload.data || ''))
+    if (!payload?.key) return
+    handleDeskControl(String(payload.key), String(payload.data || ''))
   })
   EventsOn('desk:closed', (payload: any) => {
-    if (!payload || payload.key !== activeKey.value) return
-    if (connected.value) notify('图形会话已结束', 'info')
-    connected.value = false
-    credOpen.value = false
+    if (!payload?.key) return
+    const tab = tabs.value.find((t) => t.key === payload.key)
+    if (!tab || tab.kind !== 'desktop' || tab.status === 'closed') return
+    tab.credOpen = false
+    tab.credPassword = ''
+    tab.status = 'closed'
+    if (!tab.message) notify(`${tab.assetName} 的图形会话已结束`, 'info')
   })
   await loadAssets()
 })
@@ -87,9 +128,24 @@ onBeforeUnmount(() => {
   EventsOff('desk:frame')
   EventsOff('desk:control')
   EventsOff('desk:closed')
-  resizeObserver?.disconnect()
-  destroyTerm()
+  const current = tabs.value.slice()
+  tabs.value = []
+  activeKey.value = ''
+  state.activeKey = ''
+  for (const tab of current) {
+    destroyTerm(tab.key)
+    if (tab.kind === 'ssh') CloseSession(tab.key).catch(() => {})
+    if (tab.kind === 'desktop') CloseDesktopSession(tab.key).catch(() => {})
+  }
 })
+
+watch(
+  () => props.visible,
+  (visible) => {
+    if (!visible) return
+    void nextTick(() => focusActive())
+  },
+)
 
 async function loadAssets() {
   loading.value = true
@@ -108,105 +164,49 @@ async function loadAssets() {
 }
 
 function pick(a: Asset) {
-  if (connected.value) {
-    notify('请先断开当前会话再切换资产', 'info')
-    return
-  }
   selected.value = a
 }
 
-async function connect(acc?: Account) {
-  // 已连接时不允许再次连接：本函数用新的 key 建立会话，旧连接不会被关闭，
-  // 连续点击会累积会话 —— 每个都占着一条到目标主机的连接并各写一份录像。
-  // 需要换目标时请先点「断开会话」。
-  if (connected.value || connecting.value) {
-    notify('当前已有会话，请先断开再连接', 'info')
+function bindHost(key: string, el: unknown) {
+  if (el instanceof HTMLElement) {
+    hosts.set(key, el)
     return
   }
-  const a = selected.value
-  if (!a) {
-    notify('请先选择资产', 'err')
-    return
-  }
-  if (!a.accounts?.length) {
-    notify('该资产没有可用账号，请联系管理员', 'err')
-    return
-  }
-  const account = acc || a.accounts[0]
-  if (isGraphical(a.protocol)) {
-    await connectDesktop(a, account)
-    return
-  }
-
-  connecting.value = true
-  try {
-    // 先建终端拿到真实行列数，再按此建立会话，避免远端一开始就折行错乱
-    await nextTick()
-    ensureTerm()
-    fit?.fit()
-    const cols = term?.cols || 120
-    const rows = term?.rows || 32
-
-    // 先占好会话 key 再建立连接：网关在连接成功瞬间就会推送欢迎信息，
-    // 晚设置会导致这段首屏输出因 key 不匹配被丢弃。
-    const key = `s${Date.now()}${Math.floor(Math.random() * 1000)}`
-    activeKey.value = key
-    state.activeKey = key
-
-    const brief: any = await OpenSession(
-      key,
-      a.asset_name,
-      account.account_name,
-      a.asset_id,
-      account.account_id,
-      cols,
-      rows,
-    )
-    void brief
-    activeLabel.value = `${a.asset_name} · ${account.account_name} · ${a.host}`
-    connected.value = true
-    term?.focus()
-    notify(`已连接 ${a.asset_name}`, 'ok')
-  } catch (e: any) {
-    // 失败时要把预占的 key 收回，否则界面会停在"已连接"的错觉里
-    activeKey.value = ''
-    state.activeKey = ''
-    notify(String(e?.message || e), 'err')
-  } finally {
-    connecting.value = false
-  }
+  if (el == null) hosts.delete(key)
 }
 
-function isGraphical(protocol: string): boolean {
-  const value = (protocol || '').trim().toLowerCase()
-  return value === 'rdp' || value === 'vnc'
-}
-
-async function connectDesktop(a: Asset, account: Account) {
-  connecting.value = true
-  graphical.value = true
-  try {
-    await nextTick()
-    const key = `d${Date.now()}${Math.floor(Math.random() * 1000)}`
-    activeKey.value = key
-    state.activeKey = key
-    const brief: any = await OpenDesktopSession(key, a.protocol, a.asset_id, account.account_id, 1280, 720)
-    void brief
-    activeLabel.value = `${a.asset_name} · ${account.account_name} · ${a.protocol.toUpperCase()}`
-    connected.value = true
-    notify(`正在连接 ${a.asset_name}`, 'info')
-  } catch (e: any) {
-    activeKey.value = ''
-    state.activeKey = ''
-    graphical.value = false
-    connected.value = false
-    notify(String(e?.message || e), 'err')
-  } finally {
-    connecting.value = false
+function bindCanvas(key: string, el: unknown) {
+  if (el instanceof HTMLCanvasElement) {
+    canvases.set(key, el)
+    const tab = tabs.value.find((t) => t.key === key)
+    applyCanvasSize(el, tab?.width || 1280, tab?.height || 720)
+    return
   }
+  if (el == null) canvases.delete(key)
 }
 
-function handleDeskControl(raw: string) {
+function applyCanvasSize(canvas: HTMLCanvasElement, w: number, h: number) {
+  const width = w > 0 ? w : 1280
+  const height = h > 0 ? h : 720
+  if (canvas.width !== width) canvas.width = width
+  if (canvas.height !== height) canvas.height = height
+}
+
+function paintFrame(key: string, bytes: Uint8Array) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || tab.kind !== 'desktop') return
+  const frame = parseBitmap(bytes)
+  if (!frame) return
+  const canvas = canvases.get(key)
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  paintBitmap(ctx, frame)
+}
+
+function handleDeskControl(key: string, raw: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || tab.kind !== 'desktop') return
   let payload: any
   try {
     payload = JSON.parse(raw)
@@ -214,79 +214,136 @@ function handleDeskControl(raw: string) {
     return
   }
   if (payload.type === 'ready') {
-    deskW.value = Number(payload.width) > 0 ? Number(payload.width) : 1280
-    deskH.value = Number(payload.height) > 0 ? Number(payload.height) : 720
-    credOpen.value = false
-    credPassword.value = ''
-    nextTick(() => {
-      const canvas = canvasEl.value
-      if (!canvas) return
-      canvas.width = deskW.value
-      canvas.height = deskH.value
-      deskCtx = canvas.getContext('2d')
-      canvas.focus()
-    })
-    notify(`已连接 ${payload.asset_name || ''}`, 'ok')
+    tab.width = Number(payload.width) > 0 ? Number(payload.width) : tab.width
+    tab.height = Number(payload.height) > 0 ? Number(payload.height) : tab.height
+    tab.sessionNo = String(payload.session_no || '')
+    tab.credOpen = false
+    tab.credPassword = ''
+    tab.message = ''
+    tab.status = 'connected'
+    const canvas = canvases.get(key)
+    if (canvas) applyCanvasSize(canvas, tab.width, tab.height)
+    if (activeKey.value === key) canvas?.focus()
+    notify(`已连接 ${payload.asset_name || tab.assetName}`, 'ok')
     return
   }
   if (payload.type === 'credential-required') {
-    credReason.value = payload.reason || '请输入目标主机口令'
-    credPassword.value = ''
-    credOpen.value = true
+    tab.credReason = payload.reason || '请输入目标主机口令'
+    tab.credPassword = ''
+    tab.credOpen = true
+    tab.status = 'connecting'
     return
   }
   if (payload.type === 'error') {
-    credOpen.value = false
-    connected.value = false
-    notify(payload.message || '图形会话失败', 'err')
+    tab.credOpen = false
+    tab.credPassword = ''
+    tab.message = payload.message || '图形会话失败'
+    tab.status = 'closed'
+    notify(tab.message, 'err')
+    return
+  }
+  if (payload.type === 'exit') {
+    tab.credOpen = false
+    tab.credPassword = ''
+    if (tab.status !== 'closed') {
+      const wasUp = tab.status === 'connected' || tab.status === 'connecting'
+      tab.status = 'closed'
+      if (!tab.message) tab.message = '图形会话已结束'
+      if (wasUp) notify(`${tab.assetName} 的图形会话已结束`, 'info')
+    }
   }
 }
 
-async function submitDeskPassword() {
-  const value = credPassword.value
-  credPassword.value = ''
-  if (!value || !activeKey.value) return
+async function connect(acc?: Account) {
+  if (connecting.value) return
+  const asset = selected.value
+  if (!asset) {
+    notify('请先选择资产', 'err')
+    return
+  }
+  if (!asset.accounts?.length) {
+    notify('该资产没有可用账号，请联系管理员', 'err')
+    return
+  }
+  const account = acc || asset.accounts[0]
+  const kind = sessionKind(asset.protocol)
+  const key = `${kind === 'desktop' ? 'd' : 's'}${Date.now()}${Math.floor(Math.random() * 1000)}`
+  const tab: SessionTab = {
+    key,
+    assetId: asset.asset_id,
+    assetName: asset.asset_name,
+    accountName: account.account_name,
+    host: asset.host,
+    port: asset.port,
+    protocol: kind === 'ssh' ? 'ssh' : (asset.protocol || '').trim().toLowerCase(),
+    kind,
+    status: kind === 'unsupported' ? 'unsupported' : 'connecting',
+    message: kind === 'unsupported' ? unsupportedExplanation(asset.protocol) : '',
+    width: 1280,
+    height: 720,
+    sessionNo: '',
+    credOpen: false,
+    credReason: '',
+    credPassword: '',
+  }
+  tabs.value.push(tab)
+  activate(key)
+
+  if (kind === 'unsupported') {
+    notify(`${asset.asset_name}：${protocolLabel(asset.protocol)} 尚未接入`, 'info')
+    return
+  }
+
+  connecting.value = true
   try {
-    await WriteDesktopInput(activeKey.value, JSON.stringify({ type: 'credential', password: value }))
+    if (kind === 'desktop') {
+      await nextTick()
+      await OpenDesktopSession(key, asset.protocol, asset.asset_id, account.account_id, tab.width, tab.height)
+      if (!tabs.value.some((t) => t.key === key)) {
+        await CloseDesktopSession(key).catch(() => {})
+      }
+      return
+    }
+
+    await nextTick()
+    ensureTerm(key)
+    if (!runtimes.has(key)) {
+      await nextTick()
+      ensureTerm(key)
+    }
+    const rt = runtimes.get(key)
+    try {
+      rt?.fit.fit()
+    } catch {
+      /* 容器尚未完成布局时用默认行列 */
+    }
+    const cols = rt?.term.cols || 120
+    const rows = rt?.term.rows || 32
+    await OpenSession(key, asset.asset_name, account.account_name, asset.asset_id, account.account_id, cols, rows)
+    const current = tabs.value.find((t) => t.key === key)
+    if (!current) {
+      await CloseSession(key).catch(() => {})
+      return
+    }
+    current.status = 'connected'
+    current.kind = 'ssh'
+    current.protocol = 'ssh'
+    rt?.term.focus()
+    notify(`已连接 ${asset.asset_name}`, 'ok')
   } catch (e: any) {
-    notify(String(e?.message || e), 'err')
+    const still = tabs.value.some((t) => t.key === key)
+    dropTab(key)
+    if (still) notify(String(e?.message || e), 'err')
+  } finally {
+    connecting.value = false
   }
 }
 
-function deskPointer(event: MouseEvent) {
-  if (!connected.value || !graphical.value || !canvasEl.value || !activeKey.value) return
-  const box = canvasEl.value.getBoundingClientRect()
-  const point = mapDesktopPoint(box, deskW.value, deskH.value, event.clientX, event.clientY)
-  if (!point) return
-  WriteDesktopInput(
-    activeKey.value,
-    JSON.stringify({ type: 'pointer', x: point.x, y: point.y, buttons: rfbButtons(event.buttons) }),
-  ).catch(() => {})
-}
-
-function deskWheel(event: WheelEvent) {
-  if (!connected.value || !canvasEl.value || !activeKey.value) return
-  const box = canvasEl.value.getBoundingClientRect()
-  const point = mapDesktopPoint(box, deskW.value, deskH.value, event.clientX, event.clientY)
-  if (!point) return
-  WriteDesktopInput(
-    activeKey.value,
-    JSON.stringify({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 }),
-  ).catch(() => {})
-}
-
-function deskKey(event: KeyboardEvent, down: boolean) {
-  if (!connected.value || !graphical.value || credOpen.value) return
-  event.preventDefault()
-  WriteDesktopInput(
-    activeKey.value,
-    JSON.stringify({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code }),
-  ).catch(() => {})
-}
-
-function ensureTerm() {
-  if (term || !termHost.value) return
-  term = new Terminal({
+function ensureTerm(key: string) {
+  if (runtimes.has(key)) return
+  const host = hosts.get(key)
+  if (!host) return
+  const term = new Terminal({
     fontFamily: "'Cascadia Mono', Consolas, Menlo, monospace",
     fontSize: 14,
     theme: {
@@ -299,58 +356,175 @@ function ensureTerm() {
     scrollback: 5000,
     convertEol: false,
   })
-  fit = new FitAddon()
+  const fit = new FitAddon()
   term.loadAddon(fit)
-  term.open(termHost.value)
-  fit.fit()
-  hasTerm.value = true
+  term.open(host)
+  try {
+    fit.fit()
+  } catch {
+    /* 容器暂时不可见时忽略 */
+  }
 
   term.onData((data: string) => {
-    if (!activeKey.value) return
-    WriteSession(activeKey.value, strToBase64(data)).catch((e: any) => {
+    const tab = tabs.value.find((t) => t.key === key)
+    if (!tab || tab.status !== 'connected') return
+    WriteSession(key, strToBase64(data)).catch((e: any) => {
       console.error(e)
     })
   })
 
-  resizeObserver = new ResizeObserver(() => {
-    if (!fit) return
+  const observer = new ResizeObserver(() => {
+    if (!props.visible || activeKey.value !== key) return
     try {
       fit.fit()
     } catch {
-      /* 容器暂时不可见时忽略 */
+      return
     }
-    if (activeKey.value && term) {
-      ResizeSession(activeKey.value, term.cols, term.rows).catch(() => {})
+    const tab = tabs.value.find((t) => t.key === key)
+    if (tab?.status === 'connected' && term.cols > 0 && term.rows > 0) {
+      ResizeSession(key, term.cols, term.rows).catch(() => {})
     }
   })
-  resizeObserver.observe(termHost.value)
+  observer.observe(host)
+  runtimes.set(key, { term, fit, observer })
 }
 
-function destroyTerm() {
-  term?.dispose()
-  term = null
-  fit = null
-  hasTerm.value = false
+function destroyTerm(key: string) {
+  const rt = runtimes.get(key)
+  if (!rt) return
+  rt.observer.disconnect()
+  rt.term.dispose()
+  runtimes.delete(key)
 }
 
-async function disconnect() {
-  if (!activeKey.value) return
+function activate(key: string) {
+  activeKey.value = key
+  state.activeKey = key
+  void nextTick(() => focusActive())
+}
+
+function focusActive() {
+  if (!props.visible) return
   const key = activeKey.value
-  const wasGraphical = graphical.value
-  activeKey.value = ''
-  state.activeKey = ''
-  connected.value = false
-  graphical.value = false
-  credOpen.value = false
-  credPassword.value = ''
-  deskCtx = null
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab) return
+  if (tab.kind === 'ssh') {
+    const rt = runtimes.get(key)
+    if (!rt) return
+    try {
+      rt.fit.fit()
+    } catch {
+      /* 容器暂时不可见时忽略 */
+    }
+    if (tab.status === 'connected' && rt.term.cols > 0 && rt.term.rows > 0) {
+      ResizeSession(key, rt.term.cols, rt.term.rows).catch(() => {})
+    }
+    rt.term.focus()
+    return
+  }
+  if (tab.kind === 'desktop' && !tab.credOpen) canvases.get(key)?.focus()
+}
+
+function dropTab(key: string) {
+  destroyTerm(key)
+  canvases.delete(key)
+  const idx = tabs.value.findIndex((t) => t.key === key)
+  if (idx < 0) return
+  tabs.value.splice(idx, 1)
+  if (activeKey.value !== key) return
+  const next = tabs.value[Math.min(idx, tabs.value.length - 1)]
+  activeKey.value = next?.key || ''
+  state.activeKey = activeKey.value
+  void nextTick(() => focusActive())
+}
+
+async function closeTab(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab) return
+  const kind = tab.kind
+  dropTab(key)
   try {
-    if (wasGraphical) await CloseDesktopSession(key)
-    else await CloseSession(key)
+    if (kind === 'ssh') await CloseSession(key)
+    else if (kind === 'desktop') await CloseDesktopSession(key)
   } catch (e) {
     console.error(e)
   }
-  notify('已断开会话', 'info')
+  notify('已关闭标签', 'info')
+}
+
+async function submitDeskPassword(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab) return
+  const value = tab.credPassword
+  tab.credPassword = ''
+  if (!value) return
+  try {
+    await WriteDesktopInput(key, JSON.stringify({ type: 'credential', password: value }))
+  } catch (e: any) {
+    notify(String(e?.message || e), 'err')
+  }
+}
+
+function deskPointer(key: string, event: MouseEvent) {
+  const tab = tabs.value.find((t) => t.key === key)
+  const canvas = canvases.get(key)
+  if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || !canvas) return
+  canvas.focus()
+  const point = mapDesktopPoint(canvas.getBoundingClientRect(), tab.width, tab.height, event.clientX, event.clientY)
+  if (!point) return
+  WriteDesktopInput(
+    key,
+    JSON.stringify({ type: 'pointer', x: point.x, y: point.y, buttons: rfbButtons(event.buttons) }),
+  ).catch(() => {})
+}
+
+function deskWheel(key: string, event: WheelEvent) {
+  const tab = tabs.value.find((t) => t.key === key)
+  const canvas = canvases.get(key)
+  if (!tab || tab.status !== 'connected' || !canvas) return
+  const point = mapDesktopPoint(canvas.getBoundingClientRect(), tab.width, tab.height, event.clientX, event.clientY)
+  if (!point) return
+  WriteDesktopInput(
+    key,
+    JSON.stringify({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 }),
+  ).catch(() => {})
+}
+
+function deskKey(key: string, event: KeyboardEvent, down: boolean) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || tab.credOpen) return
+  event.preventDefault()
+  WriteDesktopInput(
+    key,
+    JSON.stringify({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code }),
+  ).catch(() => {})
+}
+
+function desktopWaitText(tab: SessionTab): string {
+  if (tab.status === 'connecting') return '正在建立图形会话…'
+  if (tab.message) return tab.message
+  return '图形会话已结束。可以关闭这个标签。'
+}
+
+function statusText(tab: SessionTab) {
+  if (tab.kind === 'unsupported') return '尚未接入'
+  if (tab.status === 'connecting') return '连接中'
+  if (tab.status === 'connected') return '已连接'
+  if (tab.status === 'closed') return '已结束'
+  return tab.status
+}
+
+function statusClass(tab: SessionTab) {
+  if (tab.kind === 'unsupported') return 'warn'
+  if (tab.status === 'connected') return 'ok'
+  if (tab.status === 'closed') return 'err'
+  return ''
+}
+
+function tabTagClass(tab: SessionTab) {
+  if (tab.kind === 'unsupported') return 'warn'
+  if (tab.kind === 'desktop') return 'brand'
+  return ''
 }
 
 function levelTag(level: string) {
@@ -363,6 +537,10 @@ function grantText(a: Asset) {
   if (a.grant_source === 'ticket') return '工单授权'
   if (a.grant_source === 'temp') return '临时授权'
   return '手工授权'
+}
+
+function protocolTagClass(protocol: string) {
+  return sessionKind(protocol) === 'unsupported' ? 'warn' : 'brand'
 }
 </script>
 
@@ -390,18 +568,22 @@ function grantText(a: Asset) {
             <span class="name">{{ a.asset_name }}</span>
             <span class="tag" :class="levelTag(a.level)">{{ a.level || 'normal' }}</span>
           </div>
-          <div class="l2">{{ a.host }}:{{ a.port }} · {{ (a.protocol || 'ssh').toUpperCase() }}</div>
+          <div class="l2">{{ a.host }}:{{ a.port }}</div>
           <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap">
+            <span class="tag" :class="protocolTagClass(a.protocol)">{{ protocolLabel(a.protocol) }}</span>
             <span class="tag brand">{{ grantText(a) }}</span>
             <span v-if="a.accounts?.length" class="tag">{{ a.accounts.length }} 个账号</span>
           </div>
-          <div v-if="!connected && selected?.asset_id === a.asset_id" style="margin-top: 9px">
+          <div v-if="selected?.asset_id === a.asset_id" style="margin-top: 9px">
+            <p v-if="assetConnectHint(a.protocol)" class="hint" style="margin: 0 0 8px">
+              {{ assetConnectHint(a.protocol) }}
+            </p>
             <button
               v-for="acc in a.accounts"
               :key="acc.account_id"
               class="primary sm"
               style="margin-right: 6px; margin-bottom: 4px"
-              :disabled="connecting || connected"
+              :disabled="connecting"
               @click.stop="connect(acc)"
             >
               连接 {{ acc.account_name }}
@@ -412,41 +594,74 @@ function grantText(a: Asset) {
     </aside>
 
     <section class="term-main">
-      <div class="term-bar">
-        <span v-if="connected">
-          <span class="tag ok">已连接</span>
-          <span style="margin-left: 8px">{{ activeLabel }}</span>
-        </span>
-        <span v-else>
-          <span class="tag">未连接</span>
-          <span style="margin-left: 8px">选择资产后点击「连接」</span>
-        </span>
-        <span class="spacer"></span>
-        <button v-if="connected" class="danger sm" @click="disconnect">断开会话</button>
-      </div>
-
-      <div v-show="!graphical" class="term-host" ref="termHost">
-        <div v-if="!hasTerm" class="term-placeholder">
-          终端将在建立 SSH 会话后出现。RDP / VNC 会在这里显示桌面。
+      <div v-if="tabs.length" class="tab-bar" role="tablist">
+        <div
+          v-for="t in tabs"
+          :key="t.key"
+          class="sess-tab"
+          role="tab"
+          :aria-selected="t.key === activeKey"
+          :class="{ active: t.key === activeKey, warn: t.kind === 'unsupported' }"
+          :title="`${t.assetName} · ${t.accountName}`"
+          @click="activate(t.key)"
+        >
+          <span class="tag" :class="tabTagClass(t)">{{ protocolLabel(t.protocol) }}</span>
+          <span class="sess-tab-name">{{ t.assetName }}</span>
+          <button class="tab-x" type="button" title="关闭标签" @click.stop="closeTab(t.key)">×</button>
         </div>
       </div>
-      <div v-show="graphical" class="term-host desk-host">
-        <canvas
-          ref="canvasEl"
-          class="desk-canvas"
-          tabindex="0"
-          @mousedown="deskPointer"
-          @mouseup="deskPointer"
-          @mousemove="deskPointer"
-          @contextmenu.prevent
-          @wheel.prevent="deskWheel"
-          @keydown="deskKey($event, true)"
-          @keyup="deskKey($event, false)"
-        />
-        <div v-if="credOpen" class="desk-cred">
-          <div>{{ credReason }}</div>
-          <input v-model="credPassword" type="password" placeholder="目标口令" @keyup.enter="submitDeskPassword" />
-          <button class="primary sm" @click="submitDeskPassword">提交</button>
+
+      <div class="term-bar">
+        <template v-if="activeTab">
+          <span class="tag" :class="statusClass(activeTab)">{{ statusText(activeTab) }}</span>
+          <span>{{ activeTab.assetName }} · {{ activeTab.accountName }} · {{ activeTab.host }}:{{ activeTab.port }}</span>
+          <span v-if="activeTab.sessionNo">会话 {{ activeTab.sessionNo }}</span>
+          <span v-if="activeTab.kind === 'desktop' && activeTab.status === 'connected'">
+            {{ activeTab.width }}×{{ activeTab.height }}
+          </span>
+        </template>
+        <template v-else>
+          <span class="tag">未连接</span>
+          <span>选择资产后点击「连接」。SSH 打开终端，RDP / VNC 打开远端桌面。</span>
+        </template>
+        <span class="spacer"></span>
+        <button v-if="activeTab" class="danger sm" @click="closeTab(activeTab.key)">关闭标签</button>
+      </div>
+
+      <div class="term-stage">
+        <div v-if="!tabs.length" class="term-placeholder">终端或远端桌面将在建立会话后出现</div>
+        <div v-for="t in tabs" :key="t.key" v-show="t.key === activeKey" class="term-pane" role="tabpanel">
+          <div v-if="t.kind === 'unsupported'" class="term-placeholder">
+            <div class="unsupported-panel">
+              <span class="tag warn">{{ protocolLabel(t.protocol) }}</span>
+              <h3>该协议尚未接入</h3>
+              <p>{{ t.message }}</p>
+              <p class="unsupported-target">{{ t.assetName }} · {{ t.accountName }} · {{ t.host }}:{{ t.port }}</p>
+            </div>
+          </div>
+          <div v-else-if="t.kind === 'desktop'" class="desk-host">
+            <canvas
+              :ref="(el) => bindCanvas(t.key, el)"
+              class="desk-canvas"
+              tabindex="0"
+              @mousedown="deskPointer(t.key, $event)"
+              @mouseup="deskPointer(t.key, $event)"
+              @mousemove="deskPointer(t.key, $event)"
+              @contextmenu.prevent
+              @wheel.prevent="deskWheel(t.key, $event)"
+              @keydown="deskKey(t.key, $event, true)"
+              @keyup="deskKey(t.key, $event, false)"
+            />
+            <div v-if="t.status !== 'connected' && !t.credOpen" class="desk-wait">
+              {{ desktopWaitText(t) }}
+            </div>
+            <form v-if="t.credOpen" class="desk-cred" @submit.prevent="submitDeskPassword(t.key)">
+              <div>{{ t.credReason }}</div>
+              <input v-model="t.credPassword" type="password" autocomplete="off" placeholder="目标口令" />
+              <button class="primary sm" type="submit">提交</button>
+            </form>
+          </div>
+          <div v-else class="term-host" :ref="(el) => bindHost(t.key, el)"></div>
         </div>
       </div>
     </section>

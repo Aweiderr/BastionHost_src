@@ -82,6 +82,9 @@ type SessionCommand struct {
 	PrivilegeChain string    `json:"privilege_chain,omitempty"`
 	DurationMs     *int      `json:"duration_ms,omitempty"`
 	CommandTime    time.Time `json:"command_time"`
+	// SessionNo 是 ops_session.session_no。命令审计列表查询时填充，
+	// 方便审计员对照会话审计里的会话号。会话详情里的命令明细不重复带它。
+	SessionNo string `json:"session_no,omitempty"`
 }
 
 // SessionFile 是会话文件传输记录（对应 ops_session_file 表）。

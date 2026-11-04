@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"bastion.local/manager/internal/model"
@@ -163,8 +164,23 @@ func (s *Server) handleAuditCommands(w http.ResponseWriter, r *http.Request) {
 		httpx.FailCode(w, "SYS_5001")
 		return
 	}
+	f := auditCommandFilter(r, claimsFrom(r).TenantID)
+	list, total, err := s.sessRepo.SearchCommands(r.Context(), f)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	httpx.OK(w, map[string]any{
+		"items": list, "total": total, "page": f.Page, "page_size": f.PageSize,
+	})
+}
+
+// auditCommandFilter 解析命令审计列表的查询参数。
+// session_no 与 session_id 可以同时使用：前者对会话号做子串匹配，后者精确匹配主键。
+func auditCommandFilter(r *http.Request, tenantID int64) repo.CommandFilter {
 	f := repo.CommandFilter{
-		TenantID:     claimsFrom(r).TenantID,
+		TenantID:     tenantID,
+		SessionNo:    strings.TrimSpace(r.URL.Query().Get("session_no")),
 		RiskLevel:    r.URL.Query().Get("risk_level"),
 		PolicyAction: r.URL.Query().Get("policy_action"),
 		Keyword:      r.URL.Query().Get("keyword"),
@@ -182,14 +198,7 @@ func (s *Server) handleAuditCommands(w http.ResponseWriter, r *http.Request) {
 	if v := queryInt(r, "asset_id", 0); v > 0 {
 		f.AssetID = int64(v)
 	}
-	list, total, err := s.sessRepo.SearchCommands(r.Context(), f)
-	if err != nil {
-		httpx.Fail(w, err)
-		return
-	}
-	httpx.OK(w, map[string]any{
-		"items": list, "total": total, "page": f.Page, "page_size": f.PageSize,
-	})
+	return f
 }
 
 func (s *Server) handleAuditStats(w http.ResponseWriter, r *http.Request) {

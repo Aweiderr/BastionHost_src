@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"bastion.local/desktop/internal/coreapi"
+	"bastion.local/desktop/internal/desk"
 	"bastion.local/desktop/internal/device"
 	"bastion.local/desktop/internal/term"
 
@@ -35,6 +37,7 @@ type App struct {
 	user     *coreapi.LoginResult
 	password string
 	sessions map[string]*term.Session
+	desktops map[string]*desk.Session
 	seq      int
 }
 
@@ -43,6 +46,7 @@ func NewApp(coreURL string) *App {
 	return &App{
 		api:      coreapi.New(coreURL),
 		sessions: make(map[string]*term.Session),
+		desktops: make(map[string]*desk.Session),
 	}
 }
 
@@ -76,10 +80,18 @@ func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions {
 		sessions = append(sessions, s)
 	}
+	desktops := make([]*desk.Session, 0, len(a.desktops))
+	for _, s := range a.desktops {
+		desktops = append(desktops, s)
+	}
 	a.sessions = map[string]*term.Session{}
+	a.desktops = map[string]*desk.Session{}
 	a.password = ""
 	a.mu.Unlock()
 	for _, s := range sessions {
+		_ = s.Close()
+	}
+	for _, s := range desktops {
 		_ = s.Close()
 	}
 	slog.Info("客户端退出，会话已清理")
@@ -306,6 +318,126 @@ func (a *App) ResizeSession(key string, cols, rows int) error {
 		return err
 	}
 	return sess.Resize(cols, rows)
+}
+
+// OpenDesktopSession 经代理的画面通道打开 RDP 或 VNC。
+//
+// 与 SSH 不同：不把目标口令交给界面，认证发生在代理进程里。
+// 像素和状态通过 desk:frame / desk:control / desk:closed 事件推到前端。
+func (a *App) OpenDesktopSession(key, protocol string, assetID, accountID int64, width, height int) (*SessionBrief, error) {
+	a.mu.Lock()
+	user := a.user
+	token := ""
+	if a.api != nil {
+		token = a.api.Token()
+	}
+	a.mu.Unlock()
+	if user == nil || token == "" {
+		return nil, fmt.Errorf("尚未登录")
+	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol != "rdp" && protocol != "vnc" {
+		return nil, fmt.Errorf("图形会话只用于 RDP 和 VNC")
+	}
+	if assetID == 0 {
+		return nil, fmt.Errorf("未指定资产")
+	}
+	if key == "" {
+		key = fmt.Sprintf("d%d", time.Now().UnixNano())
+	}
+	if width <= 0 {
+		width = 1280
+	}
+	if height <= 0 {
+		height = 720
+	}
+
+	onControl := func(b []byte) {
+		runtime.EventsEmit(a.ctx, "desk:control", map[string]any{"key": key, "data": string(b)})
+	}
+	onFrame := func(b []byte) {
+		runtime.EventsEmit(a.ctx, "desk:frame", map[string]any{
+			"key":  key,
+			"data": base64.StdEncoding.EncodeToString(b),
+		})
+	}
+	onClose := func(reason string) {
+		runtime.EventsEmit(a.ctx, "desk:closed", map[string]any{"key": key, "reason": reason})
+	}
+	var sess *desk.Session
+	var err error
+	sess, err = desk.Dial(a.ctx, desk.Options{
+		URL: a.desktopSocketURL(), Token: token,
+		AssetID: assetID, AccountID: accountID, Protocol: protocol,
+		Width: width, Height: height,
+		OnControl: onControl, OnFrame: onFrame, OnClose: func(reason string) {
+			a.mu.Lock()
+			if a.desktops[key] == sess {
+				delete(a.desktops, key)
+			}
+			a.mu.Unlock()
+			onClose(reason)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	if old := a.desktops[key]; old != nil {
+		_ = old.Close()
+	}
+	a.desktops[key] = sess
+	a.mu.Unlock()
+	sess.Start()
+	return &SessionBrief{
+		Key: key, AssetID: assetID, Gateway: a.desktopSocketURL(),
+		OpenedAt: time.Now().Format(time.RFC3339),
+	}, nil
+}
+
+// WriteDesktopInput 把键鼠或手动口令 JSON 写回图形会话。
+func (a *App) WriteDesktopInput(key, text string) error {
+	a.mu.Lock()
+	sess := a.desktops[key]
+	a.mu.Unlock()
+	if sess == nil {
+		return fmt.Errorf("会话不存在或已结束")
+	}
+	return sess.WriteText(text)
+}
+
+// CloseDesktopSession 结束图形会话。
+func (a *App) CloseDesktopSession(key string) error {
+	a.mu.Lock()
+	sess := a.desktops[key]
+	delete(a.desktops, key)
+	a.mu.Unlock()
+	if sess == nil {
+		return nil
+	}
+	return sess.Close()
+}
+
+// desktopSocketURL 由管理服务地址推导代理 HTTP 的画面 WebSocket。
+// 分离部署时用 BASTION_DESKTOP_GATEWAY 覆盖完整 ws:// 或 wss:// 地址。
+func (a *App) desktopSocketURL() string {
+	if v := strings.TrimSpace(os.Getenv("BASTION_DESKTOP_GATEWAY")); v != "" {
+		return v
+	}
+	raw := "http://127.0.0.1:8080"
+	if a.api != nil && a.api.Base() != "" {
+		raw = a.api.Base()
+	}
+	u, err := url.Parse(raw)
+	host := "127.0.0.1"
+	scheme := "ws"
+	if err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+		if u.Scheme == "https" {
+			scheme = "wss"
+		}
+	}
+	return scheme + "://" + host + ":8081/api/v1/webdesktop"
 }
 
 // CloseSession 关闭指定会话。

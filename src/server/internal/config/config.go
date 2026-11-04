@@ -70,22 +70,23 @@ type ProxyConfig struct {
 	HostKeyFile string
 	// RDPListen 是 RDP 网关监听地址
 	RDPListen string
-	// VNCListen 是 VNC 网关监听地址（画面通道骨架）
+	// VNCListen 是 VNC 原生 TCP 口。画面通道是 HTTP 上的 /api/v1/webdesktop，不依赖这个监听。
 	VNCListen string
 	// OracleListen Oracle SQL 通道入口
 	OracleListen string
 	// OracleAdvertise 是监听重定向时告诉客户端回连的地址（只写主机名或 IP）。
 	// 监听在 0.0.0.0 上时本地地址不能用，不填就会拒绝把客户端直接导向数据库。
 	OracleAdvertise string
-	// RDPEnable / VNCEnable 默认 false。OracleEnable 默认 false，开启后才是真正的网关。
+	// RDPEnable / VNCEnable 默认 false，只控制 3389/5900 提示口。
+	// 画面通道挂在代理 HTTP 上，不靠这两个开关。OracleEnable 默认 false，开启后才是真正的网关。
 	RDPEnable    bool
 	VNCEnable    bool
 	OracleEnable bool
 	// 会话上限与超时
 	MaxSessionsPerNode int
 	// IdleTimeout 是运维会话无用户输入时的空闲上限（BASTION_IDLE_TIMEOUT，默认 30m）。
-	// <=0 关闭空闲断开。到点后掐断 SSH / WebSSH / Oracle 连接，会话记为 timeout，
-	// 结束原因同为 timeout。RDP/VNC 仍是未接入 ops_session 的骨架，不在此列。
+	// <=0 关闭空闲断开。到点后掐断 SSH / WebSSH / 图形会话 / Oracle 连接，会话记为 timeout，
+	// 结束原因同为 timeout。3389/5900 上的原生 TCP 提示口不进 ops_session。
 	//
 	// 这是生效配置。sys_config 的 security.session.idle_minutes（种子值 30）
 	// 只在系统配置页展示，代理不读取。两边默认都是 30 分钟；要改行为请改本环境变量。

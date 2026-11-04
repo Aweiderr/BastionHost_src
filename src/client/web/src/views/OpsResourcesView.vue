@@ -11,6 +11,7 @@ import OracleConnectDialog from '@/components/OracleConnectDialog.vue'
 import type { TableColumn } from '@/types/ui'
 import { PROTOCOL_MAP, dictLabel } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
+import { isGraphicalProtocol } from '@/utils/graphical'
 import { isOracleProtocol } from '@/utils/oracleConnect'
 
 defineOptions({ name: 'OpsResourcesView' })
@@ -80,6 +81,13 @@ function connect(row: OpsAsset): void {
     oracleOpen.value = true
     return
   }
+  if (isGraphicalProtocol(row.protocol)) {
+    void router.push({
+      path: '/desktop',
+      query: { asset: String(row.asset_id), connect: '1' },
+    })
+    return
+  }
   void router.push({
     path: '/terminal',
     query: { asset: String(row.asset_id), connect: '1' },
@@ -95,7 +103,7 @@ onMounted(load)
       <div>
         <div class="page-title">我的资源</div>
         <div class="page-subtitle">
-          仅列出已授权给您的资产。SSH 等协议点「连接」打开 Web 终端；Oracle 点「连接」查看本机客户端连接说明，不进入 Web 终端。需审批的请先提交工单。
+          仅列出已授权给您的资产。SSH 点「连接」打开 Web 终端；RDP / VNC 打开图形会话；Oracle 查看本机客户端连接说明。需审批的请先提交工单。
         </div>
       </div>
       <button class="btn" type="button" :disabled="loading" @click="load">

@@ -6,6 +6,18 @@ export function CloseSession(arg1) {
   return window['go']['main']['App']['CloseSession'](arg1);
 }
 
+export function OpenDesktopSession(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['OpenDesktopSession'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+export function WriteDesktopInput(arg1, arg2) {
+  return window['go']['main']['App']['WriteDesktopInput'](arg1, arg2);
+}
+
+export function CloseDesktopSession(arg1) {
+  return window['go']['main']['App']['CloseDesktopSession'](arg1);
+}
+
 export function GetAssets() {
   return window['go']['main']['App']['GetAssets']();
 }

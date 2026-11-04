@@ -98,6 +98,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Web 终端', permission: ['ops:session:connect'] },
       },
       {
+        path: 'desktop',
+        name: 'desktop',
+        component: () => import('@/views/DesktopView.vue'),
+        meta: { title: '图形会话', permission: ['ops:session:connect'] },
+      },
+      {
         path: 'my-sessions',
         name: 'my-sessions',
         component: () => import('@/views/MySessionsView.vue'),
@@ -231,6 +237,7 @@ export const ICONS = {
   dashboard: 'M4 4h6v6H4zM14 4h6v6h-6zM14 14h6v6h-6zM4 14h6v6H4z',
   asset: 'M4 4h16v6H4zM4 14h16v6H4zM7.5 7h.01M7.5 17h.01',
   terminal: 'M4 5h16v14H4zM8 10l2 2-2 2M13 14h4',
+  screen: 'M3 4h18v12H3zM8 20h8M12 16v4',
   clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7.5V12l3 2',
   list: 'M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01',
   command: 'M4 5h16v14H4zM8 9.5l2.5 2.5L8 14.5M12.5 15H16',
@@ -294,6 +301,12 @@ export const MENU_GROUPS: MenuGroup[] = [
         //
         // 注意：这里表达的是"需要具备 ops:session:connect"，
         // 若将来要表达"同时需要多项权限"，应改用 hasAll 而不是往数组里堆。
+        permission: ['ops:session:connect'],
+      },
+      {
+        title: '图形会话',
+        path: '/desktop',
+        icon: ICONS.screen,
         permission: ['ops:session:connect'],
       },
       {

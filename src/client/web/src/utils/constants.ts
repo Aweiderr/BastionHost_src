@@ -6,6 +6,8 @@
 /** 契约约定：WebSSH 直连服务端，端口固定 8081，不走 Vite 代理 */
 export const WEBSSH_PORT = 8081
 export const WEBSSH_PATH = '/api/v1/webssh'
+/** RDP / VNC 画面，与 WebSSH 同一主机、同一端口 */
+export const WEBDESKTOP_PATH = '/api/v1/webdesktop'
 
 /**
  * Oracle SQL 客户端要连接的堡垒机网关。
@@ -38,6 +40,13 @@ export function buildWebsshUrl(): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const host = window.location.hostname || '127.0.0.1'
   return `${scheme}://${host}:${WEBSSH_PORT}${WEBSSH_PATH}`
+}
+
+/** 拼接 RDP/VNC 画面的 WebSocket 地址（与 WebSSH 同主机同端口） */
+export function buildWebdesktopUrl(): string {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const host = window.location.hostname || '127.0.0.1'
+  return `${scheme}://${host}:${WEBSSH_PORT}${WEBDESKTOP_PATH}`
 }
 
 export interface DictOption {

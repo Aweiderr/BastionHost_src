@@ -13,12 +13,13 @@ npm run preview  # 预览构建产物
 
 - 开发代理：`/api` → `http://127.0.0.1:8080`（管理服务），见 `vite.config.ts`
 - WebSSH 直连：`ws://<当前页面主机名>:8081/api/v1/webssh`，不走代理（见 `src/utils/constants.ts` 的 `buildWebsshUrl`）
+- RDP/VNC 画面：同一主机的 `8081`，路径 `/api/v1/webdesktop`（`buildWebdesktopUrl`）
 
 ## 生产部署
 
 1. 将 `dist/` 作为静态资源目录交由 Nginx / Caddy 托管，并配置 SPA 回退到 `index.html`。
 2. 反向代理 `/api` 到管理服务 `127.0.0.1:8080`。
-3. 放通页面主机名的 `8081` 端口（WebSSH WebSocket 直连服务端）。
+3. 放通页面主机名的 `8081` 端口（WebSSH 与 RDP/VNC 画面 WebSocket 直连服务端）。
 4. HTTPS 部署时 `buildWebsshUrl` 会自动使用 `wss://`。
 
 ## 目录结构

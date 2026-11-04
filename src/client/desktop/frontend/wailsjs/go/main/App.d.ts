@@ -6,6 +6,12 @@ import {main} from '../models';
 
 export function CloseSession(arg1:string):Promise<void>;
 
+export function OpenDesktopSession(arg1:string,arg2:string,arg3:number,arg4:number,arg5:number,arg6:number):Promise<main.SessionBrief>;
+
+export function WriteDesktopInput(arg1:string,arg2:string):Promise<void>;
+
+export function CloseDesktopSession(arg1:string):Promise<void>;
+
 export function GetAssets():Promise<Array<coreapi.Asset>>;
 
 export function GetCoreURL():Promise<string>;

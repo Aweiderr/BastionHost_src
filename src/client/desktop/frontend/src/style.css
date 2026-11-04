@@ -233,6 +233,11 @@ td.mono { font-family: var(--mono); }
 }
 .toast.ok { border-color: #166534; background: #052e16; color: #bbf7d0; }
 .toast.err { border-color: #991b1b; background: #450a0a; color: #fecaca; }
+.form-error {
+  margin: 0 0 12px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid #991b1b; background: #450a0a; color: #fecaca;
+  font-size: 13px; line-height: 1.6;
+}
 
 .hint { font-size: 12px; color: var(--muted); line-height: 1.7; }
 .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid #ffffff44;

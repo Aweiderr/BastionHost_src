@@ -81,10 +81,22 @@ export const state = reactive({
   assets: [] as Asset[],
   /** 全局提示（右上角） */
   toast: { text: '', kind: 'info' as 'info' | 'ok' | 'err', seq: 0 },
+  /** 登录页上保持显示的错误（角色拒绝等），不随提示条消失 */
+  loginError: '',
   /** 当前活动会话 key（终端页签） */
   activeKey: '' as string,
 })
 
 export function notify(text: string, kind: 'info' | 'ok' | 'err' = 'info') {
   state.toast = { text, kind, seq: state.toast.seq + 1 }
+}
+
+/** 登录失败：提示条 + 登录卡片上的常驻说明。 */
+export function rejectLogin(text: string) {
+  state.loginError = text
+  notify(text, 'err')
+}
+
+export function clearLoginError() {
+  state.loginError = ''
 }

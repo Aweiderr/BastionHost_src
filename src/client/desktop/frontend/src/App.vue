@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { onMounted, ref, watch } from 'vue'
-import { state, notify, type DeviceInfo, type Profile } from './store'
+import { state, notify, rejectLogin, clearLoginError, type DeviceInfo, type Profile } from './store'
+import { isOpsUser, opsDeniedMessage } from './opsRole'
 import LoginView from './views/LoginView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
 import SessionsView from './views/SessionsView.vue'
@@ -16,21 +17,34 @@ const navItems = [
   { key: 'device', label: '设备与准入', icon: '⌘' },
 ] as const
 
+function acceptProfile(p: Profile) {
+  if (!isOpsUser(p.roles)) {
+    void Logout().catch((e) => console.error(e))
+    rejectLogin(opsDeniedMessage(p.roles))
+    return
+  }
+  clearLoginError()
+  state.profile = p
+  state.loggedIn = true
+}
+
 onMounted(async () => {
   try {
     state.coreURL = await GetCoreURL()
     state.device = (await GetDeviceInfo()) as unknown as DeviceInfo
     const p = (await GetProfile()) as unknown as Profile | null
     if (p && p.user_id) {
-      state.profile = p
-      state.loggedIn = true
+      acceptProfile(p)
     } else {
       // 受控环境下由 BASTION_AUTOLOGIN 触发免交互登录（默认不生效）
-      const auto = (await TryAutoLogin()) as unknown as Profile | null
-      if (auto && auto.user_id) {
-        state.profile = auto
-        state.loggedIn = true
-        notify(`欢迎，${auto.display_name || auto.username}`, 'ok')
+      try {
+        const auto = (await TryAutoLogin()) as unknown as Profile | null
+        if (auto && auto.user_id) {
+          acceptProfile(auto)
+          if (state.loggedIn) notify(`欢迎，${auto.display_name || auto.username}`, 'ok')
+        }
+      } catch (e: any) {
+        rejectLogin(String(e?.message || e))
       }
     }
   } catch (e) {
@@ -54,6 +68,12 @@ async function doLogout() {
 }
 
 function onLoggedIn(p: Profile) {
+  if (!isOpsUser(p.roles)) {
+    void Logout().catch((e) => console.error(e))
+    rejectLogin(opsDeniedMessage(p.roles))
+    return
+  }
+  clearLoginError()
   state.profile = p
   state.loggedIn = true
   state.view = 'workbench'
@@ -67,7 +87,8 @@ watch(
     if (!state.toast.text) return
     toastVisible.value = true
     window.clearTimeout(toastTimer)
-    toastTimer = window.setTimeout(() => (toastVisible.value = false), 3800)
+    const stay = state.toast.kind === 'err' ? 9000 : 3800
+    toastTimer = window.setTimeout(() => (toastVisible.value = false), stay)
   },
 )
 </script>

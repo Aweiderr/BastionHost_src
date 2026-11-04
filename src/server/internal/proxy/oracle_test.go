@@ -41,6 +41,23 @@ type fakeOracle struct {
 	dials    int
 }
 
+func (f *fakeOracle) VerifyToken(_ context.Context, token string) (*managerclient.OpsIdentity, error) {
+	if token != "good-token" && token != "noperm-token" {
+		return nil, &managerclient.APIError{Code: managerclient.CodeInvalidCredential, Message: "bad", Status: 401}
+	}
+	perms := []string{"ops:session:connect"}
+	if token == "noperm-token" {
+		perms = nil
+	}
+	user := f.user
+	if user == "" {
+		user = "ops01"
+	}
+	return &managerclient.OpsIdentity{
+		UserID: 7, Username: user, DisplayName: user, Permissions: perms,
+	}, nil
+}
+
 func (f *fakeOracle) VerifyOps(_ context.Context, username, password, totpCode, _ string) (*managerclient.OpsIdentity, error) {
 	if username != f.user || password != f.pass {
 		return nil, &managerclient.APIError{Code: managerclient.CodeInvalidCredential, Message: "bad", Status: 401}

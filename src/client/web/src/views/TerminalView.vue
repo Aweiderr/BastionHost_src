@@ -10,6 +10,7 @@ import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebsshUrl, PROTOCOL_MAP, dictLabel } from '@/utils/constants'
+import { isGraphicalProtocol } from '@/utils/graphical'
 import { isOracleProtocol } from '@/utils/oracleConnect'
 
 interface TermTab {
@@ -177,6 +178,12 @@ function connectTab(key: string): void {
   const tab = tabByKey(key)
   const rt = runtimes.get(key)
   if (!tab || !rt) return
+  if (isGraphicalProtocol(tab.protocol)) {
+    tab.status = 'error'
+    tab.statusText = '请用图形会话'
+    tab.errorText = 'RDP / VNC 不使用字符终端。请回到「我的资源」，点「连接」打开图形会话。'
+    return
+  }
   if (isOracleProtocol(tab.protocol)) {
     tab.status = 'error'
     tab.statusText = '请用客户端'
@@ -444,7 +451,7 @@ async function restoreTabs(): Promise<void> {
 }
 
 function openAsset(asset: OpsAsset, autoConnect: boolean): boolean {
-  if (isOracleProtocol(asset.protocol)) return false
+  if (isOracleProtocol(asset.protocol) || isGraphicalProtocol(asset.protocol)) return false
   const existing = tabs.value.find((tab) => tab.assetId === asset.asset_id)
   if (existing) {
     activeKey.value = existing.key
@@ -528,7 +535,11 @@ async function openFromRoute(): Promise<void> {
     return
   }
   if (!openAsset(asset, autoConnect)) {
-    app.info('Oracle 不使用 Web 终端，请回到「我的资源」查看客户端连接说明')
+    if (isGraphicalProtocol(asset.protocol)) {
+      app.info('RDP / VNC 请从「我的资源」打开图形会话')
+    } else {
+      app.info('Oracle 不使用 Web 终端，请回到「我的资源」查看客户端连接说明')
+    }
   }
 }
 
@@ -566,7 +577,7 @@ onBeforeUnmount(() => {
       <div>
         <div class="page-title">Web 终端</div>
         <div class="page-subtitle">
-          每个资源单独一个页签，可以同时开着。口令已托管的账号会直接连接；不托管的账号会再问一次目标口令。Oracle 不在此连接，请回到「我的资源」查看客户端说明。
+          每个资源单独一个页签，可以同时开着。口令已托管的账号会直接连接；不托管的账号会再问一次目标口令。RDP / VNC 与 Oracle 不在此连接。
         </div>
       </div>
     </div>

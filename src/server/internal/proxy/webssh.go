@@ -48,6 +48,12 @@ func (w *wsWriter) write(ctx context.Context, data []byte) error {
 	return w.c.Write(ctx, websocket.MessageBinary, data)
 }
 
+func (w *wsWriter) writeText(ctx context.Context, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.c.Write(ctx, websocket.MessageText, data)
+}
+
 // WebSSHHandler 返回 WebSSH 的 HTTP 处理器（WebSocket 升级）。
 //
 // 协议约定：

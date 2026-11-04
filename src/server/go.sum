@@ -2,6 +2,14 @@ github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNU
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/emmansun/gmsm v0.44.1 h1:zDTkdtLWFG0vCbhPV+k9pte14tix/eK71At9Iai9fP4=
 github.com/emmansun/gmsm v0.44.1/go.mod h1:p6RIUta0/KboFHrOxr1x8q+pd8RZtdaTO7XNp0RmMQM=
+github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358 h1:hVXNJ57IHkOA8FBq80UG263MEBwNUMfS9c82J2QE5UQ=
+github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358/go.mod h1:qBE210J2T9uLXRB3GNc73SvZACDEFAmDCOlDkV47zbY=
+github.com/icodeface/tls v0.0.0-20190904083142-17aec93c60e5 h1:ZcsPFW8UgACapqjcrBJx0PuyT4ppArO5VFn0vgnkvmc=
+github.com/icodeface/tls v0.0.0-20190904083142-17aec93c60e5/go.mod h1:VJNHW2GxCtQP/IQtXykBIPBV8maPJ/dHWirVTwm9GwY=
+github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40 h1:EnfXoSqDfSNJv0VBNqY/88RNnhSGYkrHaO0mmFGbVsc=
+github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40/go.mod h1:vy1vK6wD6j7xX6O6hXe621WabdtNkou2h7uRtTfRMyg=
+github.com/tomatome/grdp v0.1.0 h1:MFX+l91/+RelL+RERqald+LwoGWfDubJvwfkmObE+NU=
+github.com/tomatome/grdp v0.1.0/go.mod h1:n6f5uALqoKqeTXdtrYFk14YBPelBHQEHagft+1j0oWc=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
 golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=

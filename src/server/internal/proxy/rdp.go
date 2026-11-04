@@ -10,13 +10,12 @@ import (
 	"time"
 )
 
-// RDPGateway 是 RDP 画面通道的可运行骨架。
+// RDPGateway 是给 mstsc / FreeRDP 直连的 TCP 口，目前仍只回提示。
 //
-// 边界（明确未完成）：
-//   - 不解析 RDP 协议层（MCS/GCC/X.224），仅做 TCP 透明代理雏形；
-//   - 不接入授权/凭据/录像；正式实现需在握手前完成身份与授权，
-//     再按资产 host:port 建立到目标的 TLS/RDP 通道并切入录像。
-//   - 默认监听由 BASTION_RDP_LISTEN 配置；Enable=false 时不监听。
+// 真正的画面在代理 HTTP 的 WebSocket `/api/v1/webdesktop`：
+// 浏览器和桌面客户端走那条通道，由堡垒机完成授权、建 ops_session，
+// 再拨到资产上的 3389。这里不解析 RDP，避免未授权的 TCP 透传。
+// Enable=false（默认）时不监听。
 type RDPGateway struct {
 	Listen  string
 	Enable  bool
@@ -31,7 +30,7 @@ type RDPGateway struct {
 // ListenAndServe 启动 RDP 监听，直到 ctx 结束。
 func (g *RDPGateway) ListenAndServe(ctx context.Context) error {
 	if g == nil || !g.Enable {
-		slog.Info("RDP 网关未启用（骨架就位，等待正式画面通道）")
+		slog.Info("RDP 原生 TCP 口未启用（画面请走 /api/v1/webdesktop）")
 		<-ctx.Done()
 		return nil
 	}
@@ -48,7 +47,7 @@ func (g *RDPGateway) ListenAndServe(ctx context.Context) error {
 	g.mu.Lock()
 	g.ln = ln
 	g.mu.Unlock()
-	slog.Info("RDP 网关骨架已启动（透明代理占位，未完成协议解析）", "addr", g.Listen)
+	slog.Info("RDP 原生 TCP 口已监听（不提供画面，仅回提示）", "addr", g.Listen)
 
 	go func() {
 		<-ctx.Done()
@@ -85,7 +84,7 @@ func (g *RDPGateway) handle(c net.Conn) {
 		g.mu.Unlock()
 	}()
 
-	msg := []byte("Bastion RDP gateway skeleton: protocol proxy not yet implemented. Configure asset protocol=rdp; full frame channel is pending.\r\n")
+	msg := []byte("堡垒机不在这个 TCP 端口提供 RDP 画面。请使用 Web「图形会话」或桌面客户端（/api/v1/webdesktop）。\r\n")
 	_, _ = c.Write(msg)
 	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 	_, _ = io.Copy(io.Discard, io.LimitReader(c, 1024))

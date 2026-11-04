@@ -5,8 +5,9 @@
 | 协议 | 配置项 | 默认监听 | 代码 | 状态 |
 |------|--------|----------|------|------|
 | SSH / WebSSH | `BASTION_SSH_LISTEN` | `:2222` | `server.go` / `webssh.go` | 完整运维闭环 |
-| RDP | `BASTION_RDP_LISTEN` + `BASTION_RDP_ENABLE` | `:3389` | `rdp.go` | **骨架**：TCP 监听 + 提示，无协议解析/授权/录像 |
-| VNC | `BASTION_VNC_LISTEN` + `BASTION_VNC_ENABLE` | `:5900` | `vnc.go` | **骨架**：同上，无 RFB |
+| RDP / VNC 画面 | 与 WebSSH 同端口（`BASTION_SERVER_ADDR`，默认 `:8081`） | `/api/v1/webdesktop` | `desktop.go` / `rfb.go` / `desktop_rdp.go` | **可用**：授权、`ops_session`、像素。无图形录像 |
+| RDP 原生 TCP | `BASTION_RDP_LISTEN` + `BASTION_RDP_ENABLE` | `:3389` | `rdp.go` | **提示口**：不提供画面，避免未授权透传 |
+| VNC 原生 TCP | `BASTION_VNC_LISTEN` + `BASTION_VNC_ENABLE` | `:5900` | `vnc.go` | **提示口**：同上 |
 | Oracle | `BASTION_ORACLE_LISTEN` + `BASTION_ORACLE_ENABLE` | `:1521` | `oracle.go` | **授权 TNS 隧道**：见下文。默认关闭 |
 
 资产台账 `ast_asset.protocol` 枚举已含 `rdp` / `vnc` / `oracle`（见迁移 0008）。
@@ -65,7 +66,7 @@ TNS 上没有 SSH 那种 y/n，确认动作没法交互，所以按阻断处理�
 
 ### 未完成边界（勿当作已交付）
 
-1. **画面通道**：RDP/VNC 需完整握手、剪贴板/磁盘映射策略、录像帧封装。
+1. **画面录像、剪贴板、磁盘映射**：RDP/VNC 已经能在 Web / 桌面客户端里看到桌面并写入 `ops_session`，但还没有帧录像、剪贴板和驱动器映射。原生 mstsc / vncviewer 直连 3389/5900 也还不是代理。
 2. **Oracle 口令注入**：11g 及以后的 O5LOGON / O7LOGON 不在线上给出可还原的库口令。本版本**不改写认证包**，SQL 客户端仍使用资产账号和库口令向 Oracle 认证。托管口令只用于“账号已配置口令”的核对和凭据下发审计，不写入连接串。管理面建库用户，以及重置 Oracle 托管账号口令，都不走这条隧道：管理服务用该资产上已托管的 SYSTEM（优先）、SYS 或特权账号直连目标库执行 `CREATE USER` / `ALTER USER`。重置时若没有可用管理员、连接失败或 `ALTER USER` 失败，堡垒机口令保持不变。隧道既不能代填库口令，运维会话里的 `CREATE USER` 又会被出厂规则记为高危。
 3. **SQL 提取是旁路启发式**，不是完整 TTC。绑定变量里的原文、分片在多个包里的语句、非 UTF-8/UTF-16 的编码可能漏记。阻断以“这个包里识别出的文本”为准，识别不到就不会拦。细粒度语句审计和可靠的 `DROP` 阻断留作后续，不要把当前启发式当成完整 SQL 网关。
 4. **重定向回连**会短时占用一个额外端口，只接受原客户端 IP 的一次连接（IPv4/IPv6 映射视为同一地址）。防火墙需要放行这个端口，或者让监听不要重定向（专用服务器直连）。`ADDRESS_LIST` 里只改写第一段地址。
@@ -75,7 +76,9 @@ TNS 上没有 SSH 那种 y/n，确认动作没法交互，所以按阻断处理�
 ## 启用方式
 
 ```bash
-# RDP / VNC 仍是骨架
+# 画面通道跟代理 HTTP 一起提供，不需要单独打开。
+# 浏览器 Origin 白名单与 WebSSH 相同（BASTION_WEBSSH_ORIGINS）。
+# 下面两个开关只打开「误连时回提示」的 TCP 口，不是画面开关。
 export BASTION_RDP_ENABLE=true
 export BASTION_VNC_ENABLE=true
 

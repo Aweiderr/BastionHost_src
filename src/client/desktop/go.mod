@@ -3,6 +3,7 @@ module bastion.local/desktop
 go 1.27
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/emmansun/gmsm v0.44.1
 	github.com/wailsapp/wails/v2 v2.16.0
 	github.com/yusufpapurcu/wmi v1.2.4

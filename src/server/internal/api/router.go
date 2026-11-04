@@ -126,6 +126,8 @@ func NewRouter(deps Deps) http.Handler {
 	// WebSSH：浏览器终端经 WebSocket 接入（认证走管理服务令牌校验）
 	if deps.SSH != nil {
 		mux.HandleFunc("GET /api/v1/webssh", deps.SSH.WebSSHHandler())
+		// RDP / VNC 画面：与 WebSSH 同一条 WebSocket 入口，协议由资产台账决定。
+		mux.HandleFunc("GET /api/v1/webdesktop", deps.SSH.WebDesktopHandler())
 		// 录像回放：解密 + 摘要链校验后返回明文
 		mux.HandleFunc("GET /api/v1/records/{sessionNo}", deps.SSH.RecordPlayHandler())
 	}

@@ -142,7 +142,8 @@ func main() {
 		// 维护状态（draining）下拒绝新会话，存量会话继续跑完
 		sshSrv.SetAdmissionCheck(beater.Allowed)
 
-		// RDP / VNC 仍是骨架。Oracle 开启后做授权校验和 TNS 转发，
+		// RDP / VNC 的画面在 HTTP `/api/v1/webdesktop`。下面两个 TCP 口仍只回提示，
+		// 给误连到 3389/5900 的客户端一个说明。Oracle 开启后做授权校验和 TNS 转发，
 		// 命令策略未就绪时它自己等待，不先放流量。
 		rdpGw := &proxy.RDPGateway{Listen: cfg.Proxy.RDPListen, Enable: cfg.Proxy.RDPEnable, Timeout: cfg.Proxy.ConnectTimeout}
 		vncGw := &proxy.VNCGateway{Listen: cfg.Proxy.VNCListen, Enable: cfg.Proxy.VNCEnable, Timeout: cfg.Proxy.ConnectTimeout}

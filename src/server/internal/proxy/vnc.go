@@ -10,12 +10,10 @@ import (
 	"time"
 )
 
-// VNCGateway 是 VNC 画面通道的可运行骨架。
+// VNCGateway 是给本机 VNC 查看器直连的 TCP 口，目前仍只回提示。
 //
-// 边界（明确未完成）：
-//   - 不实现 RFB 握手与像素解码；
-//   - 不接入授权/凭据/录像；
-//   - 资产协议枚举已含 vnc（默认端口 5900），本骨架只打通监听与配置。
+// 画面走 `/api/v1/webdesktop`：代理完成授权和 RFB 认证后再把像素交给浏览器。
+// 这个监听不做未授权的 RFB 透传。Enable=false（默认）时不监听。
 type VNCGateway struct {
 	Listen  string
 	Enable  bool
@@ -30,7 +28,7 @@ type VNCGateway struct {
 // ListenAndServe 启动 VNC 监听。
 func (g *VNCGateway) ListenAndServe(ctx context.Context) error {
 	if g == nil || !g.Enable {
-		slog.Info("VNC 网关未启用（骨架就位，等待正式画面通道）")
+		slog.Info("VNC 原生 TCP 口未启用（画面请走 /api/v1/webdesktop）")
 		<-ctx.Done()
 		return nil
 	}
@@ -44,7 +42,7 @@ func (g *VNCGateway) ListenAndServe(ctx context.Context) error {
 	g.mu.Lock()
 	g.ln = ln
 	g.mu.Unlock()
-	slog.Info("VNC 网关骨架已启动（RFB 未实现）", "addr", g.Listen)
+	slog.Info("VNC 原生 TCP 口已监听（不提供画面，仅回提示）", "addr", g.Listen)
 
 	go func() {
 		<-ctx.Done()
@@ -67,7 +65,7 @@ func (g *VNCGateway) ListenAndServe(ctx context.Context) error {
 		}
 		go func(c net.Conn) {
 			defer c.Close()
-			_, _ = c.Write([]byte("Bastion VNC gateway skeleton: RFB proxy not yet implemented.\n"))
+			_, _ = c.Write([]byte("堡垒机不在这个 TCP 端口提供 VNC 画面。请使用 Web「图形会话」或桌面客户端（/api/v1/webdesktop）。\n"))
 			_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 			_, _ = io.Copy(io.Discard, io.LimitReader(c, 1024))
 		}(conn)

@@ -267,11 +267,23 @@ func (v *vncSession) writeSetPixelFormat() error {
 	return v.writeMsg(msg)
 }
 
+// RFB 编码号。LastRect（-224）是伪编码，矩形头后面没有像素。
+// TigerVNC 1.10 在客户端只声明 Raw 时，会按固定矩形数写 FramebufferUpdate；
+// 鼠标或画面一变，计数对不上就以 “nRects out of sync” 断开。
+// 声明 LastRect 之后，服务器改把矩形数写成 0xFFFF，读到 LastRect 才结束这一帧。
+const (
+	rfbEncRaw      int32 = 0
+	rfbEncLastRect int32 = -224
+)
+
 func (v *vncSession) writeSetEncodings() error {
-	msg := make([]byte, 8)
+	encodings := []int32{rfbEncRaw, rfbEncLastRect}
+	msg := make([]byte, 4+4*len(encodings))
 	msg[0] = 2
-	binary.BigEndian.PutUint16(msg[2:], 1)
-	// encoding 0 = Raw
+	binary.BigEndian.PutUint16(msg[2:], uint16(len(encodings)))
+	for i, enc := range encodings {
+		binary.BigEndian.PutUint32(msg[4+i*4:], uint32(enc))
+	}
 	return v.writeMsg(msg)
 }
 
@@ -405,19 +417,25 @@ func (v *vncSession) readFramebuffer(emit func(deskRect) error) error {
 		return err
 	}
 	n := int(binary.BigEndian.Uint16(hdr[1:3]))
-	for i := 0; i < n; i++ {
+	// 0xFFFF 不是 65535 个矩形。声明了 LastRect 的服务器用它表示
+	// “一直读，直到 LastRect”。按字面计数会把后面的消息吃掉并断开。
+	untilLast := n == 0xFFFF
+	for i := 0; untilLast || i < n; i++ {
 		rh := make([]byte, 12)
 		if _, err := io.ReadFull(v.br, rh); err != nil {
 			return err
+		}
+		enc := int32(binary.BigEndian.Uint32(rh[8:12]))
+		if enc == rfbEncLastRect {
+			return nil
+		}
+		if enc != rfbEncRaw {
+			return fmt.Errorf("VNC 编码 %d 不受支持（当前只接收 Raw）", enc)
 		}
 		x := int(binary.BigEndian.Uint16(rh[0:2]))
 		y := int(binary.BigEndian.Uint16(rh[2:4]))
 		w := int(binary.BigEndian.Uint16(rh[4:6]))
 		h := int(binary.BigEndian.Uint16(rh[6:8]))
-		enc := int32(binary.BigEndian.Uint32(rh[8:12]))
-		if enc != 0 {
-			return fmt.Errorf("VNC 编码 %d 不受支持（当前只接收 Raw）", enc)
-		}
 		if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
 			return fmt.Errorf("VNC 矩形尺寸无效")
 		}

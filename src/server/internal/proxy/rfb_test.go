@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -47,6 +48,85 @@ func TestPickVNCSecurity(t *testing.T) {
 	}
 	if _, err := pickVNCSecurity([]byte{16}, true); err == nil {
 		t.Fatal("unsupported type should fail")
+	}
+}
+
+func TestWriteSetEncodingsAdvertisesLastRect(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	sess := &vncSession{conn: client}
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- sess.writeSetEncodings()
+	}()
+
+	buf := make([]byte, 12)
+	if _, err := io.ReadFull(server, buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 2 || buf[1] != 0 {
+		t.Fatalf("header %v", buf[:2])
+	}
+	if got := binary.BigEndian.Uint16(buf[2:4]); got != 2 {
+		t.Fatalf("encoding count %d", got)
+	}
+	raw := int32(binary.BigEndian.Uint32(buf[4:8]))
+	last := int32(binary.BigEndian.Uint32(buf[8:12]))
+	if raw != 0 || last != -224 {
+		t.Fatalf("encodings raw=%d last=%d", raw, last)
+	}
+}
+
+func TestReadFramebufferLastRectUnlimited(t *testing.T) {
+	var payload bytes.Buffer
+	payload.Write([]byte{0, 0xFF, 0xFF})
+	writeRect := func(x, y, w, h uint16, enc int32, pix []byte) {
+		var rh [12]byte
+		binary.BigEndian.PutUint16(rh[0:2], x)
+		binary.BigEndian.PutUint16(rh[2:4], y)
+		binary.BigEndian.PutUint16(rh[4:6], w)
+		binary.BigEndian.PutUint16(rh[6:8], h)
+		binary.BigEndian.PutUint32(rh[8:12], uint32(enc))
+		payload.Write(rh[:])
+		payload.Write(pix)
+	}
+	// 两块 Raw，再以 LastRect（-224）收尾。后面的 Bell 必须留在缓冲区里。
+	writeRect(1, 2, 1, 1, 0, []byte{10, 20, 30, 0})
+	writeRect(3, 4, 1, 1, 0, []byte{1, 2, 3, 0})
+	writeRect(0, 0, 0, 0, -224, nil)
+	payload.WriteByte(2)
+
+	sess := &vncSession{br: bufio.NewReader(&payload)}
+	var got []deskRect
+	if err := sess.readFramebuffer(func(r deskRect) error {
+		got = append(got, r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("rects %d", len(got))
+	}
+	if got[0].X != 1 || got[0].Y != 2 || got[0].W != 1 || got[0].H != 1 {
+		t.Fatalf("rect0 %+v", got[0])
+	}
+	if got[0].RGBA[0] != 10 || got[0].RGBA[1] != 20 || got[0].RGBA[2] != 30 || got[0].RGBA[3] != 255 {
+		t.Fatalf("pixel0 %v", got[0].RGBA)
+	}
+	if got[1].X != 3 || got[1].Y != 4 || got[1].RGBA[0] != 1 || got[1].RGBA[3] != 255 {
+		t.Fatalf("rect1 %+v", got[1])
+	}
+	next, err := sess.br.ReadByte()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != 2 {
+		t.Fatalf("byte after LastRect = %d", next)
 	}
 }
 

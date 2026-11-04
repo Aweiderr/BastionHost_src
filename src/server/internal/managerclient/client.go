@@ -408,10 +408,12 @@ func (c *Client) StartSession(ctx context.Context, payload map[string]any) (*Ses
 
 // SessionCommandPayload 是命令留痕上报内容。
 type SessionCommandPayload struct {
-	SeqNo          int    `json:"seq_no"`
-	CommandText    string `json:"command_text"`
-	CommandDigest  string `json:"command_digest,omitempty"`
-	CommandType    string `json:"command_type"`
+	SeqNo         int    `json:"seq_no"`
+	CommandText   string `json:"command_text"`
+	CommandDigest string `json:"command_digest,omitempty"`
+	CommandType   string `json:"command_type"`
+	// CommandOrigin 是 user 或 client_auto。空值由管理服务记为 user。
+	CommandOrigin  string `json:"command_origin,omitempty"`
 	RiskLevel      string `json:"risk_level"`
 	PolicyAction   string `json:"policy_action"`
 	PolicyID       *int64 `json:"policy_id,omitempty"`

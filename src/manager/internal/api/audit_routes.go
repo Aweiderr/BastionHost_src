@@ -179,15 +179,16 @@ func (s *Server) handleAuditCommands(w http.ResponseWriter, r *http.Request) {
 // session_no 与 session_id 可以同时使用：前者对会话号做子串匹配，后者精确匹配主键。
 func auditCommandFilter(r *http.Request, tenantID int64) repo.CommandFilter {
 	f := repo.CommandFilter{
-		TenantID:     tenantID,
-		SessionNo:    strings.TrimSpace(r.URL.Query().Get("session_no")),
-		RiskLevel:    r.URL.Query().Get("risk_level"),
-		PolicyAction: r.URL.Query().Get("policy_action"),
-		Keyword:      r.URL.Query().Get("keyword"),
-		StartTime:    r.URL.Query().Get("start_time"),
-		EndTime:      r.URL.Query().Get("end_time"),
-		Page:         queryInt(r, "page", 1),
-		PageSize:     queryInt(r, "page_size", 50),
+		TenantID:      tenantID,
+		SessionNo:     strings.TrimSpace(r.URL.Query().Get("session_no")),
+		RiskLevel:     r.URL.Query().Get("risk_level"),
+		PolicyAction:  r.URL.Query().Get("policy_action"),
+		CommandOrigin: model.CommandOriginFilter(r.URL.Query().Get("command_origin")),
+		Keyword:       r.URL.Query().Get("keyword"),
+		StartTime:     r.URL.Query().Get("start_time"),
+		EndTime:       r.URL.Query().Get("end_time"),
+		Page:          queryInt(r, "page", 1),
+		PageSize:      queryInt(r, "page_size", 50),
 	}
 	if v := queryInt(r, "session_id", 0); v > 0 {
 		f.SessionID = int64(v)

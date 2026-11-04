@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { getAuditSessionDetail, listAuditSessions } from '@/api/audit'
 import type { AuditSession, AuditSessionDetail } from '@/api/types'
+import CommandOriginTag from '@/components/CommandOriginTag.vue'
 import DataTable from '@/components/DataTable.vue'
 import Drawer from '@/components/Drawer.vue'
 import Pagination from '@/components/Pagination.vue'
@@ -360,6 +361,7 @@ onMounted(load)
                 <tr>
                   <th style="width: 60px">序号</th>
                   <th>命令内容</th>
+                  <th style="width: 120px">来源</th>
                   <th style="width: 100px">处置动作</th>
                   <th style="width: 90px">风险等级</th>
                   <th style="width: 90px">执行结果</th>
@@ -369,11 +371,12 @@ onMounted(load)
               </thead>
               <tbody>
                 <tr v-if="!detail.commands || detail.commands.length === 0">
-                  <td colspan="7" class="table-empty">该会话暂无命令留痕</td>
+                  <td colspan="8" class="table-empty">该会话暂无命令留痕</td>
                 </tr>
                 <tr v-for="cmd in detail.commands" :key="cmd.seq_no">
                   <td>{{ cmd.seq_no }}</td>
                   <td class="text-mono" style="word-break: break-all">{{ cmd.command_text }}</td>
+                  <td><CommandOriginTag :origin="cmd.command_origin" /></td>
                   <td>
                     <StatusTag
                       :text="dictLabel(POLICY_ACTION_MAP, cmd.policy_action)"

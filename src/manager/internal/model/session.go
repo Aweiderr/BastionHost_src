@@ -66,13 +66,16 @@ const (
 
 // SessionCommand 是会话命令记录（对应 ops_session_command 表）。
 type SessionCommand struct {
-	CommandID      int64     `json:"command_id"`
-	SessionID      int64     `json:"session_id"`
-	TenantID       int64     `json:"tenant_id"`
-	SeqNo          int       `json:"seq_no"`
-	CommandText    string    `json:"command_text"`
-	CommandDigest  string    `json:"command_digest,omitempty"`
-	CommandType    string    `json:"command_type"`
+	CommandID     int64  `json:"command_id"`
+	SessionID     int64  `json:"session_id"`
+	TenantID      int64  `json:"tenant_id"`
+	SeqNo         int    `json:"seq_no"`
+	CommandText   string `json:"command_text"`
+	CommandDigest string `json:"command_digest,omitempty"`
+	CommandType   string `json:"command_type"`
+	// CommandOrigin 是语句来源：user（用户输入）/ client_auto（客户端自动）。
+	// 历史行和未上报的记录按 user 返回。策略动作不看这个字段。
+	CommandOrigin  string    `json:"command_origin"`
 	RiskLevel      string    `json:"risk_level"`
 	PolicyAction   string    `json:"policy_action"`
 	PolicyID       *int64    `json:"policy_id,omitempty"`

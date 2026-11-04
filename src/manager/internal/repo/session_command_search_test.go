@@ -68,6 +68,40 @@ func TestBuildCommandSearchFiltersSessionNoAndID(t *testing.T) {
 	}
 }
 
+func TestBuildCommandSearchSelectsOriginAndFiltersIt(t *testing.T) {
+	all := buildCommandSearch(CommandFilter{TenantID: 1})
+	if !strings.Contains(all.listSQL, "coalesce(c.command_origin,'user')") {
+		t.Fatalf("list SQL missing command_origin:\n%s", all.listSQL)
+	}
+	if strings.Contains(all.listSQL, "command_origin =") || strings.Contains(all.countSQL, "command_origin =") {
+		t.Fatal("empty origin must not add a filter")
+	}
+
+	userOnly := buildCommandSearch(CommandFilter{TenantID: 1, CommandOrigin: " user "})
+	if !strings.Contains(userOnly.listSQL, "c.command_origin = $2") || !strings.Contains(userOnly.countSQL, "c.command_origin = $2") {
+		t.Fatalf("user filter missing:\n%s", userOnly.listSQL)
+	}
+	if len(userOnly.args) != 2 || userOnly.args[1] != "user" {
+		t.Fatalf("user args = %#v", userOnly.args)
+	}
+	if !strings.Contains(userOnly.listSQL, "LIMIT $3 OFFSET $4") {
+		t.Fatalf("limit placeholders shifted:\n%s", userOnly.listSQL[strings.LastIndex(userOnly.listSQL, "LIMIT"):])
+	}
+
+	autoOnly := buildCommandSearch(CommandFilter{TenantID: 4, CommandOrigin: "CLIENT_AUTO", Keyword: "dual"})
+	if !strings.Contains(autoOnly.listSQL, "c.command_origin = $2") || !strings.Contains(autoOnly.listSQL, "c.command_text ILIKE $3") {
+		t.Fatalf("auto filter missing:\n%s", autoOnly.listSQL)
+	}
+	if autoOnly.args[1] != "client_auto" || autoOnly.args[2] != "%dual%" {
+		t.Fatalf("auto args = %#v", autoOnly.args)
+	}
+
+	ignored := buildCommandSearch(CommandFilter{TenantID: 1, CommandOrigin: "client-auto"})
+	if strings.Contains(ignored.listSQL, "command_origin =") {
+		t.Fatalf("unknown origin must not filter:\n%s", ignored.listSQL)
+	}
+}
+
 func TestBuildCommandSearchKeepsUserAssetPredicatesOnJoin(t *testing.T) {
 	q := buildCommandSearch(CommandFilter{TenantID: 1, UserID: 8, AssetID: 9})
 	if !strings.Contains(q.listSQL, "s.user_id = $2") || !strings.Contains(q.listSQL, "s.asset_id = $3") {

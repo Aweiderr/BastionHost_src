@@ -833,7 +833,7 @@ function connectLabel(protocol: string) {
               @keyup="deskKey(t.key, $event, false)"
             />
             <div v-if="t.status !== 'connected' && !t.credOpen" class="desk-wait">
-              {{ desktopWaitText(t) }}
+              <p class="desk-wait-msg">{{ desktopWaitText(t) }}</p>
             </div>
             <form v-if="t.credOpen" class="desk-cred" @submit.prevent="submitDeskPassword(t.key)">
               <div>{{ t.credReason }}</div>

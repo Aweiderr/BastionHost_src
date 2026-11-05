@@ -259,7 +259,21 @@ button.tab-x:hover:not(:disabled) { background: transparent; color: #fff; }
 }
 .desk-wait {
   position: absolute; inset: 0; display: grid; place-items: center;
-  color: #94a3b8; padding: 24px; text-align: center; pointer-events: none;
+  padding: 24px; text-align: center; pointer-events: none;
+}
+/* 远端画面常停在浅灰帧上。浅色小字会贴进背景，所以放到和卡片一样的深色底上。 */
+.desk-wait-msg {
+  margin: 0;
+  max-width: min(36rem, 100%);
+  padding: 18px 28px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.6;
 }
 .desk-cred {
   position: absolute; left: 50%; top: 24px; transform: translateX(-50%);

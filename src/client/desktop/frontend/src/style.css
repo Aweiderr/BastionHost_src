@@ -279,6 +279,42 @@ button.tab-x:hover:not(:disabled) { background: transparent; color: #fff; }
   margin-top: 12px !important; font-family: var(--mono); color: #bfdbfe !important;
 }
 
+.oracle-guide {
+  flex: 1; min-height: 0; overflow: auto; padding: 16px;
+  user-select: text;
+}
+.oracle-card {
+  width: min(860px, 100%); margin: 0 auto;
+  padding: 18px 18px 8px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel);
+}
+.oracle-card h3 { margin: 10px 0 8px; font-size: 16px; }
+.oracle-warn {
+  margin: 8px 0 4px; padding: 10px 12px;
+  border-left: 3px solid var(--warn); background: #451a03; color: #fde68a;
+  font-size: 13px; line-height: 1.65; border-radius: 0 8px 8px 0;
+}
+.oracle-asset { margin: 8px 0 0; font-size: 13px; }
+.oracle-row {
+  display: grid; grid-template-columns: 132px minmax(0, 1fr) auto;
+  gap: 8px 12px; align-items: start;
+  padding: 10px 0; border-top: 1px solid var(--line);
+}
+.oracle-row .k { color: var(--muted); font-size: 13px; padding-top: 2px; }
+.oracle-mono {
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+  word-break: break-all; white-space: pre-wrap; user-select: text;
+}
+.oracle-snippet { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+.oracle-snippet-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 8px; color: var(--muted); font-size: 12.5px;
+}
+.oracle-pre {
+  margin: 0 0 8px; padding: 10px 12px;
+  background: #101a30; border: 1px solid var(--line); border-radius: 8px;
+}
+
 /* ---------- Toast ---------- */
 .toast {
   position: fixed; top: 16px; right: 16px; z-index: 999;

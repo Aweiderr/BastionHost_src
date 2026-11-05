@@ -5,13 +5,26 @@
 | 协议 | 配置项 | 默认监听 | 代码 | 状态 |
 |------|--------|----------|------|------|
 | SSH / WebSSH | `BASTION_SSH_LISTEN` | `:2222` | `server.go` / `webssh.go` | 完整运维闭环 |
-| RDP / VNC 画面 | 与 WebSSH 同端口（`BASTION_SERVER_ADDR`，默认 `:8081`） | `/api/v1/webdesktop` | `desktop.go` / `rfb.go` / `desktop_rdp.go` | **可用**：授权、`ops_session`、像素。无图形录像 |
+| RDP / VNC 画面 | 与 WebSSH 同端口（`BASTION_SERVER_ADDR`，默认 `:8081`） | `/api/v1/webdesktop` | `desktop.go` / `rfb.go` / `desktop_rdp.go` | **可用**：授权、`ops_session`、像素。VNC 收 ZRLE / Hextile / CopyRect / Raw。无图形录像 |
 | RDP 原生 TCP | `BASTION_RDP_LISTEN` + `BASTION_RDP_ENABLE` | `:3389` | `rdp.go` | **提示口**：不提供画面，避免未授权透传 |
 | VNC 原生 TCP | `BASTION_VNC_LISTEN` + `BASTION_VNC_ENABLE` | `:5900` | `vnc.go` | **提示口**：同上 |
 | Oracle | `BASTION_ORACLE_LISTEN` + `BASTION_ORACLE_ENABLE` | `:1521` | `oracle.go` | **授权 TNS 隧道**：见下文。默认关闭 |
 
 资产台账 `ast_asset.protocol` 枚举已含 `rdp` / `vnc` / `oracle`（见迁移 0008）。
 Oracle 的服务名 / SID 在 `ast_asset.oracle_service_name`、`ast_asset.oracle_sid`（迁移 0036）。
+
+## VNC 画面编码
+
+代理作为 RFB 客户端连接资产。`SetEncodings` 的偏好顺序是 ZRLE、Hextile、CopyRect、Raw，并带上 LastRect。解出来仍是 RGBA，Web 和桌面客户端继续收 `BM` 脏矩形。
+
+- **ZRLE**（16）是首选。64×64 瓦片，一条连接共用一个 zlib 流。像素格式是 32 位小端、色深 24，线上是 3 字节 CPIXEL（R、G、B）。
+- **Hextile**（5）给不支持 ZRLE 的服务器。16×16 瓦片，像素仍是 4 字节。
+- **CopyRect**（1）在代理自己的帧缓冲里拷贝，再按目标矩形吐出 RGBA。
+- **Raw**（0）和 **LastRect**（-224）保留。不认识的编码会结束这条画面会话。
+
+不声明 Tight，避免 TigerVNC 改发带 JPEG 的 Tight。剪贴板、录像、DesktopSize 仍未做。
+
+全屏 MATE（例如 1440×900）以前每个更新都是 Raw，一帧约 5MB。重启代理后重连，日志里应有 `VNC 开始接收画面`，`encoding` 为 `ZRLE`（老服务器可能是 `Hextile`）。仍是 `Raw` 说明对端没用这份列表。拖动窗口、滚动目录时应能跟上；整屏刷新时浏览器侧仍是 RGBA，流量还是大的。
 
 ## Oracle 网关
 

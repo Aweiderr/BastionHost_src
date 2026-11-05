@@ -53,7 +53,7 @@ SFTP 等没有客户端通路的协议仍只展示「尚未接入」，不会拿
 
 - 首条文本是 `auth`（`client_type` 为 `desktop`）。口令留在代理里。
 - 文本帧：`ready`、`credential-required`、`error`、`exit`。
-- 二进制帧：`BM` 头加大端坐标和 RGBA。代理已经消化 VNC LastRect，这里按脏矩形画到画布。
+- 二进制帧：`BM` 头加大端坐标和 RGBA。代理已经消化 VNC 的 ZRLE、Hextile、CopyRect 和 LastRect，这里按脏矩形画到画布。
 - 键鼠文本：`pointer`、`key`（keysym + `KeyboardEvent.code`）、`wheel`。画面通道没有剪贴板消息。
 
 ### 对一台 VNC 资产点验

@@ -46,7 +46,21 @@ import {
   WriteSession,
 } from '../../wailsjs/go/main/App'
 import { ClipboardGetText, ClipboardSetText, EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
-import { clipboardFlags, isPasteChord } from '../utils/desktopClipboard'
+import {
+  browserClipboardWriter,
+  clipboardFlags,
+  createLocalClipboardWriter,
+  isPasteChord,
+} from '../utils/desktopClipboard'
+
+const writeClipboard = createLocalClipboardWriter()
+
+function localClipboardTarget() {
+  return {
+    setText: ClipboardSetText,
+    writeText: browserClipboardWriter(navigator),
+  }
+}
 
 const props = defineProps<{ visible: boolean }>()
 
@@ -300,8 +314,8 @@ function handleDeskControl(key: string, raw: string) {
     return
   }
   if (payload.type === 'clipboard' && payload.direction === 'copy' && tab.canCopy && payload.text) {
-    ClipboardSetText(String(payload.text)).catch(() => {
-      notify('写入本机剪贴板失败', 'err')
+    void writeClipboard(String(payload.text), localClipboardTarget()).then((result) => {
+      if (result === 'failed') notify('写入本机剪贴板失败', 'err')
     })
     return
   }
@@ -692,22 +706,9 @@ function oracleGuide(tab: SessionTab): OracleConnectGuide {
 async function copyField(text: string, label: string) {
   const value = text.trim()
   if (!value) return
-  let copied = false
-  try {
-    copied = (await ClipboardSetText(value)) === true
-  } catch {
-    copied = false
-  }
-  if (!copied && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value)
-      copied = true
-    } catch {
-      copied = false
-    }
-  }
-  if (copied) notify(`已复制${label}`, 'ok')
-  else notify('剪贴板不可用，请在说明里手动选择文本复制', 'err')
+  const result = await writeClipboard(value, localClipboardTarget())
+  if (result === 'written') notify(`已复制${label}`, 'ok')
+  else if (result === 'failed') notify('剪贴板不可用，请在说明里手动选择文本复制', 'err')
 }
 
 function levelTag(level: string) {

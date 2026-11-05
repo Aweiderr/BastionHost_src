@@ -51,7 +51,7 @@ func TestPickVNCSecurity(t *testing.T) {
 	}
 }
 
-func TestWriteSetEncodingsAdvertisesLastRect(t *testing.T) {
+func TestWriteSetEncodingsPrefersCompressed(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -62,23 +62,42 @@ func TestWriteSetEncodingsAdvertisesLastRect(t *testing.T) {
 		errc <- sess.writeSetEncodings()
 	}()
 
-	buf := make([]byte, 12)
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(server, head); err != nil {
+		t.Fatal(err)
+	}
+	if head[0] != 2 || head[1] != 0 {
+		t.Fatalf("header %v", head[:2])
+	}
+	n := int(binary.BigEndian.Uint16(head[2:4]))
+	buf := make([]byte, n*4)
 	if _, err := io.ReadFull(server, buf); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-errc; err != nil {
 		t.Fatal(err)
 	}
-	if buf[0] != 2 || buf[1] != 0 {
-		t.Fatalf("header %v", buf[:2])
+	want := vncPreferredEncodings()
+	if n != len(want) {
+		t.Fatalf("encoding count %d", n)
 	}
-	if got := binary.BigEndian.Uint16(buf[2:4]); got != 2 {
-		t.Fatalf("encoding count %d", got)
+	for i, enc := range want {
+		got := int32(binary.BigEndian.Uint32(buf[i*4 : (i+1)*4]))
+		if got != enc {
+			t.Fatalf("encoding[%d]=%d want %d", i, got, enc)
+		}
 	}
-	raw := int32(binary.BigEndian.Uint32(buf[4:8]))
-	last := int32(binary.BigEndian.Uint32(buf[8:12]))
-	if raw != 0 || last != -224 {
-		t.Fatalf("encodings raw=%d last=%d", raw, last)
+	if want[0] != rfbEncZRLE || want[len(want)-1] != rfbEncLastRect {
+		t.Fatalf("preference %v", want)
+	}
+	seenRaw := false
+	for _, enc := range want {
+		if enc == rfbEncRaw {
+			seenRaw = true
+		}
+	}
+	if !seenRaw {
+		t.Fatal("raw must stay available")
 	}
 }
 

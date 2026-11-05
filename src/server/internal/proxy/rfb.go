@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -48,6 +49,8 @@ func reverseBits(b byte) byte {
 
 // vncSession 是已经完成安全握手的 RFB 客户端。
 // 像素格式固定为 32 位小端、R 在最低字节，方便浏览器直接铺到画布。
+// fb 记下整屏，CopyRect 才能在代理里还原成 RGBA，不必改浏览器协议。
+// zrle 是这条连接上唯一的 zlib 流，矩形之间不能重建。
 type vncSession struct {
 	conn net.Conn
 	br   *bufio.Reader
@@ -55,6 +58,11 @@ type vncSession struct {
 
 	width  int
 	height int
+	fb     []byte
+
+	zrleSrc   zrleSource
+	zrle      io.Reader
+	loggedEnc bool
 
 	closeOnce sync.Once
 }
@@ -130,6 +138,10 @@ func (v *vncSession) handshake(password string) error {
 	}
 	if err := v.writeSetPixelFormat(); err != nil {
 		return err
+	}
+	v.fb = make([]byte, v.width*v.height*4)
+	for i := 3; i < len(v.fb); i += 4 {
+		v.fb[i] = 255
 	}
 	return v.writeSetEncodings()
 }
@@ -271,13 +283,26 @@ func (v *vncSession) writeSetPixelFormat() error {
 // TigerVNC 1.10 在客户端只声明 Raw 时，会按固定矩形数写 FramebufferUpdate；
 // 鼠标或画面一变，计数对不上就以 “nRects out of sync” 断开。
 // 声明 LastRect 之后，服务器改把矩形数写成 0xFFFF，读到 LastRect 才结束这一帧。
+//
+// 不声明 Tight。TigerVNC 只要列表里有 Tight 就会改用它，并且经常夹 JPEG；
+// 这里没有 JPEG 解码，声明了会导致整段画面解不开。
 const (
 	rfbEncRaw      int32 = 0
+	rfbEncCopyRect int32 = 1
+	rfbEncHextile  int32 = 5
+	rfbEncZRLE     int32 = 16
 	rfbEncLastRect int32 = -224
 )
 
+// vncPreferredEncodings 按服务器应优先选用的顺序排列。
+// CopyRect 对 libvncserver / TigerVNC 是“能拷贝就拷贝”的能力位，
+// 不占据首选；放在 Raw 前面，避免只认第一种编码的旧服务器把它当成唯一编码。
+func vncPreferredEncodings() []int32 {
+	return []int32{rfbEncZRLE, rfbEncHextile, rfbEncCopyRect, rfbEncRaw, rfbEncLastRect}
+}
+
 func (v *vncSession) writeSetEncodings() error {
-	encodings := []int32{rfbEncRaw, rfbEncLastRect}
+	encodings := vncPreferredEncodings()
 	msg := make([]byte, 4+4*len(encodings))
 	msg[0] = 2
 	binary.BigEndian.PutUint16(msg[2:], uint16(len(encodings)))
@@ -425,30 +450,83 @@ func (v *vncSession) readFramebuffer(emit func(deskRect) error) error {
 		if _, err := io.ReadFull(v.br, rh); err != nil {
 			return err
 		}
-		enc := int32(binary.BigEndian.Uint32(rh[8:12]))
-		if enc == rfbEncLastRect {
-			return nil
-		}
-		if enc != rfbEncRaw {
-			return fmt.Errorf("VNC 编码 %d 不受支持（当前只接收 Raw）", enc)
-		}
 		x := int(binary.BigEndian.Uint16(rh[0:2]))
 		y := int(binary.BigEndian.Uint16(rh[2:4]))
 		w := int(binary.BigEndian.Uint16(rh[4:6]))
 		h := int(binary.BigEndian.Uint16(rh[6:8]))
+		enc := int32(binary.BigEndian.Uint32(rh[8:12]))
+		if enc == rfbEncLastRect {
+			return nil
+		}
 		if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
 			return fmt.Errorf("VNC 矩形尺寸无效")
 		}
-		raw := make([]byte, w*h*4)
-		if _, err := io.ReadFull(v.br, raw); err != nil {
+		if v.width > 0 || v.height > 0 {
+			if x+w > v.width || y+h > v.height {
+				return fmt.Errorf("VNC 矩形超出画面")
+			}
+		}
+		if !v.loggedEnc {
+			v.loggedEnc = true
+			slog.Info("VNC 开始接收画面", "encoding", rfbEncodingName(enc), "width", v.width, "height", v.height)
+		}
+		rgba, err := v.decodeRect(enc, x, y, w, h)
+		if err != nil {
 			return err
 		}
-		rgba := rawToRGBA(raw)
 		if err := emit(deskRect{X: x, Y: y, W: w, H: h, RGBA: rgba}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (v *vncSession) decodeRect(enc int32, x, y, w, h int) ([]byte, error) {
+	switch enc {
+	case rfbEncRaw:
+		raw := make([]byte, w*h*4)
+		if _, err := io.ReadFull(v.br, raw); err != nil {
+			return nil, err
+		}
+		rgba := rawToRGBA(raw)
+		v.blit(x, y, w, h, rgba)
+		return rgba, nil
+	case rfbEncCopyRect:
+		return v.decodeCopyRect(x, y, w, h)
+	case rfbEncHextile:
+		rgba, err := decodeHextile(v.br, w, h)
+		if err != nil {
+			return nil, err
+		}
+		v.blit(x, y, w, h, rgba)
+		return rgba, nil
+	case rfbEncZRLE:
+		rgba, err := v.decodeZRLE(w, h)
+		if err != nil {
+			return nil, err
+		}
+		v.blit(x, y, w, h, rgba)
+		return rgba, nil
+	default:
+		return nil, fmt.Errorf("VNC 编码 %d 不受支持（当前接收 Raw、CopyRect、Hextile、ZRLE）", enc)
+	}
+}
+
+func rfbEncodingName(enc int32) string {
+	switch enc {
+	case rfbEncRaw:
+		return "Raw"
+	case rfbEncCopyRect:
+		return "CopyRect"
+	case rfbEncHextile:
+		return "Hextile"
+	case rfbEncZRLE:
+		return "ZRLE"
+	case rfbEncLastRect:
+		return "LastRect"
+	default:
+		return fmt.Sprintf("%d", enc)
+	}
 }
 
 func rawToRGBA(raw []byte) []byte {

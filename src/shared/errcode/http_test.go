@@ -16,7 +16,7 @@ func TestErrToStatusPasswordExpiredIsForbidden(t *testing.T) {
 	}
 
 	// 真正的会话失效仍是 401，前端可以继续据此清令牌。
-	sessionDead := []Code{ErrUnauthorized, ErrTokenExpired, ErrTokenInvalid}
+	sessionDead := []Code{ErrUnauthorized, ErrTokenExpired, ErrTokenInvalid, ErrKickedByOtherClient}
 	for _, code := range sessionDead {
 		if got := ErrToStatus(code); got != http.StatusUnauthorized {
 			t.Errorf("%s HTTP 状态 = %d，期望 401", code, got)

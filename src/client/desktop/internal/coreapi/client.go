@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,10 @@ type Client struct {
 	base  string
 	token string
 	http  *http.Client
+
+	mu             sync.Mutex
+	ended          bool
+	onSessionEnded func(message string)
 }
 
 // New 创建客户端。
@@ -40,11 +45,32 @@ func (c *Client) Base() string { return c.base }
 // SetBase 切换管理服务地址（登录页可修改）。
 func (c *Client) SetBase(base string) { c.base = strings.TrimRight(base, "/") }
 
-// SetToken 设置访问令牌。
-func (c *Client) SetToken(t string) { c.token = t }
+// SetToken 设置访问令牌。非空令牌会重新允许会话失效回调。
+func (c *Client) SetToken(t string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = t
+	if t != "" {
+		c.ended = false
+	}
+}
 
 // Token 返回当前令牌。
-func (c *Client) Token() string { return c.token }
+func (c *Client) Token() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.token
+}
+
+// SetOnSessionEnded 在已登录请求收到 401 时回调一次。
+//
+// 用于把「已在其他端登录」带回界面并清掉本地会话。回调里不要再发会
+// 触发同一次 401 的请求，否则只会得到已经被清掉的令牌。
+func (c *Client) SetOnSessionEnded(fn func(message string)) {
+	c.mu.Lock()
+	c.onSessionEnded = fn
+	c.mu.Unlock()
+}
 
 // APIError 是管理服务返回的业务错误。
 type APIError struct {
@@ -62,7 +88,25 @@ func IsAuthError(err error) bool {
 		return false
 	}
 	return ae.Code == "API_4010" || ae.Code == "AUTH_4005" || ae.Code == "AUTH_4006" ||
-		strings.HasPrefix(ae.Code, "AUTH_")
+		ae.Code == "AUTH_4009" || strings.HasPrefix(ae.Code, "AUTH_")
+}
+
+// IsKicked 判断是否因为在另一端登录而被踢下线。
+func IsKicked(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.Code == "AUTH_4009" || strings.Contains(ae.Message, "已在其他端登录")
+}
+
+func sessionEndedCode(code string) bool {
+	switch code {
+	case "API_4010", "AUTH_4005", "AUTH_4006", "AUTH_4009":
+		return true
+	default:
+		return false
+	}
 }
 
 type envelope struct {
@@ -85,8 +129,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	token := c.Token()
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -103,12 +148,40 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("服务端响应格式异常（HTTP %d）", resp.StatusCode)
 	}
 	if env.Code != "OK" {
+		// 只有这次请求确实带了令牌，401 才表示“当前会话没了”。
+		// 登录失败是 AUTH_4001，不能把尚未建立的会话清掉。
+		if token != "" && sessionEndedCode(env.Code) {
+			c.markSessionEnded(env.Code, env.Message)
+		}
 		return &APIError{Code: env.Code, Message: env.Message, Status: resp.StatusCode}
 	}
 	if out == nil || len(env.Data) == 0 {
 		return nil
 	}
 	return json.Unmarshal(env.Data, out)
+}
+
+func (c *Client) markSessionEnded(code, msg string) {
+	c.mu.Lock()
+	if c.ended {
+		c.mu.Unlock()
+		return
+	}
+	c.ended = true
+	c.token = ""
+	fn := c.onSessionEnded
+	c.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if strings.TrimSpace(msg) == "" {
+		if code == "AUTH_4009" {
+			msg = "已在其他端登录"
+		} else {
+			msg = "登录状态已失效，请重新登录"
+		}
+	}
+	fn(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +332,7 @@ func captchaImageOK(resp *http.Response, raw []byte) bool {
 func (c *Client) Login(ctx context.Context, username, password, totp, captchaID, captchaCode string) (*LoginResult, error) {
 	body := map[string]any{
 		"username": username, "password": password, "totp_code": totp,
+		"client_type": "desktop",
 	}
 	if id := strings.TrimSpace(captchaID); id != "" {
 		body["captcha_id"] = id
@@ -270,7 +344,7 @@ func (c *Client) Login(ctx context.Context, username, password, totp, captchaID,
 	if err := c.do(ctx, http.MethodPost, "/api/v1/auth/login", body, &out); err != nil {
 		return nil, err
 	}
-	c.token = out.AccessToken
+	c.SetToken(out.AccessToken)
 	return &out, nil
 }
 
@@ -286,7 +360,7 @@ func (c *Client) Me(ctx context.Context) (*LoginResult, error) {
 // Logout 通知服务端登出。
 func (c *Client) Logout(ctx context.Context) error {
 	err := c.do(ctx, http.MethodPost, "/api/v1/auth/logout", nil, nil)
-	c.token = ""
+	c.SetToken("")
 	return err
 }
 
@@ -336,7 +410,7 @@ func (c *Client) VerifyMFA(ctx context.Context, challengeID, code string) (*Logi
 		Login *LoginResult `json:"login"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{
-		"challenge_id": challengeID, "code": code,
+		"challenge_id": challengeID, "code": code, "client_type": "desktop",
 	}, &wrap); err != nil {
 		return nil, err
 	}

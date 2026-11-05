@@ -79,7 +79,7 @@ export function fetchUKeyChallenge(challengeId: string) {
 export function ukeyLogin(assertion: UKeyLoginAssertion) {
   return request<UKeyLoginResult>('/auth/ukey/login', {
     method: 'POST',
-    body: assertion,
+    body: { ...assertion, client_type: 'web' },
     auth: false,
   })
 }

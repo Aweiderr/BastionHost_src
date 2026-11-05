@@ -160,6 +160,9 @@ func TestLoginSendsCaptchaFields(t *testing.T) {
 	if body["username"] != "ops02" || body["password"] != "secret" {
 		t.Fatalf("credentials = %#v", body)
 	}
+	if body["client_type"] != "desktop" {
+		t.Fatalf("desktop login must identify itself, body=%#v", body)
+	}
 }
 
 func TestLoginOmitsEmptyCaptcha(t *testing.T) {

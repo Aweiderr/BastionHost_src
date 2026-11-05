@@ -104,7 +104,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			httpx.FailCode(w, "API_4010")
 			return
 		}
-		claims, err := s.auth.VerifyToken(token)
+		claims, err := s.auth.VerifyToken(r.Context(), token)
 		if err != nil {
 			writeAuthError(w, err)
 			return
@@ -243,12 +243,30 @@ func (s *Server) logPermissionDenied(r *http.Request, perms ...string) {
 
 // writeAuthError 把认证错误映射为响应。
 func writeAuthError(w http.ResponseWriter, err error) {
+	if be := authStatusError(err); be != nil {
+		httpx.Fail(w, be)
+		return
+	}
+	httpx.FailCode(w, "API_4010")
+}
+
+// authStatusError 把令牌错误译成统一错误码。
+//
+// 被另一端踢下线必须单独用 AUTH_4009，文案固定为「已在其他端登录」。
+// 主动登出和普通过期不能共用这句，否则用户无法判断该不该去另一端看一眼。
+func authStatusError(err error) *errcode.Error {
 	switch {
+	case errors.Is(err, auth.ErrKickedByOtherClient):
+		return errcode.New(errcode.ErrKickedByOtherClient, auth.ErrKickedByOtherClient.Error())
+	case errors.Is(err, auth.ErrKickedBySameClient):
+		return errcode.New(errcode.ErrKickedByOtherClient, auth.ErrKickedBySameClient.Error())
+	case errors.Is(err, auth.ErrSessionRevoked):
+		return errcode.New(errcode.ErrTokenInvalid, auth.ErrSessionRevoked.Error())
 	case errors.Is(err, auth.ErrTokenExpired):
-		httpx.FailCode(w, "AUTH_4005")
+		return errcode.New(errcode.ErrTokenExpired, errcode.MessageOf(errcode.ErrTokenExpired))
 	case errors.Is(err, auth.ErrTokenInvalid), errors.Is(err, auth.ErrTokenMalformed):
-		httpx.FailCode(w, "AUTH_4006")
+		return errcode.New(errcode.ErrTokenInvalid, errcode.MessageOf(errcode.ErrTokenInvalid))
 	default:
-		httpx.FailCode(w, "API_4010")
+		return nil
 	}
 }

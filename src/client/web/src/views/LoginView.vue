@@ -59,6 +59,15 @@ onBeforeUnmount(() => {
 // 不传用户名：always 模式下的判定与账号无关，传空即可。
 onMounted(async () => {
   try {
+    const ended = window.sessionStorage.getItem('bastion.auth.ended')
+    if (ended) {
+      errorText.value = ended
+      window.sessionStorage.removeItem('bastion.auth.ended')
+    }
+  } catch {
+    /* 读不到时登录页仍可正常使用 */
+  }
+  try {
     const r = await captchaRequired('')
     captchaNeeded.value = r.required
     if (captchaNeeded.value) await refreshCaptcha()

@@ -34,6 +34,19 @@ type AuthService struct {
 	loginLog *repo.LoginLogRepo
 	// ukey UKey 证书认证服务；为 nil 时 ukey 类型的第二因子不可用
 	ukey *UKeyService
+	// sessions 登录会话登记。签发时写入 jti，另一端登录或登出时作废。
+	//
+	// 默认是进程内实现，管理服务启动后会换成数据库实现。
+	// 为 nil 时不踢人、登出也不作废（仅用于尚未装配的场景）。
+	sessions auth.SessionRegistry
+	// kickOverride 非 nil 时覆盖 sys_config 里的互斥开关，只给测试固定策略。
+	kickOverride *kickFlags
+}
+
+// kickFlags 是登录互斥的两个开关。
+type kickFlags struct {
+	opposite bool
+	same     bool
 }
 
 // SetUKeyService 注入 UKey 证书认证服务。
@@ -162,7 +175,19 @@ func NewAuthService(
 	return &AuthService{
 		userRepo: userRepo, roleRepo: roleRepo, configRepo: configRepo,
 		tm: tm, cfg: cfg, crypto: cryptoHelper,
+		sessions: auth.NewMemorySessionStore(),
 	}
+}
+
+// SetSessionStore 注入登录会话登记。
+//
+// 传入 nil 会关掉互斥与登出作废。生产环境应传入数据库实现，
+// 这样重启后被踢下线的令牌仍然无效，多个管理进程也看得到同一份作废记录。
+func (s *AuthService) SetSessionStore(reg auth.SessionRegistry) {
+	if s == nil {
+		return
+	}
+	s.sessions = reg
 }
 
 // 认证错误
@@ -210,7 +235,7 @@ type LoginResult struct {
 	PasswordExpired    bool     `json:"password_expired"`
 	MFAEnabled         bool     `json:"mfa_enabled"`
 	// CertExpiryHint UKey 证书临期/过期提示（登录成功时带回）
-	CertExpiryHint     string   `json:"cert_expiry_hint,omitempty"`
+	CertExpiryHint string `json:"cert_expiry_hint,omitempty"`
 
 	// ---- MFA 二次认证（账密已通过，等待第二因子）----
 	//
@@ -246,6 +271,12 @@ type LoginResult struct {
 // 第二因子为短信/UKey 时**不签发令牌**，改为返回登录挑战，
 // 由前端弹窗完成二次校验后再换取令牌。
 func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult, error) {
+	ct, err := auth.NormalizeClientType(req.ClientType)
+	if err != nil {
+		return nil, err
+	}
+	req.ClientType = ct
+
 	// 登录日志的公共字段：每次尝试都要留下"谁、从哪来"，
 	// 结果差异由各分支补上。
 	entry := repo.LoginLogInput{
@@ -287,7 +318,7 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 			// 进入第二因子：**这里不算一次成功登录**。
 			// 只有 VerifyMFA 校验通过才算（并标记 mfa_used），
 			// 否则"发出验证码"会被记成一串成功登录。
-			return s.issueSmsChallenge(ctx, u, req.ClientIP, req.UserAgent)
+			return s.issueSmsChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
 		case "ukey":
 			// UKey 与短信同属"挑战式"第二因子：账密通过后下发一次性挑战原文，
 			// 客户端用 UKey 私钥对它签名，再调 /auth/ukey/login 换取令牌。
@@ -296,13 +327,13 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 			//
 			// 早先这里直接返回"Web 端无法完成 UKey 认证"，等于把功能做成了死路；
 			// 现在改走挑战流程后，Web 端与桌面客户端用的是同一条服务端链路。
-			return s.issueUKeyChallenge(ctx, u, req.ClientIP, req.UserAgent)
+			return s.issueUKeyChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
 		case "totp", "":
 			// TOTP 已在 verifyUser 内校验，走到这里说明已通过
 		}
 	}
 
-	res, err := s.buildLoginResult(ctx, u)
+	res, err := s.issueSessionTokens(ctx, u, req.ClientType, true)
 	entry.MFAUsed = u.MFAEnabled
 	if err != nil {
 		entry.Result, entry.FailReason = "fail", err.Error()
@@ -318,16 +349,16 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 // 与短信 MFA 完全同构：账密已通过才有挑战，挑战一次性、短时效、绑定来源 IP，
 // 且**此时不签发令牌**。区别只在于第二因子的校验方式——
 // 短信靠一次性验证码，UKey 靠"用证书私钥对服务端原文签名"。
-func (s *AuthService) issueUKeyChallenge(ctx context.Context, u *model.User, clientIP, userAgent string) (*LoginResult, error) {
+func (s *AuthService) issueUKeyChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string) (*LoginResult, error) {
 	if s.ukey == nil {
 		return nil, fmt.Errorf("该账号启用了 UKey 认证，但服务端未装配 UKey 证书认证模块，请联系管理员")
 	}
-	ch, err := s.ukey.IssueChallenge(ctx, u, clientIP, userAgent)
+	ch, err := s.ukey.IssueLoginChallenge(ctx, u, clientIP, userAgent, clientType)
 	if err != nil {
 		// 进入第二因子失败同样是一次可追溯的登录尝试
 		s.writeLoginLog(ctx, repo.LoginLogInput{
 			TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
-			LoginType: "password+ukey", ClientType: "web",
+			LoginType: "password+ukey", ClientType: clientType,
 			ClientIP: clientIP, UserAgent: userAgent,
 			Result: "fail", FailReason: err.Error(), MFAUsed: true,
 		})
@@ -350,11 +381,15 @@ func (s *AuthService) VerifyUKeyLogin(ctx context.Context, req UKeyLoginRequest,
 	if s.ukey == nil {
 		return nil, "", fmt.Errorf("UKey 认证未启用")
 	}
+	ct, ctErr := s.clientTypeFromChallenge(ctx, req.ChallengeID, req.ClientType)
+	if ctErr != nil {
+		return nil, "", ctErr
+	}
 	u, _, err := s.ukey.VerifyLogin(ctx, req, clientIP)
 	if err != nil {
 		return nil, "", err
 	}
-	res, err := s.buildLoginResult(ctx, u)
+	res, err := s.issueSessionTokens(ctx, u, ct, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -368,7 +403,7 @@ func (s *AuthService) VerifyUKeyLogin(ctx context.Context, req UKeyLoginRequest,
 // 关键：这里仍**不签发令牌**。挑战是一次性、短时效、绑定用户与来源 IP 的
 // 中间凭据，只有它才能为该账号索取验证码 —— 否则"发送验证码"接口
 // 仅凭手机号即可调用，等于对外开放一个短信发送接口。
-func (s *AuthService) issueSmsChallenge(ctx context.Context, u *model.User, clientIP, userAgent string) (*LoginResult, error) {
+func (s *AuthService) issueSmsChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string) (*LoginResult, error) {
 	if s.sms == nil {
 		return nil, fmt.Errorf("该账号启用了短信二次认证，但服务端未配置短信服务商，请联系管理员")
 	}
@@ -393,7 +428,7 @@ func (s *AuthService) issueSmsChallenge(ctx context.Context, u *model.User, clie
 	c := &repo.LoginChallenge{
 		ChallengeID: id, UserID: u.UserID, Username: u.Username, MFAType: "sms",
 		PhoneMasked: masked, ClientIP: clientIP, UserAgent: userAgent,
-		ExpireTime: time.Now().Add(ttl),
+		ClientType: clientType, ExpireTime: time.Now().Add(ttl),
 	}
 	if err := s.challenges.Create(ctx, c); err != nil {
 		return nil, err
@@ -439,8 +474,16 @@ func (s *AuthService) SendMFAChallenge(ctx context.Context, challengeID, clientI
 }
 
 // VerifyMFA 校验第二因子并签发令牌。
-func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP string) (*LoginResult, string, error) {
+func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP, clientType string) (*LoginResult, string, error) {
 	c, err := s.loadPendingChallenge(ctx, challengeID, clientIP)
+	if err != nil {
+		return nil, "", err
+	}
+	ct := c.ClientType
+	if strings.TrimSpace(ct) == "" {
+		ct = clientType
+	}
+	ct, err = auth.NormalizeClientType(ct)
 	if err != nil {
 		return nil, "", err
 	}
@@ -454,7 +497,7 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 		_ = s.challenges.MarkStatus(ctx, c.ChallengeID, repo.ChallengeFailed)
 		s.writeLoginLog(ctx, repo.LoginLogInput{
 			TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
-			LoginType: "password+" + c.MFAType, ClientType: "web",
+			LoginType: "password+" + c.MFAType, ClientType: ct,
 			ClientIP: clientIP, UserAgent: c.UserAgent,
 			Result: "fail", FailReason: "第二因子尝试次数已达上限", MFAUsed: true,
 		})
@@ -475,7 +518,7 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 			// 第二因子失败同样是一次可追溯的登录尝试
 			s.writeLoginLog(ctx, repo.LoginLogInput{
 				TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
-				LoginType: "password+" + c.MFAType, ClientType: "web",
+				LoginType: "password+" + c.MFAType, ClientType: ct,
 				ClientIP: clientIP, UserAgent: c.UserAgent,
 				Result: "fail", FailReason: reason, MFAUsed: true,
 			})
@@ -492,7 +535,7 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 		slog.Warn("标记挑战完成失败", "challenge_id", challengeID, "err", err)
 	}
 
-	res, err := s.buildLoginResult(ctx, u)
+	res, err := s.issueSessionTokens(ctx, u, ct, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -503,7 +546,7 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 	slog.Info("二次认证通过，登录成功", "username", u.Username, "auth_method", authMethod, "ip", clientIP)
 	s.writeLoginLog(ctx, repo.LoginLogInput{
 		TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
-		LoginType: authMethod, ClientType: "web",
+		LoginType: authMethod, ClientType: ct,
 		ClientIP: clientIP, UserAgent: c.UserAgent,
 		Result: "success", MFAUsed: true,
 	})
@@ -565,7 +608,7 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password, totp
 		return nil, nil, nil, err
 	}
 	// 运维入口（SSH 网关）不允许口令过期用户继续接入；
-	// Web 登录仍走 Login→buildLoginResult，只返回标志位并引导改密。
+	// Web 登录仍走 Login→issueSessionTokens，只返回标志位并引导改密。
 	if u.PasswordExpired() || u.MustChangePassword {
 		return nil, nil, nil, ErrPasswordExpired
 	}
@@ -600,6 +643,9 @@ func (s *AuthService) AuthenticateByToken(ctx context.Context, token string) (*m
 	}
 	if claims.Scope != "" && claims.Scope != auth.ScopeAccess {
 		return nil, nil, nil, ErrInvalidCredential
+	}
+	if err := s.rejectIfRevoked(ctx, claims.TokenID); err != nil {
+		return nil, nil, nil, err
 	}
 	u, err := s.userRepo.GetByID(ctx, claims.UserID)
 	if err != nil {
@@ -665,28 +711,93 @@ func (s *AuthService) verifyUser(ctx context.Context, username, password, totpCo
 	return u, nil
 }
 
-// buildLoginResult 组装登录结果并签发令牌。
-func (s *AuthService) buildLoginResult(ctx context.Context, u *model.User) (*LoginResult, error) {
-	roles, _ := s.userRepo.ListRoles(ctx, u.UserID)
-	perms, _ := s.roleRepo.ListUserPermissions(ctx, u.UserID)
+// issueSessionTokens 组装登录结果并签发一对新令牌。
+//
+// kick 为 true 时按配置作废其它会话：默认只踢另一端，同一端的旧会话保留。
+// 刷新令牌换发新令牌时 kick 必须为 false，否则用户一切页面就会把自己踢下线。
+//
+// 每对令牌都有独立的 jti，不在 Web 和桌面之间共用同一个令牌。
+func (s *AuthService) issueSessionTokens(ctx context.Context, u *model.User, clientType string, kick bool) (*LoginResult, error) {
+	ct, err := auth.NormalizeClientType(clientType)
+	if err != nil {
+		return nil, err
+	}
+	var roles, perms []string
+	if s.userRepo != nil {
+		roles, _ = s.userRepo.ListRoles(ctx, u.UserID)
+	}
+	if s.roleRepo != nil {
+		perms, _ = s.roleRepo.ListUserPermissions(ctx, u.UserID)
+	}
+	accessTTL := 30 * time.Minute
+	refreshTTL := 8 * time.Hour
+	if s.cfg != nil {
+		if s.cfg.Auth.AccessTokenTTL > 0 {
+			accessTTL = s.cfg.Auth.AccessTokenTTL
+		}
+		if s.cfg.Auth.RefreshTokenTTL > 0 {
+			refreshTTL = s.cfg.Auth.RefreshTokenTTL
+		}
+	}
+
+	accessID, err := auth.RandomToken(16)
+	if err != nil {
+		return nil, err
+	}
+	refreshID, err := auth.RandomToken(16)
+	if err != nil {
+		return nil, err
+	}
+	familyID, err := auth.RandomToken(16)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	if s.sessions != nil {
+		if err := s.sessions.Save(ctx, auth.IssuedSession{
+			JTI: accessID, UserID: u.UserID, ClientType: ct, Scope: auth.ScopeAccess,
+			FamilyID: familyID, ExpiresAt: now.Add(accessTTL),
+		}); err != nil {
+			return nil, fmt.Errorf("登记访问令牌失败: %w", err)
+		}
+		if err := s.sessions.Save(ctx, auth.IssuedSession{
+			JTI: refreshID, UserID: u.UserID, ClientType: ct, Scope: auth.ScopeRefresh,
+			FamilyID: familyID, ExpiresAt: now.Add(refreshTTL),
+		}); err != nil {
+			_ = s.sessions.RevokeFamily(ctx, accessID, auth.RevokeReasonLogout)
+			return nil, fmt.Errorf("登记刷新令牌失败: %w", err)
+		}
+		if kick {
+			if err := s.kickOnLogin(ctx, u.UserID, ct, []string{accessID, refreshID}); err != nil {
+				_ = s.sessions.RevokeFamily(ctx, accessID, auth.RevokeReasonLogout)
+				return nil, err
+			}
+		}
+	}
 
 	accessToken, err := s.tm.Issue(auth.Claims{
 		UserID: u.UserID, Username: u.Username, TenantID: u.TenantID,
-		Roles: roles, Scope: auth.ScopeAccess,
-	}, s.cfg.Auth.AccessTokenTTL)
+		Roles: roles, Scope: auth.ScopeAccess, TokenID: accessID,
+	}, accessTTL)
 	if err != nil {
+		if s.sessions != nil {
+			_ = s.sessions.RevokeFamily(ctx, accessID, auth.RevokeReasonLogout)
+		}
 		return nil, err
 	}
 	refreshToken, err := s.tm.Issue(auth.Claims{
 		UserID: u.UserID, Username: u.Username, TenantID: u.TenantID,
-		Scope: auth.ScopeRefresh,
-	}, s.cfg.Auth.RefreshTokenTTL)
+		Scope: auth.ScopeRefresh, TokenID: refreshID,
+	}, refreshTTL)
 	if err != nil {
+		if s.sessions != nil {
+			_ = s.sessions.RevokeFamily(ctx, accessID, auth.RevokeReasonLogout)
+		}
 		return nil, err
 	}
 	res := &LoginResult{
 		AccessToken: accessToken, RefreshToken: refreshToken, TokenType: "Bearer",
-		ExpiresIn: int64(s.cfg.Auth.AccessTokenTTL.Seconds()),
+		ExpiresIn: int64(accessTTL.Seconds()),
 		UserID:    u.UserID, Username: u.Username, DisplayName: u.DisplayName,
 		Roles: roles, Permissions: perms,
 		MustChangePassword: u.MustChangePassword, PasswordExpired: u.PasswordExpired(),
@@ -696,6 +807,74 @@ func (s *AuthService) buildLoginResult(ctx context.Context, u *model.User) (*Log
 		res.CertExpiryHint = s.ukey.CertExpiryHint(ctx, u.UserID, 30)
 	}
 	return res, nil
+}
+
+// kickOnLogin 按配置作废其它会话。新登录自己的 jti 在 keep 里，不会被自己踢掉。
+func (s *AuthService) kickOnLogin(ctx context.Context, userID int64, clientType string, keep []string) error {
+	if s.sessions == nil {
+		return nil
+	}
+	if s.kickOppositeEnabled(ctx) {
+		other := auth.OppositeClient(clientType)
+		n, err := s.sessions.RevokeClient(ctx, userID, other, auth.RevokeReasonOpposite, nil)
+		if err != nil {
+			return fmt.Errorf("撤销另一端会话失败: %w", err)
+		}
+		if n > 0 {
+			slog.Info("已撤销另一端登录会话", "user_id", userID, "login_client", clientType, "revoked_client", other, "count", n)
+		}
+	}
+	if s.kickSameEnabled(ctx) {
+		n, err := s.sessions.RevokeClient(ctx, userID, clientType, auth.RevokeReasonSame, keep)
+		if err != nil {
+			return fmt.Errorf("撤销本端其它会话失败: %w", err)
+		}
+		if n > 0 {
+			slog.Info("已撤销本端其它登录会话", "user_id", userID, "client", clientType, "count", n)
+		}
+	}
+	return nil
+}
+
+func (s *AuthService) kickOppositeEnabled(ctx context.Context) bool {
+	if s != nil && s.kickOverride != nil {
+		return s.kickOverride.opposite
+	}
+	return s.cfgBool(ctx, "auth.kick_opposite_client", true)
+}
+
+func (s *AuthService) kickSameEnabled(ctx context.Context) bool {
+	if s != nil && s.kickOverride != nil {
+		return s.kickOverride.same
+	}
+	return s.cfgBool(ctx, "auth.kick_same_client", false)
+}
+
+// clientTypeFromChallenge 优先用账密阶段记下的客户端类型。
+func (s *AuthService) clientTypeFromChallenge(ctx context.Context, challengeID, fallback string) (string, error) {
+	if s.challenges != nil && strings.TrimSpace(challengeID) != "" {
+		c, err := s.challenges.Get(ctx, challengeID)
+		if err == nil && c != nil && strings.TrimSpace(c.ClientType) != "" {
+			return auth.NormalizeClientType(c.ClientType)
+		}
+	}
+	return auth.NormalizeClientType(fallback)
+}
+
+// rejectIfRevoked 在 jti 已被作废时返回对应错误。
+func (s *AuthService) rejectIfRevoked(ctx context.Context, jti string) error {
+	if s == nil || s.sessions == nil || jti == "" {
+		return nil
+	}
+	return s.sessions.Rejection(ctx, jti)
+}
+
+// Logout 作废当前访问令牌所属的整次登录（含刷新令牌）。
+func (s *AuthService) Logout(ctx context.Context, jti string) error {
+	if s == nil || s.sessions == nil || strings.TrimSpace(jti) == "" {
+		return nil
+	}
+	return s.sessions.RevokeFamily(ctx, jti, auth.RevokeReasonLogout)
 }
 
 // onLoginFail 处理登录失败：计数并按阈值锁定。
@@ -717,6 +896,9 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (*LoginR
 	if err != nil {
 		return nil, err
 	}
+	if err := s.rejectIfRevoked(ctx, claims.TokenID); err != nil {
+		return nil, err
+	}
 	u, err := s.userRepo.GetByID(ctx, claims.UserID)
 	if err != nil {
 		return nil, err
@@ -724,12 +906,28 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (*LoginR
 	if !u.IsActive() {
 		return nil, ErrAccountDisabled
 	}
-	return s.buildLoginResult(ctx, u)
+	// 刷新不是一次新登录：沿用原会话的客户端类型，也不再踢人。
+	ct := auth.ClientWeb
+	if s.sessions != nil {
+		if got, ok, err := s.sessions.ClientType(ctx, claims.TokenID); err != nil {
+			return nil, err
+		} else if ok && got != "" {
+			ct = got
+		}
+	}
+	return s.issueSessionTokens(ctx, u, ct, false)
 }
 
-// VerifyToken 校验访问令牌。
-func (s *AuthService) VerifyToken(token string) (*auth.Claims, error) {
-	return s.tm.VerifyScope(token, auth.ScopeAccess)
+// VerifyToken 校验访问令牌，并拒绝已被作废的 jti。
+func (s *AuthService) VerifyToken(ctx context.Context, token string) (*auth.Claims, error) {
+	claims, err := s.tm.VerifyScope(token, auth.ScopeAccess)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.rejectIfRevoked(ctx, claims.TokenID); err != nil {
+		return nil, err
+	}
+	return claims, nil
 }
 
 // VerifySetupToken 校验初始化阶段临时令牌。

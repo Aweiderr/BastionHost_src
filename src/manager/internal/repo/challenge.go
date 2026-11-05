@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,11 +46,14 @@ type LoginChallenge struct {
 	// 降级为"证明能对任意数据签名"（而任何签名工具都能做到）。
 	SignData string
 	// CertID 本次校验通过的客户端证书 km_cert.cert_id（审计追溯用）
-	CertID       *int64
-	Status       string
-	Attempts     int
-	ClientIP     string
-	UserAgent    string
+	CertID    *int64
+	Status    string
+	Attempts  int
+	ClientIP  string
+	UserAgent string
+	// ClientType 发起这次登录的一端：web / desktop。
+	// 第二因子通过后按它签发令牌，避免完成挑战的请求改口。
+	ClientType   string
 	ExpireTime   time.Time
 	CompleteTime *time.Time
 	CreateTime   time.Time
@@ -62,6 +66,14 @@ type ChallengeRepo struct {
 
 // NewChallengeRepo 创建仓储。
 func NewChallengeRepo(pool *pgxpool.Pool) *ChallengeRepo { return &ChallengeRepo{pool: pool} }
+
+// challengeClientType 只接受登录互斥认识的两类，其它值按 web 落库。
+func challengeClientType(raw string) string {
+	if strings.EqualFold(strings.TrimSpace(raw), "desktop") {
+		return "desktop"
+	}
+	return "web"
+}
 
 // NewChallengeID 生成不可猜测的挑战标识。
 //
@@ -79,12 +91,12 @@ func NewChallengeID() (string, error) {
 func (r *ChallengeRepo) Create(ctx context.Context, c *LoginChallenge) error {
 	const q = `INSERT INTO sys_login_challenge
 		(challenge_id, user_id, username, mfa_type, phone_masked, challenge_nonce, sign_data,
-		 status, client_ip, user_agent, expire_time)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10)
+		 status, client_ip, user_agent, client_type, expire_time)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11)
 		RETURNING create_time`
 	err := r.pool.QueryRow(ctx, q, c.ChallengeID, c.UserID, c.Username, c.MFAType,
 		nullIfEmpty(c.PhoneMasked), nullIfEmpty(c.Nonce), nullIfEmpty(c.SignData),
-		nullIfEmpty(c.ClientIP), nullIfEmpty(c.UserAgent), c.ExpireTime,
+		nullIfEmpty(c.ClientIP), nullIfEmpty(c.UserAgent), challengeClientType(c.ClientType), c.ExpireTime,
 	).Scan(&c.CreateTime)
 	if err != nil {
 		return fmt.Errorf("创建登录挑战失败: %w", err)
@@ -98,12 +110,13 @@ func (r *ChallengeRepo) Get(ctx context.Context, challengeID string) (*LoginChal
 	const q = `SELECT challenge_id, user_id, username, mfa_type, COALESCE(phone_masked,''),
 		COALESCE(challenge_nonce,''), COALESCE(sign_data,''), cert_id,
 		status, attempts, COALESCE(client_ip,''), COALESCE(user_agent,''),
+		COALESCE(client_type,'web'),
 		expire_time, complete_time, create_time
 	  FROM sys_login_challenge WHERE challenge_id = $1`
 	var c LoginChallenge
 	err := r.pool.QueryRow(ctx, q, challengeID).Scan(&c.ChallengeID, &c.UserID, &c.Username,
 		&c.MFAType, &c.PhoneMasked, &c.Nonce, &c.SignData, &c.CertID,
-		&c.Status, &c.Attempts, &c.ClientIP, &c.UserAgent,
+		&c.Status, &c.Attempts, &c.ClientIP, &c.UserAgent, &c.ClientType,
 		&c.ExpireTime, &c.CompleteTime, &c.CreateTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

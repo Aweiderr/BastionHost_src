@@ -133,12 +133,13 @@ func (s *Server) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ChallengeID string `json:"challenge_id"`
 		Code        string `json:"code"`
+		ClientType  string `json:"client_type"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	res, authMethod, err := s.auth.VerifyMFA(r.Context(), req.ChallengeID, req.Code, clientIP(r))
+	res, authMethod, err := s.auth.VerifyMFA(r.Context(), req.ChallengeID, req.Code, clientIP(r), req.ClientType)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -175,10 +176,14 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout 登出。
 //
-// 令牌为无状态签名令牌，登出由客户端丢弃令牌完成；
-// 此处返回成功以便前端统一处理（后续可在此实现令牌黑名单）。
+// 作废当前访问令牌所属的整次登录（含刷新令牌）。客户端仍应丢弃本地令牌；
+// 服务端作废后，即使令牌泄露也不能再通过 requireAuth。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
+	if err := s.auth.Logout(r.Context(), claims.TokenID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	httpx.OK(w, map[string]any{
 		"logged_out": true,
 		"user_id":    claims.UserID,
@@ -268,6 +273,10 @@ func (s *Server) handleTOTPUnbind(w http.ResponseWriter, r *http.Request) {
 
 // writeServiceError 把业务错误映射为统一错误码响应。
 func writeServiceError(w http.ResponseWriter, err error) {
+	if be := authStatusError(err); be != nil {
+		httpx.Fail(w, be)
+		return
+	}
 	switch {
 	case errors.Is(err, service.ErrInvalidCredential):
 		httpx.FailCode(w, "AUTH_4001")

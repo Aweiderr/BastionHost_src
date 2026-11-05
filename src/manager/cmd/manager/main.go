@@ -227,6 +227,8 @@ func main() {
 		// 业务服务
 		setupSvc = service.NewSetupService(userRepo, roleRepo, configRepo, initRepo, prov, tm, cfg)
 		authSvc = service.NewAuthService(userRepo, roleRepo, configRepo, tm, cfg, cryptoHelper)
+		// 登录互斥必须落库：进程内表在重启后会忘掉“已踢下线”，多实例也彼此看不见。
+		authSvc.SetSessionStore(repo.NewAuthSessionRepo(pool))
 		assetSvc = service.NewAssetService(assetRepo, repo.NewAssetGroupRepo(pool), accountRepo, cryptoHelper, oplogRepo)
 		userSvc = service.NewUserService(userRepo, roleRepo, oplogRepo, authSvc)
 		policySvc = service.NewPolicyService(policyRepo, configRepo, oplogRepo)

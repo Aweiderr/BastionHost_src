@@ -179,7 +179,7 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 	acancel()
 	if err != nil {
 		slog.Info("图形会话令牌校验失败", "remote", remoteIP, "err", err)
-		fail("登录状态已失效，请重新登录")
+		fail(authDeniedMessage(err))
 		return
 	}
 	if !hasPermission(ident.Permissions, "ops:session:connect") {

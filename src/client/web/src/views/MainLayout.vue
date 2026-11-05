@@ -61,6 +61,7 @@ const ENTRY_RE = /src="([^"]*\/assets\/index-[^"]+\.js)"/
 let currentEntry = ''
 let reloadTipShown = false
 let versionTimer: number | null = null
+let sessionTimer: number | null = null
 
 function readEntryFromDom(): string {
   const el = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/"]')
@@ -84,14 +85,35 @@ async function checkFrontendVersion(): Promise<void> {
   }
 }
 
+/**
+ * 被另一端踢下线不会推送。停留在页面上时定期拉一次 /auth/me，
+ * 401 由 http 层清会话并提示「已在其他端登录」。
+ */
+async function checkSession(): Promise<void> {
+  if (!auth.isAuthenticated) return
+  try {
+    await auth.fetchMe()
+  } catch {
+    /* 网络错误保持现状；会话失效已在 http 层处理 */
+  }
+}
+
+function onVisible(): void {
+  if (document.visibilityState === 'visible') void checkSession()
+}
+
 onMounted(() => {
   const entry = readEntryFromDom()
   currentEntry = entry ? new URL(entry, window.location.origin).pathname : ''
   versionTimer = window.setInterval(() => void checkFrontendVersion(), 3 * 60 * 1000)
+  sessionTimer = window.setInterval(() => void checkSession(), 15 * 1000)
+  document.addEventListener('visibilitychange', onVisible)
 })
 
 onBeforeUnmount(() => {
   if (versionTimer !== null) window.clearInterval(versionTimer)
+  if (sessionTimer !== null) window.clearInterval(sessionTimer)
+  document.removeEventListener('visibilitychange', onVisible)
 })
 
 async function handleLogout(): Promise<void> {

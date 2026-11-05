@@ -68,6 +68,11 @@ export interface LoginPayload {
   /** 图形验证码标识；仅在连续失败达到阈值后由前端附带 */
   captcha_id?: string
   captcha_code?: string
+  /**
+   * 登录端类型。Web 固定为 web，桌面客户端为 desktop。
+   * 服务端据此在登录成功后作废另一端的会话。
+   */
+  client_type?: 'web' | 'desktop'
 }
 
 export interface LoginResult {
@@ -930,6 +935,8 @@ export interface UKeyLoginAssertion {
   src_data: string
   /** base64 签名值（DER 或裸 r||s 都支持） */
   signature: string
+  /** 登录端。Web 封装会补上 web，桌面客户端传 desktop。 */
+  client_type?: 'web' | 'desktop'
 }
 
 /** UKey 登录结果：与其它第二因子的返回结构保持一致，便于复用同一套落地逻辑 */

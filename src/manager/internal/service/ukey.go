@@ -632,8 +632,17 @@ type UKeyChallenge struct {
 //
 // 必须由"账密已通过"的路径调用（见 AuthService.Login）：挑战是第二因子的
 // 入口凭据，若只凭用户名就能领取，接口本身就成了账号探测与签名服务。
+// 未标明客户端时按 web 记录。登录主路径应使用 IssueLoginChallenge。
 func (s *UKeyService) IssueChallenge(ctx context.Context, u *model.User, clientIP, userAgent string) (*UKeyChallenge, error) {
-	return s.issueChallenge(ctx, u, clientIP, userAgent, true)
+	return s.issueChallenge(ctx, u, clientIP, userAgent, "", true)
+}
+
+// IssueLoginChallenge 与 IssueChallenge 相同，但记下发起登录的客户端。
+//
+// 第二因子通过后要按这个类型签发令牌：桌面登录不能在验签时被改记成 web，
+// 否则互斥会踢错一端。
+func (s *UKeyService) IssueLoginChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string) (*UKeyChallenge, error) {
+	return s.issueChallenge(ctx, u, clientIP, userAgent, clientType, true)
 }
 
 // IssueCertIssueChallenge 为"提交公钥签发证书"下发持有证明挑战。
@@ -651,11 +660,11 @@ func (s *UKeyService) IssueCertIssueChallenge(ctx context.Context, userID int64,
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法为其签发证书", u.Username)
 	}
-	return s.issueChallenge(ctx, u, clientIP, userAgent, false)
+	return s.issueChallenge(ctx, u, clientIP, userAgent, "", false)
 }
 
 // issueChallenge 是两类挑战（登录 / 签发持有证明）的公共实现。
-func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientIP, userAgent string, requireEnabled bool) (*UKeyChallenge, error) {
+func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string, requireEnabled bool) (*UKeyChallenge, error) {
 	if u == nil {
 		return nil, ErrInvalidCredential
 	}
@@ -683,10 +692,13 @@ func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientI
 	}
 	signData := BuildUKeySignData(u.Username, nonce)
 
+	if strings.TrimSpace(clientType) == "" {
+		clientType = "web"
+	}
 	c := &repo.LoginChallenge{
 		ChallengeID: id, UserID: u.UserID, Username: u.Username, MFAType: ukeyMFAType,
 		Nonce: nonce, SignData: signData,
-		ClientIP: clientIP, UserAgent: userAgent,
+		ClientIP: clientIP, UserAgent: userAgent, ClientType: clientType,
 		ExpireTime: time.Now().Add(ttl),
 	}
 	if err := s.challenges.Create(ctx, c); err != nil {
@@ -740,6 +752,8 @@ type UKeyLoginRequest struct {
 	SrcData string `json:"src_data"`
 	// Signature 对上述字节的签名（base64；DER 或裸 r||s）
 	Signature string `json:"signature"`
+	// ClientType 发起登录的一端。挑战里已经记过时以挑战为准，这里只是兜底。
+	ClientType string `json:"client_type,omitempty"`
 }
 
 // VerifyLogin 校验 UKey 断言；通过后返回用户，由调用方（认证服务）发放令牌。
@@ -873,9 +887,13 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 	_ = s.users.UpdateLoginSuccess(ctx, u.UserID, clientIP)
 	slog.Info("UKey 二次认证通过", "username", u.Username,
 		"challenge_id", c.ChallengeID, "serial", res.Identity.SerialNumber, "ip", clientIP)
+	loggedClient := c.ClientType
+	if strings.TrimSpace(loggedClient) == "" {
+		loggedClient = "web"
+	}
 	s.writeLoginLog(ctx, repo.LoginLogInput{
 		TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
-		LoginType: "password+ukey", ClientType: "client",
+		LoginType: "password+ukey", ClientType: loggedClient,
 		ClientIP: clientIP, UserAgent: c.UserAgent,
 		Result: "success", MFAUsed: true,
 	})

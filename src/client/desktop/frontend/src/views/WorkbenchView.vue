@@ -6,7 +6,7 @@
  * RDP / VNC 走同一条 /api/v1/webdesktop：Go 拨号（不带浏览器 Origin），
  * 像素以 desk:frame 推到画布，键鼠 JSON 原样写回。帧格式与 Web 端
  * desktopFrame.ts 相同，局部更新（含 TigerVNC LastRect 拆开后的脏矩形）
- * 直接画到对应坐标。目标口令不下发到界面，未托管时只弹出一次输入框。
+ * 按坐标画到画布。JPEG 帧按到达顺序解码。目标口令不下发到界面，未托管时只弹出一次输入框。
  *
  * Oracle 只打开客户端连接说明（网关、SERVICE_NAME、sqlplus、JDBC）。
  * 口令保持占位符，不在本窗口建立数据库会话。
@@ -20,7 +20,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
 import { base64ToBytes, strToBase64 } from '../utils/base64'
-import { keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
+import { BitmapProtocolError, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
   DB_PASSWORD_PLACEHOLDER,
@@ -84,6 +84,7 @@ const activeKey = ref('')
 
 const hosts = new Map<string, HTMLElement>()
 const canvases = new Map<string, HTMLCanvasElement>()
+const paintQueues = new Map<string, Promise<void>>()
 const runtimes = new Map<string, TermRuntime>()
 
 const activeTab = computed(() => tabs.value.find((t) => t.key === activeKey.value) || null)
@@ -109,7 +110,7 @@ onMounted(async () => {
   EventsOn('desk:frame', (payload: any) => {
     if (!payload?.key) return
     try {
-      paintFrame(String(payload.key), base64ToBytes(String(payload.data || '')))
+      enqueueDesktopFrame(String(payload.key), base64ToBytes(String(payload.data || '')))
     } catch (e) {
       console.error(e)
     }
@@ -200,16 +201,33 @@ function applyCanvasSize(canvas: HTMLCanvasElement, w: number, h: number) {
   if (canvas.height !== height) canvas.height = height
 }
 
-function paintFrame(key: string, bytes: Uint8Array) {
+function enqueueDesktopFrame(key: string, bytes: Uint8Array): void {
+  const prev = paintQueues.get(key) ?? Promise.resolve()
+  const next = prev.then(() => drawDesktopFrame(key, bytes)).catch((err: unknown) => {
+    if (!(err instanceof BitmapProtocolError)) {
+      console.error(err)
+      return
+    }
+    const tab = tabs.value.find((t) => t.key === key)
+    if (!tab || tab.kind !== 'desktop' || tab.message) return
+    tab.message = err.message
+    tab.status = 'closed'
+    notify(err.message, 'err')
+    CloseDesktopSession(key).catch(() => {})
+  })
+  paintQueues.set(key, next)
+}
+
+async function drawDesktopFrame(key: string, bytes: Uint8Array): Promise<void> {
   const tab = tabs.value.find((t) => t.key === key)
-  if (!tab || tab.kind !== 'desktop') return
+  if (!tab || tab.kind !== 'desktop' || tab.status === 'closed') return
   const frame = parseBitmap(bytes)
   if (!frame) return
   const canvas = canvases.get(key)
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  paintBitmap(ctx, frame)
+  await paintBitmap(ctx, frame)
 }
 
 function handleDeskControl(key: string, raw: string) {

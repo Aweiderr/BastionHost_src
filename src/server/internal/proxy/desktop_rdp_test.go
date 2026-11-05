@@ -53,10 +53,10 @@ func TestMarshalBitmapHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(raw[:2]) != "BM" || raw[2] != 0 || raw[3] != 1 || raw[5] != 2 || raw[7] != 1 || raw[9] != 1 {
+	if string(raw[:2]) != bitmapMagicJPEG || raw[2] != 0 || raw[3] != 1 || raw[5] != 2 || raw[7] != 1 || raw[9] != 1 || raw[10] != bitmapEncodingJPEG {
 		t.Fatalf("header %v", raw[:12])
 	}
-	if raw[12] != 9 {
-		t.Fatalf("pixel %v", raw[12:])
+	if raw[12] != 0xff || raw[13] != 0xd8 {
+		t.Fatalf("jpeg %v", raw[12:14])
 	}
 }

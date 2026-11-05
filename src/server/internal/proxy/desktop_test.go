@@ -63,12 +63,16 @@ func TestWebDesktopShowsVNCPixelsAndFinishes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pix) < 16 || string(pix[:2]) != "BM" || pix[12] != 255 || pix[15] != 255 {
+	rect, err := unmarshalBitmap(pix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rect.W != 2 || rect.H != 2 || len(rect.RGBA) < 4 || rect.RGBA[0] < 200 || rect.RGBA[1] > 40 || rect.RGBA[2] > 40 {
 		n := len(pix)
 		if n > 16 {
 			n = 16
 		}
-		t.Fatalf("bitmap %v", pix[:n])
+		t.Fatalf("bitmap header %v rect %+v", pix[:n], rect)
 	}
 	go func() {
 		for {

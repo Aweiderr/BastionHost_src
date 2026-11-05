@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mapDesktopPoint, parseBitmap, rfbButtons } from './desktopFrame.ts'
+import { BitmapProtocolError, mapDesktopPoint, parseBitmap, rfbButtons } from './desktopFrame.ts'
 import { isGraphicalProtocol } from './graphical.ts'
 import { keysymOf } from './keysym.ts'
 
@@ -29,8 +29,43 @@ test('解析画面帧头和大端坐标', () => {
   assert.equal(frame.y, 2)
   assert.equal(frame.w, 1)
   assert.equal(frame.h, 1)
-  assert.equal(frame.rgba[0], 9)
+  assert.equal(frame.rgba?.[0], 9)
+  assert.equal(frame.jpeg, null)
   assert.equal(parseBitmap(new Uint8Array([1, 2, 3])), null)
+})
+
+test('解析 JPEG 脏矩形，不认识的魔数直接报错', () => {
+  const jpeg = Uint8Array.from([0xff, 0xd8, 0x00, 0x11, 0xff, 0xd9])
+  const bytes = new Uint8Array(12 + jpeg.length)
+  bytes[0] = 0x42
+  bytes[1] = 0x4a
+  bytes[3] = 10
+  bytes[5] = 20
+  bytes[7] = 8
+  bytes[9] = 4
+  bytes[10] = 1
+  bytes.set(jpeg, 12)
+  const frame = parseBitmap(bytes)
+  assert.ok(frame)
+  assert.equal(frame.x, 10)
+  assert.equal(frame.y, 20)
+  assert.equal(frame.w, 8)
+  assert.equal(frame.h, 4)
+  assert.equal(frame.rgba, null)
+  assert.equal(frame.jpeg?.[0], 0xff)
+  assert.equal(frame.jpeg?.[1], 0xd8)
+  assert.equal(frame.jpeg?.length, jpeg.length)
+
+  const unknown = new Uint8Array(12)
+  unknown[0] = 0x42
+  unknown[1] = 0x58
+  unknown[7] = 1
+  unknown[9] = 1
+  assert.throws(() => parseBitmap(unknown), BitmapProtocolError)
+
+  const badEncoding = bytes.slice()
+  badEncoding[10] = 2
+  assert.throws(() => parseBitmap(badEncoding), BitmapProtocolError)
 })
 
 test('object-fit contain 时黑边上的点击不换算进桌面', () => {

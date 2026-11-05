@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -31,6 +33,9 @@ type screenConn interface {
 	Pointer(x, y, buttons int) error
 	Key(down bool, keysym uint32, code string) error
 	Wheel(x, y, delta int) error
+	// Resize 请求远端改分辨率。VNC 在对端声明 ExtendedDesktopSize 之后发 SetDesktopSize。
+	// RDP 的尺寸在连接时写进 MCS Core Data，已建立的会话不会跟着窗口再变。
+	Resize(width, height int) error
 }
 
 // screenDialFunc 拨到目标资产。测试可以替换它，生产为 nil 时按协议选择。
@@ -66,12 +71,15 @@ type deskInput struct {
 	Code     string `json:"code"`
 	Delta    int    `json:"delta"`
 	Password string `json:"password"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
 }
 
 // WebDesktopHandler 是 RDP / VNC 的浏览器画面通道（WebSocket）。
 //
 // 身份、授权、会话建档与强制中断跟 WebSSH 同一条链路。
 // 接通之后二进制帧是一块 JPEG 画面（见 marshalBitmap），文本帧是鼠标键盘。
+// 客户端用 {"type":"resize","width","height"} 报告视口，VNC 再转成 SetDesktopSize。
 // 目标口令只留在代理进程里，不下发给浏览器。
 //
 // 本通道不做图形录像。会话开始和结束仍写入 ops_session。
@@ -285,6 +293,12 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		return ws.write(wctx, payload)
 	})
 	defer batch.Close()
+	if vs, ok := peer.(*vncSession); ok {
+		vs.setOnResize(func(w, h int) {
+			batch.Resize(w, h)
+			writeJSON(ctx, map[string]any{"type": "resize", "width": w, "height": h})
+		})
+	}
 
 	pumpErr := make(chan error, 1)
 	go func() {
@@ -394,6 +408,13 @@ func (s *Server) dialDesktop(ctx context.Context, c *websocket.Conn, ws *wsWrite
 }
 
 func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer screenConn, touch func()) {
+	var generation atomic.Uint64
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		typ, data, err := c.Read(ctx)
 		if err != nil {
@@ -416,6 +437,20 @@ func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer s
 			_ = peer.Key(msg.Down, msg.Keysym, msg.Code)
 		case "wheel":
 			_ = peer.Wheel(msg.X, msg.Y, msg.Delta)
+		case "resize":
+			w, h := clampDesktopSize(msg.Width, msg.Height)
+			gen := generation.Add(1)
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.AfterFunc(desktopResizeDebounce, func() {
+				if generation.Load() != gen {
+					return
+				}
+				if err := peer.Resize(w, h); err != nil {
+					slog.Debug("图形会话调整分辨率失败", "width", w, "height", h, "err", err)
+				}
+			})
 		}
 	}
 }
@@ -427,7 +462,7 @@ func defaultScreenDial(ctx context.Context, cred *managerclient.Credential, widt
 		if port <= 0 {
 			port = 5900
 		}
-		return dialVNC(ctx, net.JoinHostPort(cred.Host, strconv.Itoa(port)), cred.Password)
+		return dialVNC(ctx, net.JoinHostPort(cred.Host, strconv.Itoa(port)), cred.Password, width, height)
 	case "rdp":
 		if port <= 0 {
 			port = 3389
@@ -452,26 +487,79 @@ func (s *Server) connectTimeout() time.Duration {
 	return s.cfg.Proxy.ConnectTimeout
 }
 
+const (
+	desktopMinWidth      = 640
+	desktopMinHeight     = 480
+	desktopMaxWidth      = 1920
+	desktopMaxHeight     = 1080
+	desktopDefaultWidth  = 1280
+	desktopDefaultHeight = 720
+)
+
+// desktopResizeDebounce 把拖动窗口时的一串 resize 收成最后一次。测试可以改短。
+var desktopResizeDebounce = 200 * time.Millisecond
+
+// clampDesktopSize 把视口收进 640×480 到 1920×1080。
+// 先按比例缩小到上限内，再在不超出上限时按比例放大到下限。
+// 极窄的视口没法同时满足两边，这时才分别夹住，避免发一个服务器拒绝的尺寸。
 func clampDesktopSize(w, h int) (int, int) {
 	if w <= 0 {
-		w = 1280
+		w = desktopDefaultWidth
 	}
 	if h <= 0 {
-		h = 720
+		h = desktopDefaultHeight
 	}
-	if w < 640 {
-		w = 640
-	}
-	if h < 480 {
-		h = 480
-	}
-	if w > 1920 {
-		w = 1920
-	}
-	if h > 1080 {
-		h = 1080
+	w, h = scaleDesktop(w, h, desktopMaxWidth, desktopMaxHeight, false)
+	if w < desktopMinWidth || h < desktopMinHeight {
+		nw, nh := scaleDesktop(w, h, desktopMinWidth, desktopMinHeight, true)
+		if nw <= desktopMaxWidth && nh <= desktopMaxHeight {
+			return nw, nh
+		}
+		if w < desktopMinWidth {
+			w = desktopMinWidth
+		}
+		if h < desktopMinHeight {
+			h = desktopMinHeight
+		}
+		if w > desktopMaxWidth {
+			w = desktopMaxWidth
+		}
+		if h > desktopMaxHeight {
+			h = desktopMaxHeight
+		}
 	}
 	return w, h
+}
+
+// cover 为 false 时缩小到边界内，不放大。为 true 时放大到盖住边界。
+func scaleDesktop(w, h, boundW, boundH int, cover bool) (int, int) {
+	if w <= 0 || h <= 0 || boundW <= 0 || boundH <= 0 {
+		return w, h
+	}
+	sw := float64(boundW) / float64(w)
+	sh := float64(boundH) / float64(h)
+	scale := sw
+	if cover {
+		if sh > scale {
+			scale = sh
+		}
+	} else {
+		if sh < scale {
+			scale = sh
+		}
+		if scale > 1 {
+			scale = 1
+		}
+	}
+	nw := int(math.Round(float64(w) * scale))
+	nh := int(math.Round(float64(h) * scale))
+	if nw < 1 {
+		nw = 1
+	}
+	if nh < 1 {
+		nh = 1
+	}
+	return nw, nh
 }
 
 func msgSuffix(msg string) string {

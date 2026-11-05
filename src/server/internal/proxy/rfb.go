@@ -51,14 +51,25 @@ func reverseBits(b byte) byte {
 // 像素格式固定为 32 位小端、R 在最低字节，方便浏览器直接铺到画布。
 // fb 记下整屏，CopyRect 才能在代理里还原成 RGBA，不必改浏览器协议。
 // zrle 是这条连接上唯一的 zlib 流，矩形之间不能重建。
+//
+// 分辨率走 DesktopSize / ExtendedDesktopSize。只有对端先用
+// ExtendedDesktopSize 表明支持，才发 SetDesktopSize。旧服务器读到未知
+// 客户端消息会失步并断开，所以不能一上来就发。
 type vncSession struct {
 	conn net.Conn
 	br   *bufio.Reader
 	wmu  sync.Mutex
+	mu   sync.Mutex
 
 	width  int
 	height int
 	fb     []byte
+
+	wantW, wantH       int
+	lastReqW, lastReqH int
+	extDesktop         bool
+	forceFull          bool
+	onResize           func(int, int)
 
 	zrleSrc   zrleSource
 	zrle      io.Reader
@@ -67,13 +78,16 @@ type vncSession struct {
 	closeOnce sync.Once
 }
 
-func dialVNC(ctx context.Context, addr, password string) (*vncSession, error) {
+func dialVNC(ctx context.Context, addr, password string, width, height int) (*vncSession, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("连接 VNC 失败：%w", err)
 	}
 	sess := &vncSession{conn: conn, br: bufio.NewReader(conn)}
+	if width > 0 && height > 0 {
+		sess.wantW, sess.wantH = clampDesktopSize(width, height)
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
@@ -139,11 +153,16 @@ func (v *vncSession) handshake(password string) error {
 	if err := v.writeSetPixelFormat(); err != nil {
 		return err
 	}
-	v.fb = make([]byte, v.width*v.height*4)
-	for i := 3; i < len(v.fb); i += 4 {
-		v.fb[i] = 255
-	}
+	v.fb = newVNCFramebuffer(v.width, v.height)
 	return v.writeSetEncodings()
+}
+
+func newVNCFramebuffer(w, h int) []byte {
+	fb := make([]byte, w*h*4)
+	for i := 3; i < len(fb); i += 4 {
+		fb[i] = 255
+	}
+	return fb
 }
 
 func (v *vncSession) negotiateSecurity(minor int, password string) (byte, error) {
@@ -284,21 +303,37 @@ func (v *vncSession) writeSetPixelFormat() error {
 // 鼠标或画面一变，计数对不上就以 “nRects out of sync” 断开。
 // 声明 LastRect 之后，服务器改把矩形数写成 0xFFFF，读到 LastRect 才结束这一帧。
 //
+// DesktopSize（-223）只是服务端通知“我改了分辨率”。
+// ExtendedDesktopSize（-308）才允许客户端用 SetDesktopSize（消息类型 251）
+// 请求新尺寸。两个伪编码都放在真实编码后面，ZRLE 仍然是第一选择。
+//
 // 不声明 Tight。TigerVNC 只要列表里有 Tight 就会改用它，并且经常夹 JPEG；
-// 这里没有 JPEG 解码，声明了会导致整段画面解不开。
+// 这里没有 JPEG 解码，声明了会导致整段画面解不开。发给浏览器的仍是 JPEG 脏矩形。
 const (
-	rfbEncRaw      int32 = 0
-	rfbEncCopyRect int32 = 1
-	rfbEncHextile  int32 = 5
-	rfbEncZRLE     int32 = 16
-	rfbEncLastRect int32 = -224
+	rfbEncRaw                 int32 = 0
+	rfbEncCopyRect            int32 = 1
+	rfbEncHextile             int32 = 5
+	rfbEncZRLE                int32 = 16
+	rfbEncDesktopSize         int32 = -223
+	rfbEncLastRect            int32 = -224
+	rfbEncExtendedDesktopSize int32 = -308
+	rfbMsgSetDesktopSize      byte  = 251
 )
 
 // vncPreferredEncodings 按服务器应优先选用的顺序排列。
 // CopyRect 对 libvncserver / TigerVNC 是“能拷贝就拷贝”的能力位，
 // 不占据首选；放在 Raw 前面，避免只认第一种编码的旧服务器把它当成唯一编码。
+// 伪编码放在最后，LastRect 仍是列表末尾。
 func vncPreferredEncodings() []int32 {
-	return []int32{rfbEncZRLE, rfbEncHextile, rfbEncCopyRect, rfbEncRaw, rfbEncLastRect}
+	return []int32{
+		rfbEncZRLE,
+		rfbEncHextile,
+		rfbEncCopyRect,
+		rfbEncRaw,
+		rfbEncDesktopSize,
+		rfbEncExtendedDesktopSize,
+		rfbEncLastRect,
+	}
 }
 
 func (v *vncSession) writeSetEncodings() error {
@@ -313,14 +348,62 @@ func (v *vncSession) writeSetEncodings() error {
 }
 
 func (v *vncSession) request(incremental bool) error {
+	v.mu.Lock()
+	if v.forceFull {
+		incremental = false
+		v.forceFull = false
+	}
+	w, h := v.width, v.height
+	v.mu.Unlock()
 	msg := make([]byte, 10)
 	msg[0] = 3
 	if incremental {
 		msg[1] = 1
 	}
-	binary.BigEndian.PutUint16(msg[6:], uint16(v.width))
-	binary.BigEndian.PutUint16(msg[8:], uint16(v.height))
+	binary.BigEndian.PutUint16(msg[6:], uint16(w))
+	binary.BigEndian.PutUint16(msg[8:], uint16(h))
 	return v.writeMsg(msg)
+}
+
+// writeSetDesktopSize 是 RFB 消息 251。一屏、原点、无标志，TigerVNC 就按这个改 RandR。
+func (v *vncSession) writeSetDesktopSize(w, h int) error {
+	msg := make([]byte, 24)
+	msg[0] = rfbMsgSetDesktopSize
+	binary.BigEndian.PutUint16(msg[2:], uint16(w))
+	binary.BigEndian.PutUint16(msg[4:], uint16(h))
+	msg[6] = 1
+	binary.BigEndian.PutUint16(msg[16:], uint16(w))
+	binary.BigEndian.PutUint16(msg[18:], uint16(h))
+	slog.Info("VNC 请求调整分辨率", "width", w, "height", h)
+	return v.writeMsg(msg)
+}
+
+func (v *vncSession) setOnResize(fn func(int, int)) {
+	v.mu.Lock()
+	v.onResize = fn
+	v.mu.Unlock()
+}
+
+// Resize 记下客户端视口。对端还没声明 ExtendedDesktopSize 时只保存，
+// 等下一帧伪矩形到来再发，避免把未知消息写给不支持的服务器。
+func (v *vncSession) Resize(w, h int) error {
+	w, h = clampDesktopSize(w, h)
+	v.mu.Lock()
+	v.wantW, v.wantH = w, h
+	v.mu.Unlock()
+	return v.flushDesktopSizeRequest()
+}
+
+func (v *vncSession) flushDesktopSizeRequest() error {
+	v.mu.Lock()
+	w, h := v.wantW, v.wantH
+	if !v.extDesktop || w <= 0 || h <= 0 || (v.width == w && v.height == h) || (v.lastReqW == w && v.lastReqH == h) {
+		v.mu.Unlock()
+		return nil
+	}
+	v.lastReqW, v.lastReqH = w, h
+	v.mu.Unlock()
+	return v.writeSetDesktopSize(w, h)
 }
 
 func (v *vncSession) writeMsg(p []byte) error {
@@ -330,7 +413,11 @@ func (v *vncSession) writeMsg(p []byte) error {
 	return err
 }
 
-func (v *vncSession) Size() (int, int) { return v.width, v.height }
+func (v *vncSession) Size() (int, int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.width, v.height
+}
 
 func (v *vncSession) Close() error {
 	var err error
@@ -385,7 +472,8 @@ func (v *vncSession) Wheel(x, y, delta int) error {
 	return v.Pointer(x, y, 0)
 }
 
-// Pump 先要一帧完整画面，之后只请求增量。服务器每回一次更新就再要一次。
+// Pump 先要一帧完整画面，之后只请求增量。分辨率变过之后再要一整帧。
+// SetDesktopSize 放在读完这一帧之后再写，避免半帧还在套接字里时对写阻塞。
 func (v *vncSession) Pump(ctx context.Context, emit func(deskRect) error) error {
 	if err := v.request(false); err != nil {
 		return err
@@ -395,6 +483,9 @@ func (v *vncSession) Pump(ctx context.Context, emit func(deskRect) error) error 
 			return err
 		}
 		if err := v.readServerMessage(emit); err != nil {
+			return err
+		}
+		if err := v.flushDesktopSizeRequest(); err != nil {
 			return err
 		}
 		if err := v.request(true); err != nil {
@@ -458,17 +549,34 @@ func (v *vncSession) readFramebuffer(emit func(deskRect) error) error {
 		if enc == rfbEncLastRect {
 			return nil
 		}
+		// 这两种伪矩形的宽高是新的帧缓冲尺寸，x/y 是原因和状态，不是坐标。
+		// 必须在“超出画面”判断之前吃掉，否则 1440 宽的桌面一声明支持就会被当成坏矩形。
+		switch enc {
+		case rfbEncExtendedDesktopSize:
+			if err := v.readExtendedDesktopSize(x, y, w, h); err != nil {
+				return err
+			}
+			continue
+		case rfbEncDesktopSize:
+			if err := v.readDesktopSize(w, h); err != nil {
+				return err
+			}
+			continue
+		}
 		if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
 			return fmt.Errorf("VNC 矩形尺寸无效")
 		}
-		if v.width > 0 || v.height > 0 {
-			if x+w > v.width || y+h > v.height {
+		v.mu.Lock()
+		fw, fh := v.width, v.height
+		v.mu.Unlock()
+		if fw > 0 || fh > 0 {
+			if x+w > fw || y+h > fh {
 				return fmt.Errorf("VNC 矩形超出画面")
 			}
 		}
 		if !v.loggedEnc {
 			v.loggedEnc = true
-			slog.Info("VNC 开始接收画面", "encoding", rfbEncodingName(enc), "width", v.width, "height", v.height)
+			slog.Info("VNC 开始接收画面", "encoding", rfbEncodingName(enc), "width", fw, "height", fh)
 		}
 		rgba, err := v.decodeRect(enc, x, y, w, h)
 		if err != nil {
@@ -512,6 +620,68 @@ func (v *vncSession) decodeRect(enc int32, x, y, w, h int) ([]byte, error) {
 	}
 }
 
+func (v *vncSession) readExtendedDesktopSize(reason, status, w, h int) error {
+	if err := discardExtendedScreens(v.br); err != nil {
+		return err
+	}
+	v.mu.Lock()
+	v.extDesktop = true
+	v.mu.Unlock()
+	// x=1 是对 SetDesktopSize 的答复。非 0 表示拒绝，帧缓冲保持原样。
+	if reason == 1 && status != 0 {
+		slog.Info("VNC 拒绝调整分辨率", "status", status, "width", w, "height", h)
+		return nil
+	}
+	// x=2 是 SetEncodings 之后的当前布局，不能把它当成用户想要的尺寸。
+	accept := reason == 0 || reason == 1
+	return v.applyFramebufferSize(w, h, accept)
+}
+
+func (v *vncSession) readDesktopSize(w, h int) error {
+	return v.applyFramebufferSize(w, h, true)
+}
+
+func discardExtendedScreens(r io.Reader) error {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return err
+	}
+	n := int(hdr[0])
+	if n > 64 {
+		return fmt.Errorf("VNC 屏幕数量异常")
+	}
+	if n == 0 {
+		return nil
+	}
+	_, err := io.CopyN(io.Discard, r, int64(n)*16)
+	return err
+}
+
+func (v *vncSession) applyFramebufferSize(w, h int, acceptAsWant bool) error {
+	if w <= 0 || h <= 0 || w > 8192 || h > 8192 {
+		return fmt.Errorf("VNC 画面尺寸无效")
+	}
+	v.mu.Lock()
+	if acceptAsWant {
+		v.wantW, v.wantH = w, h
+	}
+	if w == v.width && h == v.height {
+		v.mu.Unlock()
+		return nil
+	}
+	v.width = w
+	v.height = h
+	v.fb = newVNCFramebuffer(w, h)
+	v.forceFull = true
+	cb := v.onResize
+	v.mu.Unlock()
+	slog.Info("VNC 画面尺寸已变更", "width", w, "height", h)
+	if cb != nil {
+		cb(w, h)
+	}
+	return nil
+}
+
 func rfbEncodingName(enc int32) string {
 	switch enc {
 	case rfbEncRaw:
@@ -522,6 +692,10 @@ func rfbEncodingName(enc int32) string {
 		return "Hextile"
 	case rfbEncZRLE:
 		return "ZRLE"
+	case rfbEncDesktopSize:
+		return "DesktopSize"
+	case rfbEncExtendedDesktopSize:
+		return "ExtendedDesktopSize"
 	case rfbEncLastRect:
 		return "LastRect"
 	default:

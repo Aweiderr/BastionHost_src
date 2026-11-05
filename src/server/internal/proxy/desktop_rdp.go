@@ -115,6 +115,10 @@ func (r *rdpSession) signal(err error) {
 
 func (r *rdpSession) Size() (int, int) { return r.width, r.height }
 
+// Resize 不改变已经连上的 RDP 会话。宽高在拨号时写进 Client Core Data，
+// 这条链路没有 Display Control 虚拟通道。窗口变化后需要重新连接才会按新视口建桌面。
+func (r *rdpSession) Resize(width, height int) error { return nil }
+
 func (r *rdpSession) Close() error {
 	var err error
 	r.closeOne.Do(func() {

@@ -6,7 +6,8 @@
  * RDP / VNC 走同一条 /api/v1/webdesktop：Go 拨号（不带浏览器 Origin），
  * 像素以 desk:frame 推到画布，键鼠 JSON 原样写回。帧格式与 Web 端
  * desktopFrame.ts 相同，局部更新（含 TigerVNC LastRect 拆开后的脏矩形）
- * 按坐标画到画布。JPEG 帧按到达顺序解码。目标口令不下发到界面，未托管时只弹出一次输入框。
+ * 按坐标画到画布。JPEG 帧按到达顺序解码。窗口变化时发送 resize，由 VNC
+ * SetDesktopSize 改远端分辨率。目标口令不下发到界面，未托管时只弹出一次输入框。
  *
  * Oracle 只打开客户端连接说明（网关、SERVICE_NAME、sqlplus、JDBC）。
  * 口令保持占位符，不在本窗口建立数据库会话。
@@ -20,7 +21,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
 import { base64ToBytes, strToBase64 } from '../utils/base64'
-import { BitmapProtocolError, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
+import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
   DB_PASSWORD_PLACEHOLDER,
@@ -184,11 +185,47 @@ function bindHost(key: string, el: unknown) {
   if (el == null) hosts.delete(key)
 }
 
+const deskResize = new Map<string, { observer: ResizeObserver; timer?: number }>()
+
+function desktopViewport(key: string): { width: number; height: number } {
+  const canvas = canvases.get(key)
+  const host = canvas?.parentElement
+  return fitDesktopSize(host?.clientWidth ?? 0, host?.clientHeight ?? 0, window.devicePixelRatio || 1)
+}
+
+function scheduleDeskResize(key: string): void {
+  const slot = deskResize.get(key)
+  if (!slot) return
+  if (slot.timer) window.clearTimeout(slot.timer)
+  slot.timer = window.setTimeout(() => {
+    slot.timer = undefined
+    const tab = tabs.value.find((t) => t.key === key)
+    if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected') return
+    const size = desktopViewport(key)
+    if (size.width === tab.width && size.height === tab.height) return
+    WriteDesktopInput(key, JSON.stringify({ type: 'resize', width: size.width, height: size.height })).catch(() => {})
+  }, 200)
+}
+
+function stopDeskResize(key: string): void {
+  const slot = deskResize.get(key)
+  if (!slot) return
+  slot.observer.disconnect()
+  if (slot.timer) window.clearTimeout(slot.timer)
+  deskResize.delete(key)
+}
+
 function bindCanvas(key: string, el: unknown) {
   if (el instanceof HTMLCanvasElement) {
     canvases.set(key, el)
     const tab = tabs.value.find((t) => t.key === key)
     applyCanvasSize(el, tab?.width || 1280, tab?.height || 720)
+    const host = el.parentElement
+    if (host && !deskResize.has(key) && typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => scheduleDeskResize(key))
+      observer.observe(host)
+      deskResize.set(key, { observer })
+    }
     return
   }
   if (el == null) canvases.delete(key)
@@ -250,7 +287,19 @@ function handleDeskControl(key: string, raw: string) {
     const canvas = canvases.get(key)
     if (canvas) applyCanvasSize(canvas, tab.width, tab.height)
     if (activeKey.value === key) canvas?.focus()
+    scheduleDeskResize(key)
     notify(`已连接 ${payload.asset_name || tab.assetName}`, 'ok')
+    return
+  }
+  if (payload.type === 'resize') {
+    const w = Number(payload.width)
+    const h = Number(payload.height)
+    if (w > 0 && h > 0) {
+      tab.width = w
+      tab.height = h
+      const canvas = canvases.get(key)
+      if (canvas) applyCanvasSize(canvas, w, h)
+    }
     return
   }
   if (payload.type === 'credential-required') {
@@ -329,6 +378,11 @@ async function connect(acc?: Account) {
   try {
     if (kind === 'desktop') {
       await nextTick()
+      const size = desktopViewport(key)
+      tab.width = size.width
+      tab.height = size.height
+      const canvas = canvases.get(key)
+      if (canvas) applyCanvasSize(canvas, tab.width, tab.height)
       await OpenDesktopSession(key, asset.protocol, asset.asset_id, account.account_id, tab.width, tab.height)
       if (!tabs.value.some((t) => t.key === key)) {
         await CloseDesktopSession(key).catch(() => {})
@@ -458,6 +512,7 @@ function focusActive() {
 
 function dropTab(key: string) {
   destroyTerm(key)
+  stopDeskResize(key)
   canvases.delete(key)
   const idx = tabs.value.findIndex((t) => t.key === key)
   if (idx < 0) return

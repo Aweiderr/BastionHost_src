@@ -96,6 +96,58 @@ function paintJpeg(ctx: CanvasRenderingContext2D, jpeg: Uint8Array, x: number, y
   })
 }
 
+/**
+ * 与 Web 端 fitDesktopSize、代理 clampDesktopSize 同一套上下限。
+ * 先乘 devicePixelRatio，再放进 1920×1080，短边至少 640×480，尽量保持视口比例。
+ */
+export function fitDesktopSize(
+  cssW: number,
+  cssH: number,
+  devicePixelRatio = 1,
+): { width: number; height: number } {
+  const dpr = devicePixelRatio > 0 && Number.isFinite(devicePixelRatio) ? devicePixelRatio : 1
+  let width = Math.round((cssW > 0 ? cssW : 0) * dpr)
+  let height = Math.round((cssH > 0 ? cssH : 0) * dpr)
+  if (width <= 0) width = 1280
+  if (height <= 0) height = 720
+  const fitted = scaleDesktop(width, height, 1920, 1080, false)
+  width = fitted.width
+  height = fitted.height
+  if (width < 640 || height < 480) {
+    const grown = scaleDesktop(width, height, 640, 480, true)
+    if (grown.width <= 1920 && grown.height <= 1080) return grown
+    if (width < 640) width = 640
+    if (height < 480) height = 480
+    if (width > 1920) width = 1920
+    if (height > 1080) height = 1080
+  }
+  return { width, height }
+}
+
+function scaleDesktop(
+  w: number,
+  h: number,
+  boundW: number,
+  boundH: number,
+  cover: boolean,
+): { width: number; height: number } {
+  if (w <= 0 || h <= 0 || boundW <= 0 || boundH <= 0) return { width: w, height: h }
+  const sw = boundW / w
+  const sh = boundH / h
+  let scale = sw
+  if (cover) {
+    if (sh > scale) scale = sh
+  } else {
+    if (sh < scale) scale = sh
+    if (scale > 1) scale = 1
+  }
+  let width = Math.round(w * scale)
+  let height = Math.round(h * scale)
+  if (width < 1) width = 1
+  if (height < 1) height = 1
+  return { width, height }
+}
+
 export function mapDesktopPoint(
   box: Box,
   remoteW: number,

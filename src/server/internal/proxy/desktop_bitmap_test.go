@@ -246,3 +246,18 @@ func assertPixelNear(t *testing.T, rgba []byte, stride, x, y int, r, g, b byte) 
 		t.Fatalf("alpha %d", rgba[i+3])
 	}
 }
+
+func TestBitmapBatchResizeDropsStaleFrame(t *testing.T) {
+	b := newBitmapBatch(8, 4, time.Hour, func([]byte) error { return nil })
+	defer b.Close()
+	pix := []byte{1, 2, 3, 255}
+	if err := b.Push(deskRect{X: 0, Y: 0, W: 1, H: 1, RGBA: pix}); err != nil {
+		t.Fatal(err)
+	}
+	b.Resize(10, 6)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.w != 10 || b.h != 6 || len(b.fb) != 10*6*4 || len(b.dirty) != 0 {
+		t.Fatalf("size %dx%d fb %d dirty %d", b.w, b.h, len(b.fb), len(b.dirty))
+	}
+}

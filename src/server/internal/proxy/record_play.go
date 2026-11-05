@@ -20,9 +20,9 @@ import (
 //
 // 录像文件与解密密钥都在代理节点本地（管理面拿不到），因此回放由服务端：
 //
-//	1. 用访问令牌回源管理服务换取身份；
-//	2. 校验 `audit:record:play` 权限；
-//	3. 解密并**校验摘要链**后返回明文。
+//  1. 用访问令牌回源管理服务换取身份；
+//  2. 校验 `audit:record:play` 权限；
+//  3. 解密并**校验摘要链**后返回明文。
 //
 // 校验失败一律拒绝返回明文 —— 录像不可信时回放内容没有证据价值。
 func (s *Server) RecordPlayHandler() http.HandlerFunc {
@@ -80,7 +80,12 @@ func (s *Server) RecordPlayHandler() http.HandlerFunc {
 		slog.Info("录像回放", "session_no", sessionNo, "operator", ident.Username,
 			"chunks", info.Chunks, "plain_size", info.PlainSize, "digest", info.Digest)
 
+		kind := "terminal"
+		if isGraphicalRecord(plain) {
+			kind = "graphical"
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Record-Kind", kind)
 		w.Header().Set("X-Record-Digest", info.Digest)
 		w.Header().Set("X-Record-Chunks", fmt.Sprint(info.Chunks))
 		_, _ = w.Write(plain)

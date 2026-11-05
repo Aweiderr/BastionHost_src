@@ -46,6 +46,8 @@ type Session struct {
 
 	// Commands 会话命令记录（详情查询时填充）
 	Commands []*SessionCommand `json:"commands,omitempty"`
+	// Files 会话文件传输记录（详情查询时填充）
+	Files []*SessionFile `json:"files,omitempty"`
 }
 
 // 会话状态

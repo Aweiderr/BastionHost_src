@@ -28,13 +28,19 @@ export function assetConnectHint(protocol: string | undefined | null): string {
   if (kind === 'oracle') {
     return '将打开客户端连接说明。请在本机使用 sqlplus 或 DBeaver 连接网关，本窗口不会建立数据库会话。'
   }
+  if ((protocol ?? '').trim().toLowerCase() === 'sftp') {
+    return '请用 SFTP 客户端连接堡垒机 SSH 网关，登录名写成 用户名@资产#账号。本窗口不建立文件会话。'
+  }
   if (kind === 'unsupported') {
     return `${protocolLabel(protocol)} 会打开说明标签。该协议尚未接入，不会建立会话。`
   }
   return ''
 }
 
-/** SFTP 等仍未接入协议的标签正文。Oracle 不走这里。 */
+/** 没有内嵌客户端的协议说明。SFTP 走 SSH 网关，不在这个窗口里传文件。 */
 export function unsupportedExplanation(protocol: string | undefined | null): string {
+  if ((protocol ?? '').trim().toLowerCase() === 'sftp') {
+    return 'SFTP 由堡垒机 SSH 网关代理。请使用 SFTP 客户端，登录名写成 用户名@资产#账号。上传、下载受「文件传输」授权和节点策略约束，并写入文件审计。此标签不会自己建立会话。'
+  }
   return `${protocolLabel(protocol)} 尚未接入。此标签只展示协议说明，不会连接目标。字符会话请打开 SSH 资产，图形会话请打开 RDP 或 VNC 资产。`
 }

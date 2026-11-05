@@ -7,6 +7,7 @@ import { fetchSessionRecord } from '@/api/audit'
 import { ApiError } from '@/api/http'
 import Modal from '@/components/Modal.vue'
 import { useAuthStore } from '@/stores/auth'
+import { isGraphicalRecord, parseGraphicalRecord, type GraphicalEvent } from '@/utils/graphicalRecord'
 
 const props = withDefaults(
   defineProps<{
@@ -22,6 +23,8 @@ const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void }>()
 const auth = useAuthStore()
 
 const hostRef = ref<HTMLDivElement | null>(null)
+const canvasRef = ref<HTMLCanvasElement | null>(null)
+const graphical = ref(false)
 const term = shallowRef<Terminal | null>(null)
 const fitAddon = shallowRef<FitAddon | null>(null)
 const state = ref<'idle' | 'loading' | 'playing' | 'done' | 'error'>('idle')
@@ -60,6 +63,7 @@ const stateText: Record<string, string> = {
 function stopTimer(): void {
   if (timer !== null) {
     window.clearInterval(timer)
+    window.clearTimeout(timer)
     timer = null
   }
 }
@@ -93,6 +97,57 @@ function initTerm(): void {
   fitAddon.value = fit
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    timer = window.setTimeout(resolve, ms)
+  })
+}
+
+async function drawFrame(frame: GraphicalEvent): Promise<void> {
+  const canvas = canvasRef.value
+  if (!canvas || !frame.jpeg) return
+  const w = frame.w && frame.w > 0 ? frame.w : canvas.width
+  const h = frame.h && frame.h > 0 ? frame.h : canvas.height
+  if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+    canvas.width = w
+    canvas.height = h
+  }
+  const img = new Image()
+  img.src = `data:image/jpeg;base64,${frame.jpeg}`
+  await img.decode()
+  const ctx = canvas.getContext('2d')
+  ctx?.drawImage(img, 0, 0, canvas.width, canvas.height)
+}
+
+async function playGraphical(text: string): Promise<void> {
+  const script = parseGraphicalRecord(text)
+  const canvas = canvasRef.value
+  if (canvas && script.width > 0 && script.height > 0) {
+    canvas.width = script.width
+    canvas.height = script.height
+  }
+  if (script.frames.length === 0) {
+    state.value = 'done'
+    progress.value = 100
+    message.value = '这段图形录像没有画面采样'
+    return
+  }
+  state.value = 'playing'
+  let previous = 0
+  for (let i = 0; i < script.frames.length; i += 1) {
+    if (!props.modelValue) return
+    const frame = script.frames[i]
+    const at = frame.t ?? previous
+    const gap = Math.min(500, Math.max(0, at - previous))
+    previous = at
+    if (gap > 0) await delay(gap)
+    await drawFrame(frame)
+    progress.value = Math.min(100, Math.round(((i + 1) / script.frames.length) * 100))
+  }
+  state.value = 'done'
+  progress.value = 100
+}
+
 function play(text: string): void {
   const instance = term.value
   if (!instance) return
@@ -123,6 +178,7 @@ function play(text: string): void {
 
 async function start(): Promise<void> {
   disposeTerm()
+  graphical.value = false
   state.value = 'loading'
   message.value = ''
   progress.value = 0
@@ -157,6 +213,18 @@ async function start(): Promise<void> {
   }
 
   progress.value = 1
+  graphical.value = isGraphicalRecord(text)
+  if (graphical.value) {
+    disposeTerm()
+    await nextTick()
+    try {
+      await playGraphical(text)
+    } catch (err) {
+      state.value = 'error'
+      message.value = err instanceof Error ? err.message : '图形录像无法播放'
+    }
+    return
+  }
   play(text)
 }
 
@@ -167,6 +235,7 @@ watch(
       void start()
     } else {
       disposeTerm()
+      graphical.value = false
       state.value = 'idle'
       progress.value = 0
     }
@@ -199,12 +268,20 @@ onBeforeUnmount(disposeTerm)
     <div v-if="state === 'error'" class="result-panel text-center">
       {{ message || '录像不可回放' }}
     </div>
+    <div v-else-if="graphical" class="replay-shell graphical-shell">
+      <canvas ref="canvasRef" class="replay-canvas" />
+      <div v-if="message" class="form-hint">{{ message }}</div>
+    </div>
     <div v-else class="replay-shell">
       <div ref="hostRef" class="replay-host" />
     </div>
 
     <div class="form-hint mt-8">
-      回放为只读终端，按 20ms/块还原终端输出原文；如需检索命令请查看下方命令列表。
+      {{
+        graphical
+          ? '这是 RDP/VNC 图形录像，按采样时间在画布上播放整屏 JPEG。它不是字符终端录像。'
+          : '回放为只读终端，按 20ms/块还原终端输出原文；如需检索命令请查看下方命令列表。'
+      }}
     </div>
   </Modal>
 </template>
@@ -220,5 +297,18 @@ onBeforeUnmount(disposeTerm)
 .replay-host {
   height: 420px;
   padding: 8px 6px 8px 10px;
+}
+
+.graphical-shell {
+  background: #000;
+  display: grid;
+  place-items: center;
+  min-height: 420px;
+}
+
+.replay-canvas {
+  max-width: 100%;
+  max-height: 480px;
+  background: #000;
 }
 </style>

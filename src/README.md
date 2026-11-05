@@ -476,7 +476,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/setup/seal -H "Authorization: Bearer $
 **授权维度与约束**：
 
 - 维度为「**用户 × 资产（可细化到单个账号）**」；账号留空表示该资产下的所有账号；
-- 权限开关：`can_login`（登录）/ `can_file`（文件传输）/ `can_copy` / `can_paste`，前两项至少勾一个；
+- 权限开关：`can_login`（登录）/ `can_file`（文件传输）/ `can_copy`（从远端复制到本机）/ `can_paste`（从本机粘贴到远端），前两项至少勾一个；
 - 有效期可留空（长期有效），也可指定区间；已过期的记录由后台巡检置为 `expired`，
   判定层同时用 `valid_to` 兜底，二者不会出现"看着有效却连不上"；
 - 唯一索引 `uk_grant` 为「人 + 资产 + 账号 + `grant_kind`」：同一维度上绑定只有一条、
@@ -754,7 +754,7 @@ SPA 路由会回落到 `index.html`，而 `/api`、`/internal`、探针前缀仍
 | GET | `/readyz` | 就绪探针（管理服务可达 **且** 命令策略已加载才返回 200） |
 | GET | `/api/v1/sessions/stats` | 本节点活跃会话数与上限（容量观测 / 负载均衡） |
 | GET | `/api/v1/webssh` | **WebSSH WebSocket**：浏览器终端（令牌经管理服务校验） |
-| GET | `/api/v1/webdesktop` | **RDP / VNC 画面 WebSocket**：授权后把桌面像素交给浏览器或桌面客户端。不做图形录像 |
+| GET | `/api/v1/webdesktop` | **RDP / VNC 画面 WebSocket**：授权后把桌面像素交给浏览器或桌面客户端。剪贴板按 `can_copy` / `can_paste` 同步。图形录像与字符录像分开 |
 | GET | `/api/v1/records/{sessionNo}` | **录像回放**：解密 + 摘要链校验后返回明文 |
 
 **SSH 网关**（第三方客户端接入，对应 FR-08-09）：
@@ -767,9 +767,29 @@ ssh -p 2222 ops01@bastion-host
 ssh -p 2222 -l ops01@web-prod-01 bastion-host
 ```
 
-会话建立即开始录像；危险命令被阻断、需确认的命令进入 y/n 确认流程，全部命令（含被阻断的）写入 `ops_session_command`。
+会话建立即开始录像；危险命令被阻断、需确认的命令进入 y/n 确认流程，全部命令（含被阻断的）写入 `ops_session_command`。这条录像是字符输出，不覆盖 RDP / VNC。
 
-**RDP / VNC 画面**（Web「图形会话」、桌面客户端工作台）：资产协议为 `rdp` 或 `vnc` 时，走 `GET /api/v1/webdesktop`。令牌、授权、`ops_session` 开始/结束、强制中断和空闲超时与 WebSSH 相同。VNC 在代理侧完成 Password 认证（口令不下发浏览器，只使用前 8 字节）；RDP 由代理拨号并把位图推到画布。桌面客户端用同一条通道：Go 拨 WebSocket（不带浏览器 Origin），标签里的画布消费 `BM` 脏矩形，键鼠 JSON 与 Web「图形会话」相同。代理向 VNC 声明 ZRLE、Hextile、CopyRect、Raw 和 LastRect，在代理里解成 RGBA。TigerVNC 的 LastRect 也在这里拆掉，客户端只画矩形。剪贴板、磁盘映射和画面录像尚未做，Ctrl+C / Ctrl+V 只作为按键发给远端。3389/5900 仍不是给 mstsc / vncviewer 用的代理。怎么在桌面客户端里对一台 VNC 资产点验，见 `client/desktop/README.md`。
+**SFTP**：第三方客户端走同一条 SSH 网关，请求 `subsystem=sftp`。登录名是 `用户名@资产`，资产上有多个账号时写成 `用户名@资产#账号`。只列出协议为 SSH / SFTP 且 `can_file` 为真的授权；`can_file` 为假时子系统直接拒绝。节点还可以用环境变量再收紧：
+
+```bash
+# 默认都是 allow。deny 关掉对应方向。大小单位是字节。扩展名逗号分隔。
+BASTION_SFTP_UPLOAD=allow
+BASTION_SFTP_DOWNLOAD=deny
+BASTION_SFTP_MAX_BYTES=104857600
+BASTION_SFTP_DENY_EXT=.exe,.bat
+```
+
+```bash
+sftp -P 2222 ops01@web-01#app@bastion-host
+```
+
+上传对应客户端 `WRITE` / 创建，下载对应 `READ`。超限、扩展名不允许或方向被关时，目标收不到这个包，客户端收到 `SSH_FX_PERMISSION_DENIED`。每次允许或拒绝都写入 `ops_session_file`（方向、路径、大小、SM3 摘要、策略动作、结果）。会话详情的「文件传输」表能看到。SFTP 不产生字符录像，也不在 Web / 桌面窗口里做文件树。目标账号必须是托管口令，这条通道不会再问一次口令。
+
+**RDP / VNC 画面**（Web「图形会话」、桌面客户端工作台）：资产协议为 `rdp` 或 `vnc` 时，走 `GET /api/v1/webdesktop`。令牌、授权、`ops_session` 开始/结束、强制中断和空闲超时与 WebSSH 相同。VNC 在代理侧完成 Password 认证（口令不下发浏览器，只使用前 8 字节）；RDP 由代理拨号并把位图推到画布。桌面客户端用同一条通道：Go 拨 WebSocket（不带浏览器 Origin），标签里的画布消费 `BM` 脏矩形，键鼠 JSON 与 Web「图形会话」相同。代理向 VNC 声明 ZRLE、Hextile、CopyRect、Raw 和 LastRect，在代理里解成 RGBA。TigerVNC 的 LastRect 也在这里拆掉，客户端只画矩形。3389/5900 仍不是给 mstsc / vncviewer 用的代理。磁盘映射仍未做。怎么在桌面客户端里对一台 VNC 资产点验，见 `client/desktop/README.md`。
+
+**图形剪贴板**：`ready` 带回 `can_copy` 和 `can_paste`。复制（`can_copy`）是远端剪贴板到本机，粘贴（`can_paste`）是本机剪贴板到远端，默认都关闭。客户端发 `{"type":"clipboard","direction":"paste","text":"..."}`；代理在允许时写入 VNC ClientCutText 或 RDP cliprdr 的 Unicode 文本。远端剪贴板变化只在 `can_copy` 为真时回 `{"type":"clipboard","direction":"copy","text":"..."}`。拒绝时回 `clipboard-denied`，正文里不带被拒绝的文本。Ctrl+C / Ctrl+V 仍会作为按键送到远端；粘贴快捷键会先提交本机文本再送按键。剪贴板文件和磁盘映射会直接拒绝。浏览器在非 HTTPS 页面上可能读不到本机剪贴板，桌面客户端用系统剪贴板。
+
+**图形录像**：RDP / VNC 会话在录像开关打开时，把整屏 JPEG 采样写进与字符录像相同的加密容器（`BSR1` 分片、SM4、SM3 链）。明文以 `BSG1 1` 开头，随后一行一个 JSON（`meta` / `frame`）。这不是字符录像，回放接口用 `X-Record-Kind: graphical` 标出，审计页按魔数在画布上播放。字符会话的明文仍是终端输出，回放仍是只读终端。采样大约每 200ms 一张整屏，不是逐像素无损。
 
 **会话录像**：分片加密落盘（SM4-CBC，密文自带 IV），哈希链保证任意分片被删除、重排或篡改都能被发现：
 
@@ -796,6 +816,7 @@ ssh -p 2222 -l ops01@web-prod-01 bastion-host
 | GET | `/internal/v1/policies/commands` | 下发命令策略规则 |
 | POST | `/internal/v1/sessions` | 会话开始 |
 | POST | `/internal/v1/sessions/{id}/commands` | 命令留痕 |
+| POST | `/internal/v1/sessions/{id}/files` | 文件传输留痕（上传 / 下载，含拒绝） |
 | POST | `/internal/v1/sessions/{id}/finish` | 会话结束与录像归档 |
 | POST | `/internal/v1/nodes/heartbeat` | 节点心跳：上报负载，取回"是否允许接收新会话"（身份以签名头为准） |
 

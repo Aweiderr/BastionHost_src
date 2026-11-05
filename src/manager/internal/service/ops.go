@@ -118,8 +118,17 @@ type OpsAssetBrief struct {
 	NeedApproval bool `json:"need_approval"`
 }
 
-// AccessibleAssets 返回某用户当前可运维的资产与账号。
+// AccessibleAssets 返回某用户当前可登录的资产与账号。
 func (s *OpsService) AccessibleAssets(ctx context.Context, userID int64) ([]*OpsAssetBrief, error) {
+	return s.accessibleAssets(ctx, userID, false)
+}
+
+// AccessibleFileAssets 返回可以做文件传输的资产。不要求同时允许登录。
+func (s *OpsService) AccessibleFileAssets(ctx context.Context, userID int64) ([]*OpsAssetBrief, error) {
+	return s.accessibleAssets(ctx, userID, true)
+}
+
+func (s *OpsService) accessibleAssets(ctx context.Context, userID int64, forFile bool) ([]*OpsAssetBrief, error) {
 	grants, err := s.grantRepo.ListBySubject(ctx, 0, "user", userID)
 	if err != nil {
 		return nil, err
@@ -127,7 +136,14 @@ func (s *OpsService) AccessibleAssets(ctx context.Context, userID int64) ([]*Ops
 	out := make([]*OpsAssetBrief, 0, len(grants))
 	seen := map[int64]bool{}
 	for _, g := range grants {
-		if !g.IsValid() || !g.CanLogin {
+		if !g.IsValid() {
+			continue
+		}
+		if forFile {
+			if !g.CanFile {
+				continue
+			}
+		} else if !g.CanLogin {
 			continue
 		}
 		asset, err := s.assetRepo.Get(ctx, g.AssetID)

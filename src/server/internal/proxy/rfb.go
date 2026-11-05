@@ -75,7 +75,8 @@ type vncSession struct {
 	zrle      io.Reader
 	loggedEnc bool
 
-	closeOnce sync.Once
+	onClipboard func(string)
+	closeOnce   sync.Once
 }
 
 func dialVNC(ctx context.Context, addr, password string, width, height int) (*vncSession, error) {
@@ -441,6 +442,20 @@ func (v *vncSession) Pointer(x, y, buttons int) error {
 	return v.writeMsg(append(msg, rest[:]...))
 }
 
+func (v *vncSession) setOnClipboard(fn func(string)) {
+	v.mu.Lock()
+	v.onClipboard = fn
+	v.mu.Unlock()
+}
+
+func (v *vncSession) SetClipboard(text string) error {
+	text = sanitizeClipboard(text)
+	if text == "" {
+		return fmt.Errorf("剪贴板是空的")
+	}
+	return v.writeMsg(encodeClientCutText(text))
+}
+
 func (v *vncSession) Key(down bool, keysym uint32, code string) error {
 	if keysym == 0 {
 		keysym = keysymFromCode(code)
@@ -505,26 +520,24 @@ func (v *vncSession) readServerMessage(emit func(deskRect) error) error {
 	case 2: // Bell
 		return nil
 	case 3:
-		return v.skipCutText()
+		return v.readCutText()
 	default:
 		return fmt.Errorf("收到未支持的 VNC 消息类型 %d", typ)
 	}
 }
 
-func (v *vncSession) skipCutText() error {
-	pad := make([]byte, 3)
-	if _, err := io.ReadFull(v.br, pad); err != nil {
+func (v *vncSession) readCutText() error {
+	text, err := readRFBCutText(v.br)
+	if err != nil || text == "" {
 		return err
 	}
-	var n int32
-	if err := binary.Read(v.br, binary.BigEndian, &n); err != nil {
-		return err
+	v.mu.Lock()
+	fn := v.onClipboard
+	v.mu.Unlock()
+	if fn != nil {
+		fn(text)
 	}
-	if n < 0 || n > 1<<20 {
-		return fmt.Errorf("VNC 剪贴板长度异常")
-	}
-	_, err := io.CopyN(io.Discard, v.br, int64(n))
-	return err
+	return nil
 }
 
 func (v *vncSession) readFramebuffer(emit func(deskRect) error) error {

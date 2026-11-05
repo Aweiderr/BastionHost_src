@@ -187,10 +187,7 @@
   托盘常驻与最小化、多标签会话（当前 Go 侧已按 key 支持多会话，界面为单标签）、
   断线自动重连。
 
-- [ ] **文件传输（SFTP）**
-  SSH 网关目前对 `subsystem` 请求直接拒绝。需实现 SFTP 子系统代理，
-  并把每次上传/下载写入 `ops_session_file`（表结构已就绪），
-  受 `can_file` 授权与文件传输策略约束。
+- [x] **文件传输（SFTP）** —— 2026-11-05：SSH `subsystem=sftp` 代理到目标；`can_file` 为假时直接拒绝。节点可用 `BASTION_SFTP_UPLOAD` / `BASTION_SFTP_DOWNLOAD`（allow|deny）、`BASTION_SFTP_MAX_BYTES`、`BASTION_SFTP_DENY_EXT` 再限制方向、大小和扩展名。允许和拒绝都写入 `ops_session_file`，会话详情可看。登录名 `用户名@资产#账号`。不做 Web 文件树，也不做磁盘映射。
 
 - [x] **会话实时监控与阻断** —— 2026-10-21：强制中断 API + 代理侧真正断开（`ops:session:kill`）；在线旁观/分享仍待
   权限点 `ops:session:kill` / `ops:session:share` 已定义但无实现。
@@ -622,7 +619,7 @@
 
 ## 四、已完成
 
-- [x] **RDP / VNC 画面通道** —— 2026-11-04：`/api/v1/webdesktop` 授权后出图，写入 `ops_session`；Web「图形会话」与桌面客户端可连。图形录像、剪贴板、磁盘映射、原生 3389/5900 透传仍未做
+- [x] **RDP / VNC 画面通道** —— 2026-11-04：`/api/v1/webdesktop` 授权后出图，写入 `ops_session`；Web「图形会话」与桌面客户端可连。2026-11-05：剪贴板按 `can_copy` / `can_paste` 双向同步；图形录像以 `BSG1` 明文写入同一套加密容器，回放画布播放，不代替字符录像。磁盘映射、原生 3389/5900 透传仍未做
 - [x] **桌面客户端运维闭环补强（MFA 短信 / 强制改密）** —— 2026-10-21
 - [x] **短信验证码清理任务** —— 2026-10-21：`SmsService.StartCleanupLoop`（发送/校验/频控原已具备）
 - [x] **RDP / VNC / Oracle 通道骨架** —— 2026-10-21：可编译监听骨架 + PROTOCOL_SKELETON.md（协议解析未做）

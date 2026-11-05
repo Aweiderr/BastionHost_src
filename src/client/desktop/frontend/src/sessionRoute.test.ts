@@ -27,8 +27,9 @@ test('图形协议和 Oracle 的提示不再写尚未接入', () => {
   assert.match(vnc, /图形会话/)
   assert.match(oracle, /客户端连接说明/)
   assert.match(oracle, /不会建立数据库会话/)
-  assert.match(assetConnectHint('sftp'), /尚未接入/)
-  assert.match(assetConnectHint('sftp'), /不会建立会话/)
+  assert.match(assetConnectHint('sftp'), /SFTP 客户端/)
+  assert.match(assetConnectHint('sftp'), /用户名@资产#账号/)
+  assert.equal(assetConnectHint('sftp').includes('尚未接入'), false)
 })
 
 test('说明标签点明该协议没有会话', () => {
@@ -36,6 +37,7 @@ test('说明标签点明该协议没有会话', () => {
   assert.equal(protocolLabel('oracle'), 'ORACLE')
   assert.equal(protocolLabel(''), 'SSH')
   const text = unsupportedExplanation('sftp')
-  assert.match(text, /SFTP 尚未接入/)
-  assert.match(text, /RDP 或 VNC/)
+  assert.match(text, /SSH 网关/)
+  assert.match(text, /文件审计/)
+  assert.match(unsupportedExplanation('mysql'), /尚未接入/)
 })

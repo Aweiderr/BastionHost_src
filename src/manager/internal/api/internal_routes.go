@@ -33,6 +33,7 @@ func registerInternalRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("GET /internal/v1/policies/commands", h(s.handleInternalPolicies))
 	mux.HandleFunc("POST /internal/v1/sessions", h(s.handleSessionStart))
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/commands", h(s.handleSessionCommand))
+	mux.HandleFunc("POST /internal/v1/sessions/{id}/files", h(s.handleSessionFile))
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/finish", h(s.handleSessionFinish))
 	// 节点心跳：代理节点定期上报负载，并取回"是否允许接收新会话"
 	mux.HandleFunc("POST /internal/v1/nodes/heartbeat", h(s.handleNodeHeartbeat))
@@ -142,7 +143,8 @@ func (s *Server) handleOpsVerifyToken(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, id)
 }
 
-func (s *Server) handleOpsAssets(w http.ResponseWriter, r *http.Request) {	if s.ops == nil {
+func (s *Server) handleOpsAssets(w http.ResponseWriter, r *http.Request) {
+	if s.ops == nil {
 		httpx.FailCode(w, "SYS_5001")
 		return
 	}
@@ -151,7 +153,15 @@ func (s *Server) handleOpsAssets(w http.ResponseWriter, r *http.Request) {	if s.
 		httpx.FailCode(w, "API_4000")
 		return
 	}
-	items, err := s.ops.AccessibleAssets(r.Context(), userID)
+	var (
+		items []*service.OpsAssetBrief
+		err   error
+	)
+	if r.URL.Query().Get("purpose") == "file" {
+		items, err = s.ops.AccessibleFileAssets(r.Context(), userID)
+	} else {
+		items, err = s.ops.AccessibleAssets(r.Context(), userID)
+	}
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -185,12 +195,12 @@ func (s *Server) handleOpsCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		UserID      int64  `json:"user_id"`
-		Username    string `json:"username"`
-		AssetID     int64  `json:"asset_id"`
-		AccountID   int64  `json:"account_id"`
-		SessionNo   string `json:"session_no"`
-		ClientIP    string `json:"client_ip"`
+		UserID    int64  `json:"user_id"`
+		Username  string `json:"username"`
+		AssetID   int64  `json:"asset_id"`
+		AccountID int64  `json:"account_id"`
+		SessionNo string `json:"session_no"`
+		ClientIP  string `json:"client_ip"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
@@ -261,6 +271,29 @@ func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved, err := s.session.AddCommand(r.Context(), id, &c)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, saved)
+}
+
+func (s *Server) handleSessionFile(w http.ResponseWriter, r *http.Request) {
+	if s.session == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	id, err := pathID(r)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	var f model.SessionFile
+	if err := decodeJSON(r, &f); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	saved, err := s.session.AddFile(r.Context(), id, &f)
 	if err != nil {
 		writeServiceError(w, err)
 		return

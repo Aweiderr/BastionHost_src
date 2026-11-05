@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"bastion.local/manager/internal/model"
@@ -135,6 +136,27 @@ func (s *SessionService) AddCommand(ctx context.Context, sessionID int64, c *mod
 	}
 	s.maybeAlertHighRisk(ctx, c)
 	return c, nil
+}
+
+// AddFile 记录一条上传或下载。方向只接受 upload / download。
+func (s *SessionService) AddFile(ctx context.Context, sessionID int64, f *model.SessionFile) (*model.SessionFile, error) {
+	if sessionID == 0 {
+		return nil, fmt.Errorf("会话不存在")
+	}
+	if f == nil {
+		return nil, fmt.Errorf("文件记录为空")
+	}
+	if f.Direction != model.FileDirectionUpload && f.Direction != model.FileDirectionDownload {
+		return nil, fmt.Errorf("文件方向无效")
+	}
+	if strings.TrimSpace(f.FileName) == "" {
+		return nil, fmt.Errorf("文件名不能为空")
+	}
+	f.SessionID = sessionID
+	if err := s.sessionRepo.AddFile(ctx, f); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // maybeAlertHighRisk 策略阻断或高危/致命命令写入 audit_alert，并按规则通道尝试通知。

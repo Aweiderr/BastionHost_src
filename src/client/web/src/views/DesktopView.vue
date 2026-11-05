@@ -4,7 +4,8 @@
  *
  * 像素和键鼠都走代理的 /api/v1/webdesktop，目标口令不下发到浏览器。
  * 连接和窗口变化时把视口发给代理，由 VNC SetDesktopSize 改远端分辨率。
- * 剪贴板、磁盘映射和画面录像不在这一版。
+ * 剪贴板按授权双向同步：can_copy 是远端到本机，can_paste 是本机到远端。
+ * 磁盘映射仍不做。
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -13,6 +14,8 @@ import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebdesktopUrl, dictLabel, PROTOCOL_MAP } from '@/utils/constants'
+import { copyToClipboard } from '@/utils/clipboard'
+import { clipboardFlags, isPasteChord } from '@/utils/desktopClipboard'
 import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { keysymOf } from '@/utils/keysym'
@@ -42,6 +45,11 @@ const credentialAttempt = ref(1)
 const credentialMaxAttempts = ref(0)
 const credentialReason = ref('')
 const credentialSubmitting = ref(false)
+const canCopy = ref(false)
+const canPaste = ref(false)
+
+let pasteHold = false
+let pasteUpQueued = false
 
 let ws: WebSocket | null = null
 let ctx2d: CanvasRenderingContext2D | null = null
@@ -127,6 +135,10 @@ function connect(): void {
   errorText.value = ''
   sessionNo.value = ''
   credentialVisible.value = false
+  canCopy.value = false
+  canPaste.value = false
+  pasteHold = false
+  pasteUpQueued = false
   status.value = 'connecting'
   statusText.value = '连接中…'
   const size = viewportSize()
@@ -213,6 +225,10 @@ function handleControl(raw: string): void {
     max_attempts?: number
     width?: number
     height?: number
+    can_copy?: boolean
+    can_paste?: boolean
+    direction?: string
+    text?: string
   }
   try {
     payload = JSON.parse(raw)
@@ -228,8 +244,21 @@ function handleControl(raw: string): void {
       credentialVisible.value = false
       status.value = 'connected'
       statusText.value = '已连接'
+      const flags = clipboardFlags(payload)
+      canCopy.value = flags.canCopy
+      canPaste.value = flags.canPaste
       canvasEl.value?.focus()
       scheduleResize()
+      break
+    case 'clipboard':
+      if (payload.direction === 'copy' && canCopy.value && payload.text) {
+        void copyToClipboard(payload.text).then((ok) => {
+          if (!ok) app.info('浏览器拒绝写入剪贴板。请使用 HTTPS、localhost，或改用桌面客户端。')
+        })
+      }
+      break
+    case 'clipboard-denied':
+      if (payload.message) app.info(payload.message)
       break
     case 'resize':
       if (Number(payload.width) > 0 && Number(payload.height) > 0) {
@@ -303,11 +332,47 @@ function wheel(event: WheelEvent): void {
   send({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 })
 }
 
+function sendKey(event: KeyboardEvent, down: boolean): void {
+  send({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code })
+}
+
+async function pasteLocal(event: KeyboardEvent): Promise<void> {
+  let text = ''
+  try {
+    text = await navigator.clipboard.readText()
+  } catch {
+    text = ''
+  }
+  if (text) send({ type: 'clipboard', direction: 'paste', text })
+  else app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
+  sendKey(event, true)
+  if (pasteUpQueued) {
+    pasteUpQueued = false
+    sendKey(event, false)
+  }
+  pasteHold = false
+}
+
 function key(event: KeyboardEvent, down: boolean): void {
   if (status.value !== 'connected') return
   if (credentialVisible.value) return
   event.preventDefault()
-  send({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code })
+  if (isPasteChord(event)) {
+    if (!canPaste.value) {
+      sendKey(event, down)
+      return
+    }
+    if (!down) {
+      if (pasteHold) pasteUpQueued = true
+      else sendKey(event, false)
+      return
+    }
+    pasteHold = true
+    pasteUpQueued = false
+    void pasteLocal(event)
+    return
+  }
+  sendKey(event, down)
 }
 
 async function loadFromRoute(): Promise<void> {
@@ -380,7 +445,7 @@ onBeforeUnmount(() => {
       <div>
         <div class="page-title">图形会话</div>
         <div class="page-subtitle">
-          连接已授权的 RDP / VNC 资产。口令由堡垒机代填，不出现在浏览器里。VNC 会按窗口大小协商分辨率，避免左右黑边。剪贴板、磁盘映射和画面录像尚未开通。
+          连接已授权的 RDP / VNC 资产。口令由堡垒机代填，不出现在浏览器里。VNC 会按窗口大小协商分辨率。复制是远端到本机，粘贴是本机到远端。画面会按间隔采样进图形录像，和字符终端录像不是同一种文件。磁盘映射尚未开通。
         </div>
       </div>
     </div>
@@ -398,6 +463,9 @@ onBeforeUnmount(() => {
           <span class="tag" :class="status === 'connected' ? 'tag-success' : ''">{{ statusText }}</span>
           <span v-if="sessionNo" class="text-secondary">会话 {{ sessionNo }}</span>
           <span v-if="status === 'connected'" class="text-secondary">{{ remoteW }}×{{ remoteH }}</span>
+          <span v-if="status === 'connected'" class="text-secondary">
+            复制{{ canCopy ? '允许' : '禁止' }} · 粘贴{{ canPaste ? '允许' : '禁止' }}
+          </span>
           <span class="spacer" style="flex: 1" />
           <button
             v-for="acc in asset.accounts"

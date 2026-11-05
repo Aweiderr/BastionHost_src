@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 
 	"bastion.local/server/internal/managerclient"
+	"bastion.local/server/internal/record"
 )
 
 // deskRect 是一块已经转成 RGBA 的画面更新（自上而下，每像素 4 字节）。
@@ -36,6 +37,8 @@ type screenConn interface {
 	// Resize 请求远端改分辨率。VNC 在对端声明 ExtendedDesktopSize 之后发 SetDesktopSize。
 	// RDP 的尺寸在连接时写进 MCS Core Data，已建立的会话不会跟着窗口再变。
 	Resize(width, height int) error
+	// SetClipboard 把本机文本放进远端剪贴板。调用方必须先按 can_paste 放行。
+	SetClipboard(text string) error
 }
 
 // screenDialFunc 拨到目标资产。测试可以替换它，生产为 nil 时按协议选择。
@@ -62,17 +65,19 @@ type deskAuth struct {
 }
 
 type deskInput struct {
-	Type     string `json:"type"`
-	X        int    `json:"x"`
-	Y        int    `json:"y"`
-	Buttons  int    `json:"buttons"`
-	Down     bool   `json:"down"`
-	Keysym   uint32 `json:"keysym"`
-	Code     string `json:"code"`
-	Delta    int    `json:"delta"`
-	Password string `json:"password"`
-	Width    int    `json:"width"`
-	Height   int    `json:"height"`
+	Type      string `json:"type"`
+	X         int    `json:"x"`
+	Y         int    `json:"y"`
+	Buttons   int    `json:"buttons"`
+	Down      bool   `json:"down"`
+	Keysym    uint32 `json:"keysym"`
+	Code      string `json:"code"`
+	Delta     int    `json:"delta"`
+	Password  string `json:"password"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	Text      string `json:"text"`
+	Direction string `json:"direction"`
 }
 
 // WebDesktopHandler 是 RDP / VNC 的浏览器画面通道（WebSocket）。
@@ -82,7 +87,8 @@ type deskInput struct {
 // 客户端用 {"type":"resize","width","height"} 报告视口，VNC 再转成 SetDesktopSize。
 // 目标口令只留在代理进程里，不下发给浏览器。
 //
-// 本通道不做图形录像。会话开始和结束仍写入 ops_session。
+// 剪贴板按授权的 can_copy（远端到本机）和 can_paste（本机到远端）双向同步。
+// 图形录像与字符录像不是同一种明文，见 graphicalLog。
 func (s *Server) WebDesktopHandler() http.HandlerFunc {
 	var ops desktopOps
 	if s != nil && s.client != nil {
@@ -189,6 +195,9 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		fail("授权校验未通过：" + check.Reason)
 		return
 	}
+	clips := &clipGate{canCopy: check.CanCopy, canPaste: check.CanPaste, write: func(v map[string]any) {
+		writeJSON(ctx, v)
+	}}
 
 	clientType := auth.ClientType
 	if clientType != "desktop" {
@@ -223,6 +232,9 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 	outcome := endConnectFailed
 	credMode := "managed"
 	readySent := false
+	var rec *record.Writer
+	var glog *graphicalLog
+	recStatus := recordNone
 	defer func() {
 		if readySent {
 			writeJSON(context.Background(), map[string]any{"type": "exit", "reason": outcome})
@@ -236,7 +248,20 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		payload := map[string]any{
 			"status": status, "end_reason": reason,
 			"command_count": 0, "block_count": 0,
-			"record_status": recordNone, "credential_mode": credMode,
+			"record_status": recStatus, "credential_mode": credMode,
+		}
+		if rec != nil {
+			path, size, digest, chunks, err := rec.Seal()
+			if err != nil {
+				slog.Error("图形录像封存失败", "session_id", sess.SessionID, "err", err)
+				payload["record_status"] = recordFailed
+			} else {
+				payload["record_status"] = recordSealed
+				payload["record_path"] = path
+				payload["record_size"] = size
+				payload["record_digest"] = digest
+				payload["record_chunks"] = chunks
+			}
 		}
 		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer fcancel()
@@ -266,6 +291,23 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		fail("连接协议与资产台账不一致")
 		return
 	}
+	if s != nil && s.cfg != nil && s.cfg.Record.Driver == "local" && s.recordKeyID != "" && s.prov != nil {
+		// 录像加密不能绑在会话 ctx 上：画面循环结束时会先 cancel，
+		// 封存和最后一帧如果还用那个 ctx，加密会被取消，文件里只剩开头的 meta。
+		w, err := record.New(context.Background(), s.prov, s.recordKeyID, record.Options{
+			Dir: s.cfg.Record.LocalDir, SessionNo: sess.SessionNo,
+			ChunkSize: s.cfg.Record.ChunkSize, ChunkSecs: s.cfg.Record.ChunkSecs,
+		})
+		if err != nil {
+			slog.Error("图形录像初始化失败，会话继续但不录像", "session_no", sess.SessionNo, "err", err)
+			recStatus = recordFailed
+		} else {
+			rec = w
+			recStatus = recordRecording
+			glog = newGraphicalLog(rec, proto)
+			glog.writeMeta(width, height)
+		}
+	}
 
 	peer, err := s.dialDesktop(ctx, c, ws, cred, width, height, live.touch, dial)
 	if err != nil {
@@ -274,6 +316,9 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 	}
 	defer peer.Close()
 	live.addCloser(peer)
+	if src, ok := peer.(clipboardSource); ok {
+		src.setOnClipboard(clips.fromRemote)
+	}
 	dw, dh := peer.Size()
 	if dw > 0 && dh > 0 {
 		width, height = dw, dh
@@ -284,7 +329,8 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		"type": "ready", "session_no": sess.SessionNo,
 		"protocol": proto, "asset_name": cred.AssetName, "account_name": cred.AccountName,
 		"host": cred.Host, "port": cred.Port, "width": width, "height": height,
-		"recording": false,
+		"recording": rec != nil,
+		"can_copy":  clips.canCopy, "can_paste": clips.canPaste,
 	})
 
 	batch := newBitmapBatch(width, height, bitmapFrameInterval, func(payload []byte) error {
@@ -293,6 +339,9 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		return ws.write(wctx, payload)
 	})
 	defer batch.Close()
+	if glog != nil {
+		batch.setFrameSink(glog.writeFrame, graphicalRecordMinInterval)
+	}
 	if vs, ok := peer.(*vncSession); ok {
 		vs.setOnResize(func(w, h int) {
 			batch.Resize(w, h)
@@ -308,7 +357,7 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 	inputDone := make(chan struct{})
 	go func() {
 		defer close(inputDone)
-		s.readDesktopInput(ctx, c, peer, live.touch)
+		s.readDesktopInput(ctx, c, peer, live.touch, clips)
 	}()
 
 	select {
@@ -407,7 +456,7 @@ func (s *Server) dialDesktop(ctx context.Context, c *websocket.Conn, ws *wsWrite
 	return nil, fmt.Errorf("口令验证失败次数过多（%d 次），会话已终止；该尝试已计入审计", attempts)
 }
 
-func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer screenConn, touch func()) {
+func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer screenConn, touch func(), clips *clipGate) {
 	var generation atomic.Uint64
 	var timer *time.Timer
 	defer func() {
@@ -437,6 +486,26 @@ func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer s
 			_ = peer.Key(msg.Down, msg.Keysym, msg.Code)
 		case "wheel":
 			_ = peer.Wheel(msg.X, msg.Y, msg.Delta)
+		case "clipboard":
+			text, deny := clips.acceptPaste(msg.Direction, msg.Text)
+			if deny != "" {
+				dir := msg.Direction
+				if dir == "" {
+					dir = "paste"
+				}
+				if clips != nil && clips.write != nil {
+					clips.write(map[string]any{
+						"type": "clipboard-denied", "direction": dir, "message": deny,
+					})
+				}
+				continue
+			}
+			if err := peer.SetClipboard(text); err != nil && clips != nil && clips.write != nil {
+				clips.write(map[string]any{
+					"type": "clipboard-denied", "direction": "paste",
+					"message": "无法写入远端剪贴板：" + err.Error(),
+				})
+			}
 		case "resize":
 			w, h := clampDesktopSize(msg.Width, msg.Height)
 			gen := generation.Add(1)

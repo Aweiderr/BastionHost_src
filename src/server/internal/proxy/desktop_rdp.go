@@ -27,10 +27,11 @@ func init() {
 }
 
 // rdpSession 用 Go RDP 客户端把位图转成 RGBA，再交给同一条画面 WebSocket。
-// 不启用剪贴板和磁盘映射通道。
+// 文本剪贴板走 cliprdr。不启用磁盘映射，剪贴板里的文件请求直接拒绝。
 type rdpSession struct {
 	conn net.Conn
 	pdu  *pdu.Client
+	clip *rdpClip
 
 	width  int
 	height int
@@ -56,11 +57,19 @@ func dialRDP(ctx context.Context, addr, user, password string, width, height int
 		height: height,
 		done:   make(chan error, 1),
 	}
+	var sc *sec.Client
+	sess.clip = newRDPClip(func(b []byte) error {
+		if sc == nil {
+			return fmt.Errorf("RDP 剪贴板通道不可用")
+		}
+		_, err := sc.SendToChannel("cliprdr", b)
+		return err
+	})
 	ntlm := nla.NewNTLMv2(domain, uname, password)
 	tk := tpkt.New(core.NewSocketLayer(conn), ntlm)
 	x := x224.New(tk)
 	mcs := t125.NewMCSClient(x)
-	sc := sec.NewClient(mcs)
+	sc = sec.NewClient(mcs)
 	pc := pdu.NewClient(sc)
 	sess.pdu = pc
 
@@ -88,6 +97,11 @@ func dialRDP(ctx context.Context, addr, user, password string, width, height int
 	})
 	pc.On("update", func(rects []pdu.BitmapData) {
 		sess.onBitmaps(rects)
+	})
+	sc.On("channel", func(name string, data []byte) {
+		if clipChannel(name) {
+			sess.clip.handle(data)
+		}
 	})
 
 	if err := x.Connect(); err != nil {
@@ -225,6 +239,19 @@ func (r *rdpSession) Wheel(x, y, delta int) error {
 	}
 	r.sendPointer(flags, x, y)
 	return nil
+}
+
+func (r *rdpSession) setOnClipboard(fn func(string)) {
+	if r.clip != nil {
+		r.clip.setHandler(fn)
+	}
+}
+
+func (r *rdpSession) SetClipboard(text string) error {
+	if r.clip == nil {
+		return fmt.Errorf("RDP 剪贴板通道不可用")
+	}
+	return r.clip.offer(text)
 }
 
 func (r *rdpSession) Key(down bool, keysym uint32, code string) error {

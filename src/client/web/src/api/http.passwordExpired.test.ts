@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PASSWORD_EXPIRED_CODE, PASSWORD_EXPIRED_MESSAGE, shouldClearSession } from './http.ts'
+import {
+  KICKED_BY_OTHER_CLIENT_CODE,
+  KICKED_BY_OTHER_CLIENT_MESSAGE,
+  PASSWORD_EXPIRED_CODE,
+  PASSWORD_EXPIRED_MESSAGE,
+  sessionEndedMessage,
+  shouldClearSession,
+} from './http.ts'
 
 test('AUTH_4008 即使是 HTTP 401 也不清会话', () => {
   assert.equal(shouldClearSession(401, PASSWORD_EXPIRED_CODE), false)
@@ -21,4 +28,13 @@ test('普通 403 不是会话失效', () => {
 
 test('口令过期文案与后端 MessageOf 一致', () => {
   assert.equal(PASSWORD_EXPIRED_MESSAGE, '口令已过期，请先修改口令')
+})
+
+test('被其他端踢下线时清会话并保留「已在其他端登录」', () => {
+  assert.equal(shouldClearSession(401, KICKED_BY_OTHER_CLIENT_CODE), true)
+  assert.equal(sessionEndedMessage(KICKED_BY_OTHER_CLIENT_CODE, KICKED_BY_OTHER_CLIENT_MESSAGE), '已在其他端登录')
+  assert.equal(sessionEndedMessage(KICKED_BY_OTHER_CLIENT_CODE, ''), '已在其他端登录')
+  assert.equal(sessionEndedMessage(KICKED_BY_OTHER_CLIENT_CODE, '账号已在其他会话登录'), '账号已在其他会话登录')
+  assert.equal(sessionEndedMessage('AUTH_4005', '登录已过期，请重新登录'), '登录已过期，请重新登录')
+  assert.equal(sessionEndedMessage('AUTH_4005', ''), '登录状态已失效，请重新登录')
 })

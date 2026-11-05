@@ -20,10 +20,16 @@ const appStore = useAppStore(pinia)
 // 保证首个路由守卫触发的 /auth/me 请求就已带上访问令牌。
 configureHttp({
   getToken: () => auth.accessToken || null,
-  onUnauthorized: () => {
+  onUnauthorized: (message: string) => {
     if (!auth.isAuthenticated) return
     auth.clear()
-    appStore.error('登录状态已失效，请重新登录')
+    const text = message || '登录状态已失效，请重新登录'
+    appStore.error(text)
+    try {
+      window.sessionStorage.setItem('bastion.auth.ended', text)
+    } catch {
+      /* 隐私模式写不进去时，toast 仍然在 */
+    }
     const current = router.currentRoute.value
     if (current.path !== '/login') {
       void router.replace({ path: '/login', query: { redirect: current.fullPath } })

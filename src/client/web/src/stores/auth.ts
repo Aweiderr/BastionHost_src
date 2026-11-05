@@ -154,6 +154,7 @@ export const useAuthStore = defineStore('auth', () => {
         totp_code: totpCode || undefined,
         captcha_id: captcha?.id || undefined,
         captcha_code: captcha?.code || undefined,
+        client_type: 'web',
       })
       // MFA 未完成时**不写入会话**：此时 access_token 为空，
       // 写进去会让 isAuthenticated 短暂为真，路由守卫可能误判为已登录。

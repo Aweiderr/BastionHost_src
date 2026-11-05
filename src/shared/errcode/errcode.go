@@ -34,17 +34,22 @@ const (
 	// HTTP 状态是 403 而不是 401（见 ErrToStatus）：此时访问令牌仍然有效，
 	// 只是除改密 / 登出 / 查看自身外的接口被拒绝。若映射成 401，客户端会把它
 	// 当成会话失效，清掉刚签发的令牌并把用户踢回登录页。
-	ErrPasswordExpired   Code = "AUTH_4008"
+	ErrPasswordExpired Code = "AUTH_4008"
+	// ErrKickedByOtherClient 同一用户在另一类客户端登录，本会话已被作废。
+	//
+	// HTTP 401，客户端应清掉本地令牌，并明确提示「已在其他端登录」，
+	// 不要和口令过期（403）或普通过期混成同一句。
+	ErrKickedByOtherClient Code = "AUTH_4009"
 
 	// 402x 段：准入模式（FR-08-13）
-	ErrPermitRequired     Code = "PERMIT_4001"
-	ErrPermitExpired      Code = "PERMIT_4002"
-	ErrPermitRevoked      Code = "PERMIT_4003"
-	ErrDeviceMismatch     Code = "PERMIT_4004"
-	ErrStrictModeOnly     Code = "PERMIT_4005"
-	ErrAccessModeLoose    Code = "PERMIT_4006"
-	ErrOperatorRequired   Code = "PERMIT_4007"
-	ErrAppScopeViolation  Code = "PERMIT_4008"
+	ErrPermitRequired    Code = "PERMIT_4001"
+	ErrPermitExpired     Code = "PERMIT_4002"
+	ErrPermitRevoked     Code = "PERMIT_4003"
+	ErrDeviceMismatch    Code = "PERMIT_4004"
+	ErrStrictModeOnly    Code = "PERMIT_4005"
+	ErrAccessModeLoose   Code = "PERMIT_4006"
+	ErrOperatorRequired  Code = "PERMIT_4007"
+	ErrAppScopeViolation Code = "PERMIT_4008"
 
 	// 403x 段：资产与凭据
 	//
@@ -61,17 +66,17 @@ const (
 	ErrRecordCorrupted Code = "RECORD_4002"
 
 	// 500 段：服务端错误
-	ErrInternal      Code = "SYS_5000"
-	ErrDBUnavailable Code = "SYS_5001"
-	ErrCryptoFailure Code = "SYS_5002"
+	ErrInternal       Code = "SYS_5000"
+	ErrDBUnavailable  Code = "SYS_5001"
+	ErrCryptoFailure  Code = "SYS_5002"
 	ErrNotImplemented Code = "SYS_5003"
 	// ErrNotReady 依赖未就绪（如命令策略尚未从管理服务加载）
 	ErrNotReady Code = "SYS_5004"
 
 	// 900x 段：系统管理（与详设 6.13.6 一致）
-	ErrOnlySysAdmin   Code = "SYS_9002"
-	ErrTimeRollback   Code = "SYS_9003"
-	ErrSecondConfirm  Code = "SYS_9004"
+	ErrOnlySysAdmin  Code = "SYS_9002"
+	ErrTimeRollback  Code = "SYS_9003"
+	ErrSecondConfirm Code = "SYS_9004"
 )
 
 // Error 是带错误码的业务错误。

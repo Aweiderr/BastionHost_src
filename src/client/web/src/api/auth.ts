@@ -63,7 +63,7 @@ export function sendMfaCode(challengeId: string) {
 export function verifyMfa(challengeId: string, code: string) {
   return request<{ login: LoginResult; auth_method: string }>('/auth/mfa/verify', {
     method: 'POST',
-    body: { challenge_id: challengeId, code },
+    body: { challenge_id: challengeId, code, client_type: 'web' },
     auth: false,
   })
 }

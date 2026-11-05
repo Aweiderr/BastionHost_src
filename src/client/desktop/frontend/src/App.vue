@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { state, notify, rejectLogin, clearLoginError, type DeviceInfo, type Profile } from './store'
 import { isOpsUser, opsDeniedMessage } from './opsRole'
 import LoginView from './views/LoginView.vue'
@@ -7,6 +7,7 @@ import WorkbenchView from './views/WorkbenchView.vue'
 import SessionsView from './views/SessionsView.vue'
 import DeviceView from './views/DeviceView.vue'
 import { GetCoreURL, GetDeviceInfo, GetProfile, Logout, TryAutoLogin } from '../wailsjs/go/main/App'
+import { EventsOff, EventsOn } from '../wailsjs/runtime/runtime'
 
 const ready = ref(false)
 const toastVisible = ref(false)
@@ -28,7 +29,17 @@ function acceptProfile(p: Profile) {
   state.loggedIn = true
 }
 
+function onKicked(payload: unknown) {
+  state.loggedIn = false
+  state.profile = null
+  state.assets = []
+  state.activeKey = ''
+  const text = typeof payload === 'string' && payload.trim() ? payload : '已在其他端登录'
+  rejectLogin(text)
+}
+
 onMounted(async () => {
+  EventsOn('auth:kicked', onKicked)
   try {
     state.coreURL = await GetCoreURL()
     state.device = (await GetDeviceInfo()) as unknown as DeviceInfo
@@ -52,6 +63,10 @@ onMounted(async () => {
   } finally {
     ready.value = true
   }
+})
+
+onBeforeUnmount(() => {
+  EventsOff('auth:kicked')
 })
 
 async function doLogout() {

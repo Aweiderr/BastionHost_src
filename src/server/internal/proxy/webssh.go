@@ -143,7 +143,7 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 	acancel()
 	if err != nil {
 		slog.Info("WebSSH 令牌校验失败", "remote", remoteIP, "err", err)
-		fail("登录状态已失效，请重新登录")
+		fail(authDeniedMessage(err))
 		return
 	}
 	if !hasPermission(ident.Permissions, "ops:session:connect") {

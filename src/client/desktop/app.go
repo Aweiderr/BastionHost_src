@@ -40,15 +40,19 @@ type App struct {
 	sessions map[string]*term.Session
 	desktops map[string]*desk.Session
 	seq      int
+	// watchCancel 停止“是否被另一端踢下线”的轮询。
+	watchCancel context.CancelFunc
 }
 
 // NewApp 创建应用对象。
 func NewApp(coreURL string) *App {
-	return &App{
+	a := &App{
 		api:      coreapi.New(coreURL),
 		sessions: make(map[string]*term.Session),
 		desktops: make(map[string]*desk.Session),
 	}
+	a.api.SetOnSessionEnded(a.onSessionEnded)
+	return a
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -180,6 +184,7 @@ func (a *App) Login(username, password, totp, captchaID, captchaCode string) (*c
 	if res != nil && !res.MFARequired {
 		slog.Info("登录成功", "user", res.Username, "roles", res.Roles,
 			"device_id", a.deviceInfo().DeviceID)
+		a.startSessionWatch()
 	}
 	return res, nil
 }
@@ -219,15 +224,13 @@ func (a *App) ensureOps(res *coreapi.LoginResult) error {
 
 // discardLogin 丢掉刚签发的会话：服务端登出，并清除内存中的用户与口令。
 func (a *App) discardLogin() {
+	a.stopSessionWatch()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := a.api.Logout(ctx); err != nil {
 		slog.Warn("拒绝登录后登出失败", "err", err)
 	}
-	a.mu.Lock()
-	a.user = nil
-	a.password = ""
-	a.mu.Unlock()
+	a.dropLocalSession()
 }
 
 func rolesOf(res *coreapi.LoginResult) []string {
@@ -239,6 +242,16 @@ func rolesOf(res *coreapi.LoginResult) []string {
 
 // Logout 登出并清理所有会话与内存中的口令。
 func (a *App) Logout() error {
+	a.stopSessionWatch()
+	a.dropLocalSession()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	_ = a.api.Logout(ctx)
+	return nil
+}
+
+// dropLocalSession 关掉本机终端并清掉内存中的用户与口令，不请求服务端。
+func (a *App) dropLocalSession() {
 	a.mu.Lock()
 	sessions := make([]*term.Session, 0, len(a.sessions))
 	for _, s := range a.sessions {
@@ -260,10 +273,68 @@ func (a *App) Logout() error {
 	for _, s := range desktops {
 		_ = s.Close()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	_ = a.api.Logout(ctx)
-	return nil
+}
+
+// onSessionEnded 在访问令牌被作废（含被另一端登录踢下线）时清掉本地会话。
+func (a *App) onSessionEnded(msg string) {
+	a.stopSessionWatch()
+	a.dropLocalSession()
+	if strings.TrimSpace(msg) == "" {
+		msg = "已在其他端登录"
+	}
+	slog.Info("登录会话已失效", "reason", msg)
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "auth:kicked", msg)
+	}
+}
+
+func (a *App) startSessionWatch() {
+	// 单元测试没有 Wails 上下文。不在那里起轮询，避免打到测试服务器的 /auth/me。
+	if a.ctx == nil {
+		return
+	}
+	a.stopSessionWatch()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.mu.Lock()
+	a.watchCancel = cancel
+	a.mu.Unlock()
+	go a.watchSession(ctx)
+}
+
+func (a *App) stopSessionWatch() {
+	a.mu.Lock()
+	cancel := a.watchCancel
+	a.watchCancel = nil
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// watchSession 定期用当前令牌访问 /auth/me。
+//
+// 被另一端踢下线不会推送到桌面，只能等下一次请求。这里每 15 秒问一次，
+// 收到 401 后 coreapi 会回调 onSessionEnded，界面回到登录页并提示原因。
+func (a *App) watchSession(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if a.api.Token() == "" {
+				return
+			}
+			cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			_, err := a.api.Me(cctx)
+			cancel()
+			// 会话失效时 coreapi 已清掉令牌并回调 onSessionEnded。网络错误则继续问。
+			if err != nil && a.api.Token() == "" {
+				return
+			}
+		}
+	}
 }
 
 // GetProfile 返回当前登录用户（未登录返回 nil）。
@@ -618,6 +689,7 @@ func (a *App) VerifyMFA(challengeID, code string) (*coreapi.LoginResult, error) 
 	if res != nil {
 		slog.Info("登录成功", "user", res.Username, "roles", res.Roles,
 			"device_id", a.deviceInfo().DeviceID)
+		a.startSessionWatch()
 	}
 	return res, nil
 }

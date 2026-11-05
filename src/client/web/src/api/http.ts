@@ -32,11 +32,20 @@ export const PASSWORD_EXPIRED_CODE = 'AUTH_4008'
 /** 与后端 MessageOf(ErrPasswordExpired) 保持一致，响应体没有 message 时用它 */
 export const PASSWORD_EXPIRED_MESSAGE = '口令已过期，请先修改口令'
 
+/** 同一用户在另一类客户端登录后，本会话被作废。 */
+export const KICKED_BY_OTHER_CLIENT_CODE = 'AUTH_4009'
+
+/** 与后端 MessageOf(ErrKickedByOtherClient) 保持一致 */
+export const KICKED_BY_OTHER_CLIENT_MESSAGE = '已在其他端登录'
+
+/** 登录页读取后展示，避免只闪一下 toast 用户就不知道为什么被退回。 */
+export const SESSION_ENDED_STORAGE_KEY = 'bastion.auth.ended'
+
 interface HttpHooks {
   /** 读取当前访问令牌 */
   getToken: () => string | null
-  /** 401 且不是口令过期：令牌失效，需清理会话并跳转登录 */
-  onUnauthorized: () => void
+  /** 401 且不是口令过期：令牌失效，需清理会话并跳转登录。message 为给用户看的原因。 */
+  onUnauthorized: (message: string) => void
   /**
    * AUTH_4008：口令过期或须修改临时口令。
    * 禁止清理会话；应提示真实原因并打开修改口令。
@@ -123,6 +132,19 @@ export function shouldClearSession(status: number, code: string | undefined): bo
   return status === 401
 }
 
+/**
+ * 401 清会话时给用户看的句子。
+ *
+ * 被另一端踢下线必须说「已在其他端登录」。其它 401 优先用服务端原文
+ * （例如「登录已过期，请重新登录」），没有原文时才用兜底句。
+ */
+export function sessionEndedMessage(code: string | undefined, message: string | undefined): string {
+  const text = message?.trim() ?? ''
+  if (code === KICKED_BY_OTHER_CLIENT_CODE) return text || KICKED_BY_OTHER_CLIENT_MESSAGE
+  if (text) return text
+  return '登录状态已失效，请重新登录'
+}
+
 async function readPayload<T>(response: Response): Promise<Envelope<T> | null> {
   const text = await response.text()
   if (!text) return null
@@ -174,8 +196,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   throwIfPasswordExpired(payload, response.status)
 
   if (shouldClearSession(response.status, payload?.code)) {
-    hooks.onUnauthorized()
-    throw new ApiError('UNAUTHORIZED', '登录状态已失效，请重新登录', 401)
+    const message = sessionEndedMessage(payload?.code, payload?.message)
+    hooks.onUnauthorized(message)
+    throw new ApiError(payload?.code || 'UNAUTHORIZED', message, 401)
   }
 
   if (response.status === 403) {
@@ -235,8 +258,9 @@ export async function requestText(path: string, options: RequestOptions = {}): P
   }
   throwIfPasswordExpired(payload, response.status)
   if (shouldClearSession(response.status, payload?.code)) {
-    hooks.onUnauthorized()
-    throw new ApiError('UNAUTHORIZED', '登录状态已失效，请重新登录', 401)
+    const ended = sessionEndedMessage(payload?.code, payload?.message)
+    hooks.onUnauthorized(ended)
+    throw new ApiError(payload?.code || 'UNAUTHORIZED', ended, 401)
   }
   if (!silent) hooks.onError(message)
   throw new ApiError(code, message, response.status)

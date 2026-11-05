@@ -132,6 +132,11 @@ type bitmapBatch struct {
 	closed bool
 	err    error
 	logged bool
+
+	// sink 把整屏 JPEG 交给图形录像。nil 时不采样。
+	sink      func(w, h int, jpeg []byte)
+	sinkEvery time.Duration
+	sinkAt    time.Time
 }
 
 func newBitmapBatch(w, h int, interval time.Duration, write func([]byte) error) *bitmapBatch {
@@ -204,7 +209,11 @@ func (b *bitmapBatch) loop() {
 			b.cond.Wait()
 		}
 		if b.err != nil || (len(b.dirty) == 0 && b.closed) {
+			closing := b.closed && b.err == nil
 			b.mu.Unlock()
+			if closing {
+				b.maybeRecord(true)
+			}
 			return
 		}
 		flushNow := b.closed
@@ -230,13 +239,57 @@ func (b *bitmapBatch) loop() {
 		rects := b.snapshotLocked()
 		b.mu.Unlock()
 		if err := b.emit(rects); err != nil {
+			// 浏览器已经断开时，画面写不出去，但帧缓冲里的像素仍要进录像。
+			b.maybeRecord(true)
 			b.mu.Lock()
 			b.err = err
 			b.mu.Unlock()
 			return
 		}
+		b.maybeRecord(flushNow)
 		b.mu.Lock()
 	}
+}
+
+// setFrameSink 登记整屏采样。interval <= 0 时每次脏矩形都采样。
+// 采样的是帧缓冲里的整屏，不是单个脏矩形，回放才不会丢掉被跳过的区域。
+func (b *bitmapBatch) setFrameSink(fn func(w, h int, jpeg []byte), interval time.Duration) {
+	b.mu.Lock()
+	b.sink = fn
+	b.sinkEvery = interval
+	b.mu.Unlock()
+}
+
+func (b *bitmapBatch) maybeRecord(force bool) {
+	b.mu.Lock()
+	fn := b.sink
+	every := b.sinkEvery
+	var pix []byte
+	w, h := b.w, b.h
+	if fn != nil && w > 0 && h > 0 && len(b.fb) >= w*h*4 && (force || every <= 0 || b.sinkAt.IsZero() || time.Since(b.sinkAt) >= every) {
+		pix = append([]byte(nil), b.fb[:w*h*4]...)
+		b.sinkAt = time.Now()
+	}
+	b.mu.Unlock()
+	if pix == nil || fn == nil {
+		return
+	}
+	jpegBytes, err := encodeRGBAJPEG(pix, w, h)
+	if err != nil {
+		slog.Debug("图形录像采样失败", "err", err)
+		return
+	}
+	fn(w, h, jpegBytes)
+}
+
+func encodeRGBAJPEG(pix []byte, w, h int) ([]byte, error) {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	copy(img.Pix, pix)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: bitmapJPEGQuality}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (b *bitmapBatch) emit(rects []deskRect) error {

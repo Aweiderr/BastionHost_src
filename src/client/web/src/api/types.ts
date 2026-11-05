@@ -510,9 +510,22 @@ export interface SessionCommand {
   command_time: string
 }
 
+export interface SessionFile {
+  file_id?: number
+  direction: string
+  file_name: string
+  file_path?: string
+  file_size: number
+  file_digest?: string
+  policy_action: string
+  transfer_result: string
+  file_time?: string
+}
+
 export interface AuditSessionDetail {
   session: AuditSession
   commands: SessionCommand[]
+  files?: SessionFile[]
   record_play_url?: string
 }
 

@@ -303,6 +303,19 @@ func (c *Client) AccessibleAssets(ctx context.Context, userID int64) ([]*AssetBr
 	return out.Items, nil
 }
 
+// AccessibleFileAssets 查询可以做 SFTP 的资产。
+// 与 AccessibleAssets 不同：这里看 can_file，不要求 can_login。
+func (c *Client) AccessibleFileAssets(ctx context.Context, userID int64) ([]*AssetBrief, error) {
+	var out struct {
+		Items []*AssetBrief `json:"items"`
+	}
+	path := "/internal/v1/ops/assets?purpose=file&user_id=" + strconv.FormatInt(userID, 10)
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
 // CheckGrant 校验授权。
 func (c *Client) CheckGrant(ctx context.Context, userID, assetID, accountID int64) (*GrantCheck, error) {
 	q := url.Values{}
@@ -426,6 +439,25 @@ type SessionCommandPayload struct {
 // AddCommand 上报命令记录。
 func (c *Client) AddCommand(ctx context.Context, sessionID int64, payload *SessionCommandPayload) error {
 	path := "/internal/v1/sessions/" + strconv.FormatInt(sessionID, 10) + "/commands"
+	return c.do(ctx, http.MethodPost, path, payload, nil)
+}
+
+// SessionFilePayload 是文件传输留痕。
+type SessionFilePayload struct {
+	Direction      string `json:"direction"`
+	FileName       string `json:"file_name"`
+	FilePath       string `json:"file_path,omitempty"`
+	FileSize       int64  `json:"file_size"`
+	FileDigest     string `json:"file_digest,omitempty"`
+	FileType       string `json:"file_type,omitempty"`
+	PolicyAction   string `json:"policy_action"`
+	TransferResult string `json:"transfer_result"`
+	DurationMs     *int   `json:"duration_ms,omitempty"`
+}
+
+// AddFile 上报一条上传或下载记录。
+func (c *Client) AddFile(ctx context.Context, sessionID int64, payload *SessionFilePayload) error {
+	path := "/internal/v1/sessions/" + strconv.FormatInt(sessionID, 10) + "/files"
 	return c.do(ctx, http.MethodPost, path, payload, nil)
 }
 

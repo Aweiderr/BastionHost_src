@@ -131,6 +131,7 @@ func (s *Server) handleAuditSessionDetail(w http.ResponseWriter, r *http.Request
 	rec := map[string]any{
 		"session":  sess,
 		"commands": sess.Commands,
+		"files":    sess.Files,
 	}
 	// 录像回放地址：录像文件在代理节点本地，由服务端提供解密流。
 	// 主机名必须取**当前请求的 Host**：若直接用配置里的地址（默认 127.0.0.1），

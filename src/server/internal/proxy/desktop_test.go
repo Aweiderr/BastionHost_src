@@ -346,11 +346,16 @@ func waitDeskResize(t *testing.T, ctx context.Context, conn *websocket.Conn, w, 
 
 func startDesktopServer(t *testing.T, fake *fakeOracle) (*Server, *httptest.Server) {
 	t.Helper()
+	return startDesktopServerDial(t, fake, nil)
+}
+
+func startDesktopServerDial(t *testing.T, fake *fakeOracle, dial screenDialFunc) (*Server, *httptest.Server) {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Proxy.WebSSHOrigins = []string{"*"}
 	cfg.Proxy.ConnectTimeout = 3 * time.Second
 	s := NewServer(cfg, nil, nil, nil, "")
-	srv := httptest.NewServer(s.webDesktopHandler(fake, nil))
+	srv := httptest.NewServer(s.webDesktopHandler(fake, dial))
 	return s, srv
 }
 

@@ -99,6 +99,14 @@ type ProxyConfig struct {
 	WebSSHOrigins []string
 	// DefaultHostKeyPolicy 资产未配置策略时的默认主机指纹策略（tofu/strict/insecure）
 	DefaultHostKeyPolicy string
+	// SFTPUpload / SFTPDownload 是节点级方向开关，取 allow 或 deny。空值表示允许。
+	// 授权上的 can_file 为假时，两个方向都不开，这里不能把它们打开。
+	SFTPUpload   string
+	SFTPDownload string
+	// SFTPMaxBytes 是单个文件的字节上限。0 表示用代理内建的 100MiB。
+	SFTPMaxBytes int64
+	// SFTPDenyExt 是拒绝传输的扩展名，可带点也可不带。
+	SFTPDenyExt []string
 }
 
 // CredentialManualConfig 是"凭据不托管"模式下向运维人员索取口令的策略。
@@ -185,6 +193,10 @@ func Load() (*Config, error) {
 			CommandBufSize:       configx.Int("BASTION_CMD_BUF", 4096),
 			WebSSHOrigins:        configx.CSV("BASTION_WEBSSH_ORIGINS", nil),
 			DefaultHostKeyPolicy: configx.Str("BASTION_HOSTKEY_POLICY", "tofu"),
+			SFTPUpload:           configx.Str("BASTION_SFTP_UPLOAD", "allow"),
+			SFTPDownload:         configx.Str("BASTION_SFTP_DOWNLOAD", "allow"),
+			SFTPMaxBytes:         int64(configx.Int("BASTION_SFTP_MAX_BYTES", 100<<20)),
+			SFTPDenyExt:          configx.CSV("BASTION_SFTP_DENY_EXT", nil),
 		},
 		Manager: ManagerConfig{
 			BaseURL:       configx.Str("BASTION_MANAGER_URL", "http://127.0.0.1:8080"),

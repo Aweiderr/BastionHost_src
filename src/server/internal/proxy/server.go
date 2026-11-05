@@ -527,8 +527,18 @@ func (s *Server) handleSession(ctx context.Context, conn *ssh.ServerConn, ident 
 			fmt.Fprint(ch, "本网关仅支持交互式会话，不支持 exec 直连命令。\r\n")
 			return
 		case "subsystem":
-			_ = req.Reply(false, nil)
-			fmt.Fprint(ch, "SFTP 子系统尚未开放，请使用交互式会话。\r\n")
+			if subsystemName(req.Payload) != "sftp" {
+				_ = req.Reply(false, nil)
+				fmt.Fprint(ch, "仅支持 SFTP 子系统。\r\n")
+				return
+			}
+			if !s.tryTrackSession() {
+				_ = req.Reply(false, nil)
+				fmt.Fprint(ch, "网关正在重启，请稍后重新连接。\r\n")
+				return
+			}
+			defer s.wg.Done()
+			s.runSFTP(ctx, ident, ch, req, remoteIP)
 			return
 		case "window-change":
 			_ = req.Reply(false, nil)
@@ -873,45 +883,9 @@ func (s *Server) commandUploader(sessionID int64, ch <-chan managerclient.Sessio
 // dialTarget 连接目标资产并请求 pty。
 func (s *Server) dialTarget(cred *managerclient.Credential, pty *ptyRequest) (
 	*ssh.Client, *ssh.Session, io.WriteCloser, io.Reader, error) {
-	var methods []ssh.AuthMethod
-	if cred.PrivateKey != "" {
-		if signer, err := ssh.ParsePrivateKey([]byte(cred.PrivateKey)); err == nil {
-			methods = append(methods, ssh.PublicKeys(signer))
-		} else {
-			slog.Warn("账号私钥解析失败", "account", cred.AccountName, "err", err)
-		}
-	}
-	if cred.Password != "" {
-		methods = append(methods, ssh.Password(cred.Password))
-	}
-	if len(methods) == 0 {
-		return nil, nil, nil, nil, fmt.Errorf("账号 %s 没有可用的认证方式", cred.AccountName)
-	}
-
-	policy := NormalizeHostKeyPolicy(cred.HostKeyPolicy)
-	if policy == "" {
-		policy = NormalizeHostKeyPolicy(s.cfg.Proxy.DefaultHostKeyPolicy)
-	}
-	assetID := cred.AssetID
-	onLearn := func(fp string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.client.LearnHostKey(ctx, assetID, fp, policy); err != nil {
-			slog.Warn("TOFU 主机指纹回写失败", "asset_id", assetID, "fp", fp, "err", err)
-		} else {
-			slog.Info("TOFU 已登记主机指纹", "asset_id", assetID, "fp", fp)
-		}
-	}
-	cfg := &ssh.ClientConfig{
-		User:            cred.AccountName,
-		Auth:            methods,
-		HostKeyCallback: NewHostKeyCallback(policy, cred.HostKeyFingerprint, onLearn),
-		Timeout:         s.cfg.Proxy.ConnectTimeout,
-	}
-	addr := net.JoinHostPort(cred.Host, strconv.Itoa(cred.Port))
-	client, err := ssh.Dial("tcp", addr, cfg)
+	client, err := s.dialSSH(cred)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("拨号 %s 失败: %w", addr, err)
+		return nil, nil, nil, nil, err
 	}
 	sess, err := client.NewSession()
 	if err != nil {
@@ -955,6 +929,63 @@ func (s *Server) dialTarget(cred *managerclient.Credential, pty *ptyRequest) (
 		return nil, nil, nil, nil, fmt.Errorf("启动远端 shell 失败: %w", err)
 	}
 	return client, sess, stdin, stdout, nil
+}
+
+// dialSSH 按托管凭据拨到目标 SSH，供交互 shell 和 SFTP 共用。
+func (s *Server) dialSSH(cred *managerclient.Credential) (*ssh.Client, error) {
+	var methods []ssh.AuthMethod
+	if cred.PrivateKey != "" {
+		if signer, err := ssh.ParsePrivateKey([]byte(cred.PrivateKey)); err == nil {
+			methods = append(methods, ssh.PublicKeys(signer))
+		} else {
+			slog.Warn("账号私钥解析失败", "account", cred.AccountName, "err", err)
+		}
+	}
+	if cred.Password != "" {
+		methods = append(methods, ssh.Password(cred.Password))
+	}
+	if len(methods) == 0 {
+		return nil, fmt.Errorf("账号 %s 没有可用的认证方式", cred.AccountName)
+	}
+	hostPolicy := "tofu"
+	timeout := 10 * time.Second
+	if s != nil && s.cfg != nil {
+		if p := NormalizeHostKeyPolicy(s.cfg.Proxy.DefaultHostKeyPolicy); p != "" {
+			hostPolicy = p
+		}
+		if s.cfg.Proxy.ConnectTimeout > 0 {
+			timeout = s.cfg.Proxy.ConnectTimeout
+		}
+	}
+	policy := NormalizeHostKeyPolicy(cred.HostKeyPolicy)
+	if policy == "" {
+		policy = hostPolicy
+	}
+	assetID := cred.AssetID
+	onLearn := func(fp string) {
+		if s == nil || s.client == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.client.LearnHostKey(ctx, assetID, fp, policy); err != nil {
+			slog.Warn("TOFU 主机指纹回写失败", "asset_id", assetID, "fp", fp, "err", err)
+		} else {
+			slog.Info("TOFU 已登记主机指纹", "asset_id", assetID, "fp", fp)
+		}
+	}
+	cfg := &ssh.ClientConfig{
+		User:            cred.AccountName,
+		Auth:            methods,
+		HostKeyCallback: NewHostKeyCallback(policy, cred.HostKeyFingerprint, onLearn),
+		Timeout:         timeout,
+	}
+	addr := net.JoinHostPort(cred.Host, strconv.Itoa(cred.Port))
+	client, err := ssh.Dial("tcp", addr, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("拨号 %s 失败: %w", addr, err)
+	}
+	return client, nil
 }
 
 // ---------------------------------------------------------------------------

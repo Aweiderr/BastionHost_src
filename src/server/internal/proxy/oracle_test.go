@@ -35,6 +35,7 @@ type fakeOracle struct {
 	assets   []*managerclient.AssetBrief
 	cred     *managerclient.Credential
 	deny     bool
+	grant    *managerclient.GrantCheck
 	cmds     []managerclient.SessionCommandPayload
 	started  map[string]any
 	finished map[string]any
@@ -79,6 +80,9 @@ func (f *fakeOracle) AccessibleAssets(context.Context, int64) ([]*managerclient.
 func (f *fakeOracle) CheckGrant(context.Context, int64, int64, int64) (*managerclient.GrantCheck, error) {
 	if f.deny {
 		return &managerclient.GrantCheck{Allowed: false, Reason: "没有可用的授权"}, nil
+	}
+	if f.grant != nil {
+		return f.grant, nil
 	}
 	return &managerclient.GrantCheck{Allowed: true, GrantID: 3, GrantSource: "grant"}, nil
 }

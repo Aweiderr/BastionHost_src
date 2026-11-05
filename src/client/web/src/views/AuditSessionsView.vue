@@ -327,6 +327,10 @@ onMounted(load)
                 </div>
               </div>
               <div class="desc-item">
+                <div class="desc-label">文件传输</div>
+                <div class="desc-value">{{ detail.files?.length ?? 0 }} 条</div>
+              </div>
+              <div class="desc-item">
                 <div class="desc-label">录像状态 / 大小</div>
                 <div class="desc-value">
                   {{ dictLabel(RECORD_STATUS_MAP, detail.session.record_status) }} ·
@@ -347,6 +351,40 @@ onMounted(load)
             <div v-else-if="!playUrl" class="form-hint mt-12">
               该会话未生成可回放的录像文件（提示：录像不可回放）。
             </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">文件传输</span>
+            <span class="tag">{{ detail.files?.length ?? 0 }} 条</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th style="width: 80px">方向</th>
+                  <th>文件</th>
+                  <th style="width: 100px">大小</th>
+                  <th style="width: 90px">策略</th>
+                  <th style="width: 90px">结果</th>
+                  <th>摘要</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!detail.files || detail.files.length === 0">
+                  <td colspan="6" class="table-empty">该会话没有文件传输记录</td>
+                </tr>
+                <tr v-for="file in detail.files" :key="file.file_id || file.file_path">
+                  <td>{{ file.direction === 'upload' ? '上传' : '下载' }}</td>
+                  <td class="text-mono" style="word-break: break-all">{{ file.file_path || file.file_name }}</td>
+                  <td>{{ formatBytes(file.file_size) }}</td>
+                  <td>{{ file.policy_action === 'deny' ? '阻断' : '放行' }}</td>
+                  <td>{{ file.transfer_result === 'denied' ? '拒绝' : file.transfer_result === 'failed' ? '失败' : '成功' }}</td>
+                  <td class="text-mono text-secondary" style="word-break: break-all">{{ file.file_digest || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 

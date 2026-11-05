@@ -281,6 +281,7 @@ func (r *SessionRepo) Get(ctx context.Context, sessionID int64) (*model.Session,
 		return nil, err
 	}
 	s.Commands, _ = r.ListCommands(ctx, sessionID, 500)
+	s.Files, _ = r.ListFiles(ctx, sessionID, 500)
 	return s, nil
 }
 
@@ -428,6 +429,32 @@ func (r *SessionRepo) ListCommands(ctx context.Context, sessionID int64, limit i
 			return nil, err
 		}
 		list = append(list, &c)
+	}
+	return list, rows.Err()
+}
+
+// ListFiles 查询会话文件传输记录。
+func (r *SessionRepo) ListFiles(ctx context.Context, sessionID int64, limit int) ([]*model.SessionFile, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := r.pool.Query(ctx, `SELECT file_id, session_id, tenant_id, direction, file_name,
+	   coalesce(file_path,''), file_size, coalesce(file_digest,''), coalesce(file_type,''),
+	   policy_action, policy_id, transfer_result, duration_ms, file_time
+	 FROM ops_session_file WHERE session_id = $1 ORDER BY file_time, file_id LIMIT $2`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*model.SessionFile
+	for rows.Next() {
+		var f model.SessionFile
+		if err := rows.Scan(&f.FileID, &f.SessionID, &f.TenantID, &f.Direction, &f.FileName,
+			&f.FilePath, &f.FileSize, &f.FileDigest, &f.FileType, &f.PolicyAction, &f.PolicyID,
+			&f.TransferResult, &f.DurationMs, &f.FileTime); err != nil {
+			return nil, err
+		}
+		list = append(list, &f)
 	}
 	return list, rows.Err()
 }

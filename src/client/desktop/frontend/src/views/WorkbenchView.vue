@@ -45,7 +45,8 @@ import {
   WriteDesktopInput,
   WriteSession,
 } from '../../wailsjs/go/main/App'
-import { ClipboardSetText, EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
+import { ClipboardGetText, ClipboardSetText, EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
+import { clipboardFlags, isPasteChord } from '../utils/desktopClipboard'
 
 const props = defineProps<{ visible: boolean }>()
 
@@ -68,6 +69,10 @@ interface SessionTab {
   credOpen: boolean
   credReason: string
   credPassword: string
+  canCopy: boolean
+  canPaste: boolean
+  pasteHold: boolean
+  pasteUpQueued: boolean
 }
 
 interface TermRuntime {
@@ -284,11 +289,24 @@ function handleDeskControl(key: string, raw: string) {
     tab.credPassword = ''
     tab.message = ''
     tab.status = 'connected'
+    const flags = clipboardFlags(payload)
+    tab.canCopy = flags.canCopy
+    tab.canPaste = flags.canPaste
     const canvas = canvases.get(key)
     if (canvas) applyCanvasSize(canvas, tab.width, tab.height)
     if (activeKey.value === key) canvas?.focus()
     scheduleDeskResize(key)
     notify(`已连接 ${payload.asset_name || tab.assetName}`, 'ok')
+    return
+  }
+  if (payload.type === 'clipboard' && payload.direction === 'copy' && tab.canCopy && payload.text) {
+    ClipboardSetText(String(payload.text)).catch(() => {
+      notify('写入本机剪贴板失败', 'err')
+    })
+    return
+  }
+  if (payload.type === 'clipboard-denied' && payload.message) {
+    notify(String(payload.message), 'info')
     return
   }
   if (payload.type === 'resize') {
@@ -361,12 +379,17 @@ async function connect(acc?: Account) {
     credOpen: false,
     credReason: '',
     credPassword: '',
+    canCopy: false,
+    canPaste: false,
+    pasteHold: false,
+    pasteUpQueued: false,
   }
   tabs.value.push(tab)
   activate(key)
 
   if (kind === 'unsupported') {
-    notify(`${asset.asset_name}：${protocolLabel(asset.protocol)} 尚未接入`, 'info')
+    const label = (asset.protocol || '').trim().toLowerCase() === 'sftp' ? '请使用 SFTP 客户端连接网关' : `${protocolLabel(asset.protocol)} 尚未接入`
+    notify(`${asset.asset_name}：${label}`, 'info')
     return
   }
   if (kind === 'oracle') {
@@ -576,14 +599,48 @@ function deskWheel(key: string, event: WheelEvent) {
   ).catch(() => {})
 }
 
-function deskKey(key: string, event: KeyboardEvent, down: boolean) {
-  const tab = tabs.value.find((t) => t.key === key)
-  if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || tab.credOpen) return
-  event.preventDefault()
+function sendDeskKey(key: string, event: KeyboardEvent, down: boolean) {
   WriteDesktopInput(
     key,
     JSON.stringify({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code }),
   ).catch(() => {})
+}
+
+function deskKey(key: string, event: KeyboardEvent, down: boolean) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || tab.credOpen) return
+  event.preventDefault()
+  if (isPasteChord(event)) {
+    if (!tab.canPaste) {
+      sendDeskKey(key, event, down)
+      return
+    }
+    if (!down) {
+      if (tab.pasteHold) tab.pasteUpQueued = true
+      else sendDeskKey(key, event, false)
+      return
+    }
+    tab.pasteHold = true
+    tab.pasteUpQueued = false
+    ClipboardGetText()
+      .then((text) => {
+        if (text) {
+          return WriteDesktopInput(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
+        }
+        notify('本机剪贴板是空的', 'info')
+      })
+      .catch(() => notify('读取本机剪贴板失败', 'err'))
+      .finally(() => {
+        sendDeskKey(key, event, true)
+        if (tab.pasteUpQueued) {
+          tab.pasteUpQueued = false
+          sendDeskKey(key, event, false)
+        }
+        tab.pasteHold = false
+      })
+    return
+  }
+  sendDeskKey(key, event, down)
 }
 
 function desktopWaitText(tab: SessionTab): string {
@@ -887,7 +944,7 @@ function connectLabel(protocol: string) {
           <div v-else-if="t.kind === 'unsupported'" class="term-placeholder">
             <div class="unsupported-panel">
               <span class="tag warn">{{ protocolLabel(t.protocol) }}</span>
-              <h3>该协议尚未接入</h3>
+              <h3>{{ (t.protocol || '').toLowerCase() === 'sftp' ? '请使用 SFTP 客户端' : '该协议尚未接入' }}</h3>
               <p>{{ t.message }}</p>
               <p class="unsupported-target">{{ t.assetName }} · {{ t.accountName }} · {{ t.host }}:{{ t.port }}</p>
             </div>

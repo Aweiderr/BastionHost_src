@@ -550,6 +550,7 @@ onMounted(async () => {
             <label class="checkbox"><input v-model="form.can_copy" type="checkbox" /> 允许复制</label>
             <label class="checkbox"><input v-model="form.can_paste" type="checkbox" /> 允许粘贴</label>
           </div>
+          <div class="form-hint">复制是从远端到本机，粘贴是从本机到远端。图形会话按这两个开关同步剪贴板；默认都不勾。</div>
         </div>
 
         <div class="form-item span-2">

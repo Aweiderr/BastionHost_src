@@ -8,6 +8,8 @@
  * desktopFrame.ts 相同，局部更新（含 TigerVNC LastRect 拆开后的脏矩形）
  * 直接画到对应坐标。目标口令不下发到界面，未托管时只弹出一次输入框。
  *
+ * Oracle 只打开客户端连接说明（网关、SERVICE_NAME、sqlplus、JDBC）。
+ * 口令保持占位符，不在本窗口建立数据库会话。
  * 其他协议只打开说明标签，不拨 SSH，也不拨画面通道。
  *
  * 事件监听必须在 OpenSession / OpenDesktopSession 之前注册。
@@ -19,6 +21,12 @@ import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
 import { base64ToBytes, strToBase64 } from '../utils/base64'
 import { keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
+import {
+  BASTION_PASSWORD_PLACEHOLDER,
+  DB_PASSWORD_PLACEHOLDER,
+  buildDesktopOracleConnectGuide,
+  type OracleConnectGuide,
+} from '../utils/oracleConnect'
 import {
   assetConnectHint,
   protocolLabel,
@@ -36,11 +44,11 @@ import {
   WriteDesktopInput,
   WriteSession,
 } from '../../wailsjs/go/main/App'
-import { EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
+import { ClipboardSetText, EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 
 const props = defineProps<{ visible: boolean }>()
 
-type TabStatus = 'connecting' | 'connected' | 'closed' | 'unsupported'
+type TabStatus = 'connecting' | 'connected' | 'closed' | 'unsupported' | 'guide'
 
 interface SessionTab {
   key: string
@@ -267,7 +275,8 @@ async function connect(acc?: Account) {
   }
   const account = acc || asset.accounts[0]
   const kind = sessionKind(asset.protocol)
-  const key = `${kind === 'desktop' ? 'd' : 's'}${Date.now()}${Math.floor(Math.random() * 1000)}`
+  const prefix = kind === 'desktop' ? 'd' : kind === 'oracle' ? 'o' : 's'
+  const key = `${prefix}${Date.now()}${Math.floor(Math.random() * 1000)}`
   const tab: SessionTab = {
     key,
     assetId: asset.asset_id,
@@ -277,7 +286,7 @@ async function connect(acc?: Account) {
     port: asset.port,
     protocol: kind === 'ssh' ? 'ssh' : (asset.protocol || '').trim().toLowerCase(),
     kind,
-    status: kind === 'unsupported' ? 'unsupported' : 'connecting',
+    status: kind === 'unsupported' ? 'unsupported' : kind === 'oracle' ? 'guide' : 'connecting',
     message: kind === 'unsupported' ? unsupportedExplanation(asset.protocol) : '',
     width: 1280,
     height: 720,
@@ -291,6 +300,10 @@ async function connect(acc?: Account) {
 
   if (kind === 'unsupported') {
     notify(`${asset.asset_name}：${protocolLabel(asset.protocol)} 尚未接入`, 'info')
+    return
+  }
+  if (kind === 'oracle') {
+    notify(`${asset.asset_name}：已打开客户端连接说明`, 'info')
     return
   }
 
@@ -507,6 +520,7 @@ function desktopWaitText(tab: SessionTab): string {
 }
 
 function statusText(tab: SessionTab) {
+  if (tab.kind === 'oracle') return '连接说明'
   if (tab.kind === 'unsupported') return '尚未接入'
   if (tab.status === 'connecting') return '连接中'
   if (tab.status === 'connected') return '已连接'
@@ -515,6 +529,7 @@ function statusText(tab: SessionTab) {
 }
 
 function statusClass(tab: SessionTab) {
+  if (tab.kind === 'oracle') return 'brand'
   if (tab.kind === 'unsupported') return 'warn'
   if (tab.status === 'connected') return 'ok'
   if (tab.status === 'closed') return 'err'
@@ -523,8 +538,46 @@ function statusClass(tab: SessionTab) {
 
 function tabTagClass(tab: SessionTab) {
   if (tab.kind === 'unsupported') return 'warn'
-  if (tab.kind === 'desktop') return 'brand'
+  if (tab.kind === 'desktop' || tab.kind === 'oracle') return 'brand'
   return ''
+}
+
+function oracleAccounts(tab: SessionTab): Account[] {
+  return assets.value.find((item) => item.asset_id === tab.assetId)?.accounts ?? []
+}
+
+function oracleRemark(tab: SessionTab): string {
+  return (assets.value.find((item) => item.asset_id === tab.assetId)?.remark || '').trim()
+}
+
+function oracleGuide(tab: SessionTab): OracleConnectGuide {
+  return buildDesktopOracleConnectGuide({
+    coreURL: state.coreURL,
+    opsUsername: state.profile?.username,
+    assetId: tab.assetId,
+    accountName: tab.accountName,
+  })
+}
+
+async function copyField(text: string, label: string) {
+  const value = text.trim()
+  if (!value) return
+  let copied = false
+  try {
+    copied = (await ClipboardSetText(value)) === true
+  } catch {
+    copied = false
+  }
+  if (!copied && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value)
+      copied = true
+    } catch {
+      copied = false
+    }
+  }
+  if (copied) notify(`已复制${label}`, 'ok')
+  else notify('剪贴板不可用，请在说明里手动选择文本复制', 'err')
 }
 
 function levelTag(level: string) {
@@ -541,6 +594,10 @@ function grantText(a: Asset) {
 
 function protocolTagClass(protocol: string) {
   return sessionKind(protocol) === 'unsupported' ? 'warn' : 'brand'
+}
+
+function connectLabel(protocol: string) {
+  return sessionKind(protocol) === 'oracle' ? '查看说明' : '连接'
 }
 </script>
 
@@ -586,7 +643,7 @@ function protocolTagClass(protocol: string) {
               :disabled="connecting"
               @click.stop="connect(acc)"
             >
-              连接 {{ acc.account_name }}
+              {{ connectLabel(a.protocol) }} {{ acc.account_name }}
             </button>
           </div>
         </div>
@@ -622,7 +679,7 @@ function protocolTagClass(protocol: string) {
         </template>
         <template v-else>
           <span class="tag">未连接</span>
-          <span>选择资产后点击「连接」。SSH 打开终端，RDP / VNC 打开远端桌面。</span>
+          <span>选择资产后点击「连接」。SSH 打开终端，RDP / VNC 打开远端桌面，Oracle 打开客户端连接说明。</span>
         </template>
         <span class="spacer"></span>
         <button v-if="activeTab" class="danger sm" @click="closeTab(activeTab.key)">关闭标签</button>
@@ -631,7 +688,130 @@ function protocolTagClass(protocol: string) {
       <div class="term-stage">
         <div v-if="!tabs.length" class="term-placeholder">终端或远端桌面将在建立会话后出现</div>
         <div v-for="t in tabs" :key="t.key" v-show="t.key === activeKey" class="term-pane" role="tabpanel">
-          <div v-if="t.kind === 'unsupported'" class="term-placeholder">
+          <div v-if="t.kind === 'oracle'" class="oracle-guide">
+            <div class="oracle-card">
+              <span class="tag brand">{{ protocolLabel(t.protocol) }}</span>
+              <h3>Oracle 客户端连接说明</h3>
+              <p class="oracle-warn">
+                请在本机使用 sqlplus 或 DBeaver 连接下方网关。本窗口不会建立数据库会话。
+                列表中的资产地址
+                <span class="oracle-mono">{{ t.host }}:{{ t.port }}</span>
+                是堡垒机转发用的目标，工作站不要直连。
+              </p>
+              <p class="oracle-asset">{{ t.assetName }}</p>
+              <div class="oracle-row">
+                <div class="k">网关地址</div>
+                <div>
+                  <div class="oracle-mono">{{ oracleGuide(t).gateway }}</div>
+                  <p class="hint">SQL 客户端填写此地址。端口为堡垒机 Oracle 监听，默认 1521。</p>
+                </div>
+                <button class="ghost sm" type="button" @click="copyField(oracleGuide(t).gateway, '网关地址')">复制</button>
+              </div>
+              <div class="oracle-row">
+                <div class="k">SERVICE_NAME</div>
+                <div>
+                  <div class="oracle-mono">{{ oracleGuide(t).serviceName }}</div>
+                  <p class="hint">运维用户名@资产 ID。选定账号后写成 运维用户名@资产 ID#账号名。</p>
+                </div>
+                <button class="ghost sm" type="button" @click="copyField(oracleGuide(t).serviceName, 'SERVICE_NAME')">
+                  复制
+                </button>
+              </div>
+              <div class="oracle-row">
+                <div class="k">数据库用户名</div>
+                <div>
+                  <select v-if="oracleAccounts(t).length > 1" v-model="t.accountName">
+                    <option v-for="acc in oracleAccounts(t)" :key="acc.account_id" :value="acc.account_name">
+                      {{ acc.account_name }}
+                    </option>
+                  </select>
+                  <div v-else-if="oracleGuide(t).dbUsername" class="oracle-mono">{{ oracleGuide(t).dbUsername }}</div>
+                  <div v-else class="hint">未绑定可用账号</div>
+                  <p class="hint">
+                    <template v-if="oracleAccounts(t).length > 1">
+                      该资产有多个账号，服务名必须带 #账号名。切换后下面的命令会一起更新。
+                    </template>
+                    <template v-else-if="oracleGuide(t).dbUsername">当前账号已写入服务名。</template>
+                    <template v-else>请联系管理员绑定账号。未选定账号时服务名不带 #。</template>
+                  </p>
+                </div>
+                <button
+                  v-if="oracleGuide(t).dbUsername"
+                  class="ghost sm"
+                  type="button"
+                  @click="copyField(oracleGuide(t).dbUsername, '数据库用户名')"
+                >
+                  复制
+                </button>
+              </div>
+              <div class="oracle-snippet">
+                <div class="oracle-snippet-head">
+                  <span>sqlplus（Windows cmd）</span>
+                  <button class="ghost sm" type="button" @click="copyField(oracleGuide(t).sqlplus, 'sqlplus 命令')">
+                    复制
+                  </button>
+                </div>
+                <pre class="oracle-mono oracle-pre">{{ oracleGuide(t).sqlplus }}</pre>
+                <p class="hint">
+                  运维工作站默认用 Windows Instant Client。把这一行粘贴到 cmd.exe。整段连接串放在双引号里，圆括号会原样交给 sqlplus。
+                  请把 <span class="oracle-mono">{{ DB_PASSWORD_PLACEHOLDER }}</span> 换成数据库口令，把
+                  <span class="oracle-mono">{{ BASTION_PASSWORD_PLACEHOLDER }}</span> 换成堡垒机登录口令。
+                </p>
+              </div>
+              <div class="oracle-snippet">
+                <div class="oracle-snippet-head">
+                  <span>sqlplus（bash）</span>
+                  <button class="ghost sm" type="button" @click="copyField(oracleGuide(t).sqlplusBash, 'bash sqlplus 命令')">
+                    复制
+                  </button>
+                </div>
+                <pre class="oracle-mono oracle-pre">{{ oracleGuide(t).sqlplusBash }}</pre>
+                <p class="hint">
+                  Linux 或 macOS 终端用这一行。整段连接串放在单引号里，服务名中的 # 会原样保留。占位符替换方式与上面相同。
+                </p>
+              </div>
+              <div class="oracle-snippet">
+                <div class="oracle-snippet-head">
+                  <span>DBeaver / JDBC</span>
+                  <button class="ghost sm" type="button" @click="copyField(oracleGuide(t).jdbcUrl, 'JDBC URL')">复制</button>
+                </div>
+                <pre class="oracle-mono oracle-pre">{{ oracleGuide(t).jdbcUrl }}</pre>
+                <p class="hint">
+                  DBeaver 选择 Oracle、驱动 Thin，URL 粘贴这一行。用户名填数据库用户名，口令填数据库口令。URL 里的
+                  <span class="oracle-mono">{{ BASTION_PASSWORD_PLACEHOLDER }}</span>
+                  同样换成堡垒机登录口令。描述符与上面的 sqlplus 相同。
+                </p>
+              </div>
+              <div class="oracle-row">
+                <div class="k">BASTION_PASSWORD</div>
+                <div>
+                  <div>您登录本堡垒机的口令</div>
+                  <p class="hint">
+                    与登录口令相同。连接串里保留占位符
+                    <span class="oracle-mono">{{ BASTION_PASSWORD_PLACEHOLDER }}</span>
+                    ，请自行替换，本页不显示、不代填真实口令。若开启了动态令牌，在口令末尾追加英文冒号和六位数字。
+                  </p>
+                </div>
+              </div>
+              <div class="oracle-row">
+                <div class="k">数据库口令</div>
+                <div>
+                  <div>该 Oracle 账号自己的登录口令</div>
+                  <p class="hint">
+                    请向管理员索取，或按运维策略从凭据保管处获取。连接串中的
+                    <span class="oracle-mono">{{ DB_PASSWORD_PLACEHOLDER }}</span>
+                    是占位符，本页不显示、不代填该口令。
+                  </p>
+                </div>
+              </div>
+              <div v-if="oracleRemark(t)" class="oracle-row">
+                <div class="k">备注</div>
+                <div class="oracle-mono">{{ oracleRemark(t) }}</div>
+                <button class="ghost sm" type="button" @click="copyField(oracleRemark(t), '备注')">复制</button>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="t.kind === 'unsupported'" class="term-placeholder">
             <div class="unsupported-panel">
               <span class="tag warn">{{ protocolLabel(t.protocol) }}</span>
               <h3>该协议尚未接入</h3>

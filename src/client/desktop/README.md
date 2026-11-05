@@ -45,7 +45,8 @@ To build a redistributable, production mode package, use `wails build`.
 ## 图形会话（RDP / VNC）
 
 工作台里 SSH 仍是终端标签。协议为 `vnc` 或 `rdp` 时打开图形标签，不再显示「该协议尚未接入」。
-Oracle、SFTP 等没有客户端通路的协议仍只展示说明，不会拿去拨 SSH。
+协议为 `oracle` 时打开客户端连接说明（网关、SERVICE_NAME、sqlplus、JDBC），口令只留占位符，不在本窗口建立数据库会话，也不拨 SSH 或画面通道。
+SFTP 等没有客户端通路的协议仍只展示「尚未接入」，不会拿去拨 SSH。
 
 桌面进程连接代理的 `GET /api/v1/webdesktop`（默认由管理服务地址推导为 `ws://<主机>:8081/api/v1/webdesktop`，
 分离部署时用 `BASTION_DESKTOP_GATEWAY` 写成完整的 `ws://` 或 `wss://`）。认证、像素和键鼠与 Web「图形会话」是同一套：
@@ -66,5 +67,14 @@ Oracle、SFTP 等没有客户端通路的协议仍只展示说明，不会拿去
 4. 点「关闭标签」，或让会话空闲到被代理掐断。客户端应留在工作台，标签变为「已结束」或被关掉，进程不退出。
 5. 再连一台 RDP 资产。它走同一个图形标签；没有可连的 RDP 目标时，标签里是连接失败说明，而不是「该协议尚未接入」。
 
-前端帧与分流测试：在 `frontend` 目录执行 `npm test`。
+### 对一台 Oracle 资产点验
+
+同一套客户端，当前账号已获授权，资产协议为 `oracle`。
+
+1. 资产卡片上的说明应是「将打开客户端连接说明」，而不是「尚未接入」。按钮是「查看说明」。
+2. 点「查看说明」。新标签协议是 ORACLE，状态是「连接说明」。中间是网关地址、SERVICE_NAME、sqlplus 和 JDBC，可以复制，不是「该协议尚未接入」。
+3. 复制「sqlplus（Windows cmd）」。这一行以 `sqlplus "` 开头，口令位置是「数据库口令」和 `BASTION_PASSWORD`，没有真实口令。管理服务若是 `http://192.168.106.114:8080` 这类局域网地址，网关主机与它相同、端口 1521；本机 `127.0.0.1` 会回退到说明里的常量地址。资产卡片上的 `host:port` 不要拿去直连。
+4. 再打开 SSH 或 VNC。终端和图形标签与原来一样，不会变成这段说明。
+
+前端帧、分流和 Oracle 说明测试：在 `frontend` 目录执行 `npm test`。
 Go 侧画面拨号和断开：在本目录执行 `go test ./internal/desk .`。

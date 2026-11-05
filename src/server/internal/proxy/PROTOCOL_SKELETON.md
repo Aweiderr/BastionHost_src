@@ -15,16 +15,37 @@ Oracle 的服务名 / SID 在 `ast_asset.oracle_service_name`、`ast_asset.oracl
 
 ## VNC 画面编码
 
-代理作为 RFB 客户端连接资产。`SetEncodings` 的偏好顺序是 ZRLE、Hextile、CopyRect、Raw，并带上 LastRect。解出来仍是 RGBA。发给浏览器和桌面客户端时，脏矩形打成 JPEG（魔数 `BJ`，约 30ms 内重叠的脏区会合成一块）。旧的未压缩 `BM` 帧新客户端仍能画；只认 `BM` 的旧页面会得到空白，而不是把 JPEG 画成雪花，刷新后才出画。
+代理作为 RFB 客户端连接资产。`SetEncodings` 的偏好顺序是 ZRLE、Hextile、CopyRect、Raw，然后是 DesktopSize、ExtendedDesktopSize，最后是 LastRect。解出来仍是 RGBA。发给浏览器和桌面客户端时，脏矩形打成 JPEG（魔数 `BJ`，约 30ms 内重叠的脏区会合成一块）。旧的未压缩 `BM` 帧新客户端仍能画；只认 `BM` 的旧页面会得到空白，而不是把 JPEG 画成雪花，刷新后才出画。
 
 - **ZRLE**（16）是首选。64×64 瓦片，一条连接共用一个 zlib 流。像素格式是 32 位小端、色深 24，线上是 3 字节 CPIXEL（R、G、B）。
 - **Hextile**（5）给不支持 ZRLE 的服务器。16×16 瓦片，像素仍是 4 字节。
 - **CopyRect**（1）在代理自己的帧缓冲里拷贝，再按目标矩形吐出 RGBA。
 - **Raw**（0）和 **LastRect**（-224）保留。不认识的编码会结束这条画面会话。
 
-不声明 Tight，避免 TigerVNC 改发带 JPEG 的 Tight。剪贴板、录像、DesktopSize 仍未做。
+不声明 Tight，避免 TigerVNC 改发带 JPEG 的 Tight。剪贴板和录像仍未做。分辨率协商见下一节，画面编码不变：仍是 ZRLE（或 Hextile）解成 RGBA，再打成 JPEG 脏矩形发给浏览器。不要为了改分辨率退回 Raw / 未压缩 RGBA。
 
 全屏 MATE（例如 1440×900）以前每个更新都是 Raw，一帧约 5MB。VNC 这条腿现在应是 ZRLE。重启代理并刷新网页后重连，日志里应有 `VNC 开始接收画面`（`encoding` 为 `ZRLE`，老服务器可能是 `Hextile`）以及 `图形会话开始下发 JPEG 画面`。仍是 `Raw` 说明对端没用这份编码列表。拖动窗口时浏览器收到的是脏区 JPEG，不再是同尺寸的未压缩 RGBA。
+
+## VNC 分辨率（DesktopSize）
+
+Web 和桌面客户端在连接时，以及窗口停止变化约 200ms 后，把可视区域发给 `/api/v1/webdesktop`（认证消息里的 `width`/`height`，之后是 `{"type":"resize","width","height"}`）。尺寸按 CSS 像素乘 `devicePixelRatio` 计算，再收进 **640×480 到 1920×1080**，并尽量保持视口比例。代理再等最多约 200ms，把最后一次尺寸交给 VNC。
+
+代理在 `SetEncodings` 里声明 **DesktopSize（-223）** 和 **ExtendedDesktopSize（-308）**，顺序仍是 ZRLE、Hextile、CopyRect、Raw，然后才是这两个伪编码，最后是 LastRect。只有服务器先回了 ExtendedDesktopSize 矩形，代理才发送 **SetDesktopSize（客户端消息 251）**。不支持的旧服务器不会收到这条未知消息，因此不会因失步断开，分辨率保持它自己的初始尺寸（左右仍可能有黑边）。
+
+服务器同意后，代理改自己的帧缓冲，并用文本 `{"type":"resize","width","height"}` 通知浏览器和桌面客户端改画布。随后请求一整帧，继续用 ZRLE / JPEG 下发，不改像素格式。
+
+资产侧若只改代理、不让 VNC 服务接受改尺寸，画面不会变大。常见情况：
+
+| 服务 | 要做什么 |
+|------|----------|
+| TigerVNC `Xvnc` / `vncserver` | 虚拟屏幕自带 RandR。`AcceptSetDesktopSize` 默认开启，启动时的 `-geometry`（例如 1440×900）只是初始尺寸，客户端可以改到视口大小。一般不用额外 `xrandr --newmode`。 |
+| `x11vnc` 挂在已经打开的桌面（`:0`） | 需要 X 服务器开着 RandR，并且请求的宽高是已有模式。没有对应模式时服务器会拒绝 SetDesktopSize，会话留在原来的分辨率。可以用 `xrandr --newmode` / `--addmode` 加上目标分辨率，或改用 TigerVNC 的虚拟 `vncserver`。 |
+| 只实现 DesktopSize、没有 ExtendedDesktopSize 的服务器 | 只能在服务器自己改分辨率时通知代理，浏览器不能主动要求新尺寸。 |
+| UltraVNC、老 TightVNC | 通常没有 SetDesktopSize。几何尺寸固定，黑边还会在。 |
+
+RDP 的宽高在拨号时写进 Client Core Data，用的是同一次视口测量。这条链路没有 Display Control，**窗口拉大后不会改已经连上的 RDP 桌面**，需要断开再连。日志里若出现 `VNC 拒绝调整分辨率`，就是资产侧没接受这次尺寸。
+
+验证：重启代理，刷新网页后重连 VNC。分辨率标注应接近窗口（不超过 1920×1080），左右黑边应少很多。再拖动窗口，停一下，标注应跟着变。日志同时有 `VNC 请求调整分辨率`、`VNC 画面尺寸已变更`，以及原来的 `encoding=ZRLE` 和 `图形会话开始下发 JPEG 画面`。
 
 ## Oracle 网关
 

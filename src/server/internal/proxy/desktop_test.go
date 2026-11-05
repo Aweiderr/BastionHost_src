@@ -231,6 +231,119 @@ func TestWebDesktopManualPassword(t *testing.T) {
 	}
 }
 
+func TestClampDesktopSizePreservesAspect(t *testing.T) {
+	cases := []struct{ w, h, ew, eh int }{
+		{0, 0, 1280, 720},
+		{800, 600, 800, 600},
+		{1440, 900, 1440, 900},
+		{1800, 900, 1800, 900},
+		{2560, 1440, 1920, 1080},
+		{400, 300, 640, 480},
+		{4000, 1000, 1920, 480},
+		{100, 100, 640, 640},
+	}
+	for _, c := range cases {
+		w, h := clampDesktopSize(c.w, c.h)
+		if w != c.ew || h != c.eh {
+			t.Fatalf("%dx%d -> %dx%d, want %dx%d", c.w, c.h, w, h, c.ew, c.eh)
+		}
+	}
+}
+
+func TestWebDesktopNegotiatesVNCDesktopSize(t *testing.T) {
+	old := desktopResizeDebounce
+	desktopResizeDebounce = 20 * time.Millisecond
+	t.Cleanup(func() { desktopResizeDebounce = old })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	requested := make(chan [2]int, 4)
+	go serveResizeVNC(ln, "secret", 800, 600, requested)
+
+	host, port, err := splitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeOracle{
+		cred: &managerclient.Credential{
+			AssetID: 9, AssetName: "desk-01", Host: host, Port: port,
+			Protocol: "vnc", AccountName: "admin", Password: "secret",
+			CredentialMode: "managed",
+		},
+		done: make(chan struct{}),
+	}
+	_, srv := startDesktopServer(t, fake)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL(srv.URL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	auth, _ := json.Marshal(map[string]any{
+		"type": "auth", "token": "good-token", "asset_id": 9, "account_id": 3,
+		"protocol": "vnc", "width": 960, "height": 540, "client_type": "web",
+	})
+	if err := conn.Write(ctx, websocket.MessageText, auth); err != nil {
+		t.Fatal(err)
+	}
+	ready := readDeskJSON(t, ctx, conn)
+	if ready["type"] != "ready" || ready["width"] != float64(800) || ready["height"] != float64(600) {
+		t.Fatalf("ready %#v", ready)
+	}
+	waitDeskResize(t, ctx, conn, 960, 540)
+
+	resize, _ := json.Marshal(map[string]any{"type": "resize", "width": 1280, "height": 720})
+	if err := conn.Write(ctx, websocket.MessageText, resize); err != nil {
+		t.Fatal(err)
+	}
+	waitDeskResize(t, ctx, conn, 1280, 720)
+
+	got := map[[2]int]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(got) < 2 {
+		select {
+		case sz := <-requested:
+			got[sz] = true
+		case <-deadline:
+			t.Fatalf("SetDesktopSize seen %#v", got)
+		}
+	}
+	if !got[[2]int{960, 540}] || !got[[2]int{1280, 720}] {
+		t.Fatalf("SetDesktopSize %#v", got)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+	_ = fake.waitDone(t)
+}
+
+func waitDeskResize(t *testing.T, ctx context.Context, conn *websocket.Conn, w, h float64) {
+	t.Helper()
+	for {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg["type"] == "error" {
+			t.Fatalf("error %#v", msg)
+		}
+		if msg["type"] == "resize" && msg["width"] == w && msg["height"] == h {
+			return
+		}
+	}
+}
+
 func startDesktopServer(t *testing.T, fake *fakeOracle) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := &config.Config{}

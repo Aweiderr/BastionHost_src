@@ -165,6 +165,22 @@ func (b *bitmapBatch) Push(rect deskRect) error {
 	return nil
 }
 
+// Resize 换成新的帧缓冲并丢掉旧脏区。调用方会先通知浏览器改画布，
+// 随后的整帧更新再把新像素画上去，避免把旧坐标的 JPEG 铺进新画布。
+func (b *bitmapBatch) Resize(w, h int) {
+	if w <= 0 || h <= 0 || w > 8192 || h > 8192 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if w == b.w && h == b.h {
+		return
+	}
+	b.w, b.h = w, h
+	b.fb = make([]byte, w*h*4)
+	b.dirty = nil
+}
+
 // Close 立刻把还没发出的脏区写出去，并等写循环退出。可以多次调用。
 func (b *bitmapBatch) Close() error {
 	b.once.Do(func() {

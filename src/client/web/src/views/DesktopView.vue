@@ -3,16 +3,17 @@
  * RDP / VNC 图形会话。
  *
  * 像素和键鼠都走代理的 /api/v1/webdesktop，目标口令不下发到浏览器。
+ * 连接和窗口变化时把视口发给代理，由 VNC SetDesktopSize 改远端分辨率。
  * 剪贴板、磁盘映射和画面录像不在这一版。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listOpsAssets, type OpsAsset } from '@/api/ops'
 import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebdesktopUrl, dictLabel, PROTOCOL_MAP } from '@/utils/constants'
-import { BitmapProtocolError, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
+import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { keysymOf } from '@/utils/keysym'
 
@@ -32,6 +33,7 @@ const errorText = ref('')
 const remoteW = ref(1280)
 const remoteH = ref(720)
 const canvasEl = ref<HTMLCanvasElement | null>(null)
+const stageEl = ref<HTMLElement | null>(null)
 
 const credentialVisible = ref(false)
 const credentialAssetName = ref('')
@@ -45,6 +47,8 @@ let ws: WebSocket | null = null
 let ctx2d: CanvasRenderingContext2D | null = null
 let paintChain: Promise<void> = Promise.resolve()
 let protocolErrorShown = false
+let stageObserver: ResizeObserver | null = null
+let resizeTimer = 0
 
 const accountName = computed(() => {
   const acc = asset.value?.accounts?.find((item) => item.account_id === accountId.value)
@@ -72,6 +76,23 @@ function ensureCanvas(w: number, h: number): void {
 function send(payload: unknown): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) return
   ws.send(JSON.stringify(payload))
+}
+
+function viewportSize(): { width: number; height: number } {
+  const el = stageEl.value
+  return fitDesktopSize(el?.clientWidth ?? 0, el?.clientHeight ?? 0, window.devicePixelRatio || 1)
+}
+
+function scheduleResize(): void {
+  if (status.value !== 'connected') return
+  if (resizeTimer) window.clearTimeout(resizeTimer)
+  resizeTimer = window.setTimeout(() => {
+    resizeTimer = 0
+    if (status.value !== 'connected') return
+    const size = viewportSize()
+    if (size.width === remoteW.value && size.height === remoteH.value) return
+    send({ type: 'resize', width: size.width, height: size.height })
+  }, 200)
 }
 
 function connect(): void {
@@ -108,6 +129,7 @@ function connect(): void {
   credentialVisible.value = false
   status.value = 'connecting'
   statusText.value = '连接中…'
+  const size = viewportSize()
   let socket: WebSocket
   try {
     socket = new WebSocket(buildWebdesktopUrl())
@@ -128,8 +150,8 @@ function connect(): void {
         asset_id: current.asset_id,
         account_id: accountId.value,
         protocol: current.protocol,
-        width: 1280,
-        height: 720,
+        width: size.width,
+        height: size.height,
         client_type: 'web',
       }),
     )
@@ -207,6 +229,14 @@ function handleControl(raw: string): void {
       status.value = 'connected'
       statusText.value = '已连接'
       canvasEl.value?.focus()
+      scheduleResize()
+      break
+    case 'resize':
+      if (Number(payload.width) > 0 && Number(payload.height) > 0) {
+        remoteW.value = Number(payload.width)
+        remoteH.value = Number(payload.height)
+        ensureCanvas(remoteW.value, remoteH.value)
+      }
       break
     case 'credential-required':
       credentialAssetName.value = payload.asset_name || asset.value?.asset_name || ''
@@ -314,7 +344,10 @@ async function loadFromRoute(): Promise<void> {
   const auto = route.query.connect === '1'
   if (auto) {
     void router.replace({ path: '/desktop', query: { asset: String(id) } })
-    if (!found.need_approval && found.accounts?.length === 1) connect()
+    if (!found.need_approval && found.accounts?.length === 1) {
+      await nextTick()
+      connect()
+    }
   }
 }
 
@@ -326,7 +359,17 @@ watch(
   { immediate: true },
 )
 
+watch(stageEl, (el) => {
+  stageObserver?.disconnect()
+  stageObserver = null
+  if (!el || typeof ResizeObserver === 'undefined') return
+  stageObserver = new ResizeObserver(() => scheduleResize())
+  stageObserver.observe(el)
+})
+
 onBeforeUnmount(() => {
+  if (resizeTimer) window.clearTimeout(resizeTimer)
+  stageObserver?.disconnect()
   closeSocket()
 })
 </script>
@@ -337,7 +380,7 @@ onBeforeUnmount(() => {
       <div>
         <div class="page-title">图形会话</div>
         <div class="page-subtitle">
-          连接已授权的 RDP / VNC 资产。口令由堡垒机代填，不出现在浏览器里。剪贴板、磁盘映射和画面录像尚未开通。
+          连接已授权的 RDP / VNC 资产。口令由堡垒机代填，不出现在浏览器里。VNC 会按窗口大小协商分辨率，避免左右黑边。剪贴板、磁盘映射和画面录像尚未开通。
         </div>
       </div>
     </div>
@@ -384,7 +427,7 @@ onBeforeUnmount(() => {
         <span style="margin-left: 8px">{{ errorText }}</span>
       </div>
 
-      <div class="stage">
+      <div ref="stageEl" class="stage">
         <canvas
           ref="canvasEl"
           tabindex="0"

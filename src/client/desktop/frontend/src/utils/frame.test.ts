@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { BitmapProtocolError, keysymOf, mapDesktopPoint, parseBitmap, rfbButtons } from './frame.ts'
+import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, parseBitmap, rfbButtons } from './frame.ts'
 
 test('解析画面帧头和大端坐标', () => {
   const bytes = new Uint8Array(16)
@@ -71,6 +71,14 @@ test('局部更新只携带脏矩形，坐标原样保留', () => {
   assert.ok(frame)
   assert.equal(frame.x, 256)
   assert.equal(frame.y, 64)
+})
+
+test('视口按比例收进 1920×1080，高分屏不超过上限', () => {
+  assert.deepEqual(fitDesktopSize(0, 0, 1), { width: 1280, height: 720 })
+  assert.deepEqual(fitDesktopSize(1800, 900, 1), { width: 1800, height: 900 })
+  assert.deepEqual(fitDesktopSize(2560, 1440, 1), { width: 1920, height: 1080 })
+  assert.deepEqual(fitDesktopSize(1600, 900, 2), { width: 1920, height: 1080 })
+  assert.deepEqual(fitDesktopSize(200, 150, 1), { width: 640, height: 480 })
 })
 
 test('object-fit contain 时黑边上的点击不换算进桌面', () => {

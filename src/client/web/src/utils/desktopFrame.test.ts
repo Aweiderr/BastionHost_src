@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { BitmapProtocolError, mapDesktopPoint, parseBitmap, rfbButtons } from './desktopFrame.ts'
+import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, parseBitmap, rfbButtons } from './desktopFrame.ts'
 import { isGraphicalProtocol } from './graphical.ts'
 import { keysymOf } from './keysym.ts'
 
@@ -66,6 +66,14 @@ test('解析 JPEG 脏矩形，不认识的魔数直接报错', () => {
   const badEncoding = bytes.slice()
   badEncoding[10] = 2
   assert.throws(() => parseBitmap(badEncoding), BitmapProtocolError)
+})
+
+test('视口按比例收进 1920×1080，高分屏不超过上限', () => {
+  assert.deepEqual(fitDesktopSize(0, 0, 1), { width: 1280, height: 720 })
+  assert.deepEqual(fitDesktopSize(1800, 900, 1), { width: 1800, height: 900 })
+  assert.deepEqual(fitDesktopSize(2560, 1440, 1), { width: 1920, height: 1080 })
+  assert.deepEqual(fitDesktopSize(1600, 900, 2), { width: 1920, height: 1080 })
+  assert.deepEqual(fitDesktopSize(200, 150, 1), { width: 640, height: 480 })
 })
 
 test('object-fit contain 时黑边上的点击不换算进桌面', () => {

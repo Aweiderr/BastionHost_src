@@ -15,7 +15,7 @@ Oracle 的服务名 / SID 在 `ast_asset.oracle_service_name`、`ast_asset.oracl
 
 ## VNC 画面编码
 
-代理作为 RFB 客户端连接资产。`SetEncodings` 的偏好顺序是 ZRLE、Hextile、CopyRect、Raw，并带上 LastRect。解出来仍是 RGBA，Web 和桌面客户端继续收 `BM` 脏矩形。
+代理作为 RFB 客户端连接资产。`SetEncodings` 的偏好顺序是 ZRLE、Hextile、CopyRect、Raw，并带上 LastRect。解出来仍是 RGBA。发给浏览器和桌面客户端时，脏矩形打成 JPEG（魔数 `BJ`，约 30ms 内重叠的脏区会合成一块）。旧的未压缩 `BM` 帧新客户端仍能画；只认 `BM` 的旧页面会得到空白，而不是把 JPEG 画成雪花，刷新后才出画。
 
 - **ZRLE**（16）是首选。64×64 瓦片，一条连接共用一个 zlib 流。像素格式是 32 位小端、色深 24，线上是 3 字节 CPIXEL（R、G、B）。
 - **Hextile**（5）给不支持 ZRLE 的服务器。16×16 瓦片，像素仍是 4 字节。
@@ -24,7 +24,7 @@ Oracle 的服务名 / SID 在 `ast_asset.oracle_service_name`、`ast_asset.oracl
 
 不声明 Tight，避免 TigerVNC 改发带 JPEG 的 Tight。剪贴板、录像、DesktopSize 仍未做。
 
-全屏 MATE（例如 1440×900）以前每个更新都是 Raw，一帧约 5MB。重启代理后重连，日志里应有 `VNC 开始接收画面`，`encoding` 为 `ZRLE`（老服务器可能是 `Hextile`）。仍是 `Raw` 说明对端没用这份列表。拖动窗口、滚动目录时应能跟上；整屏刷新时浏览器侧仍是 RGBA，流量还是大的。
+全屏 MATE（例如 1440×900）以前每个更新都是 Raw，一帧约 5MB。VNC 这条腿现在应是 ZRLE。重启代理并刷新网页后重连，日志里应有 `VNC 开始接收画面`（`encoding` 为 `ZRLE`，老服务器可能是 `Hextile`）以及 `图形会话开始下发 JPEG 画面`。仍是 `Raw` 说明对端没用这份编码列表。拖动窗口时浏览器收到的是脏区 JPEG，不再是同尺寸的未压缩 RGBA。
 
 ## Oracle 网关
 

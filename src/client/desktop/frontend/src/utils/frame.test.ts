@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { keysymOf, mapDesktopPoint, parseBitmap, rfbButtons } from './frame.ts'
+import { BitmapProtocolError, keysymOf, mapDesktopPoint, parseBitmap, rfbButtons } from './frame.ts'
 
 test('解析画面帧头和大端坐标', () => {
   const bytes = new Uint8Array(16)
@@ -20,9 +20,36 @@ test('解析画面帧头和大端坐标', () => {
   assert.equal(frame.y, 2)
   assert.equal(frame.w, 1)
   assert.equal(frame.h, 1)
-  assert.equal(frame.rgba[0], 9)
+  assert.equal(frame.rgba?.[0], 9)
+  assert.equal(frame.jpeg, null)
   assert.equal(parseBitmap(new Uint8Array([1, 2, 3])), null)
   assert.equal(parseBitmap(bytes.subarray(0, 15)), null)
+})
+
+test('解析 JPEG 脏矩形，不认识的魔数直接报错', () => {
+  const jpeg = Uint8Array.from([0xff, 0xd8, 0x00, 0x11, 0xff, 0xd9])
+  const bytes = new Uint8Array(12 + jpeg.length)
+  bytes[0] = 0x42
+  bytes[1] = 0x4a
+  bytes[3] = 4
+  bytes[5] = 6
+  bytes[7] = 2
+  bytes[9] = 2
+  bytes[10] = 1
+  bytes.set(jpeg, 12)
+  const frame = parseBitmap(bytes)
+  assert.ok(frame)
+  assert.equal(frame.x, 4)
+  assert.equal(frame.y, 6)
+  assert.equal(frame.rgba, null)
+  assert.deepEqual(frame.jpeg, jpeg)
+
+  const unknown = new Uint8Array(12)
+  unknown[0] = 0x42
+  unknown[1] = 0x58
+  unknown[7] = 1
+  unknown[9] = 1
+  assert.throws(() => parseBitmap(unknown), BitmapProtocolError)
 })
 
 test('局部更新只携带脏矩形，坐标原样保留', () => {

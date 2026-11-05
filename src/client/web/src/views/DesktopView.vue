@@ -12,7 +12,7 @@ import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebdesktopUrl, dictLabel, PROTOCOL_MAP } from '@/utils/constants'
-import { mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
+import { BitmapProtocolError, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { keysymOf } from '@/utils/keysym'
 
@@ -43,6 +43,8 @@ const credentialSubmitting = ref(false)
 
 let ws: WebSocket | null = null
 let ctx2d: CanvasRenderingContext2D | null = null
+let paintChain: Promise<void> = Promise.resolve()
+let protocolErrorShown = false
 
 const accountName = computed(() => {
   const acc = asset.value?.accounts?.find((item) => item.account_id === accountId.value)
@@ -99,6 +101,8 @@ function connect(): void {
     return
   }
   closeSocket()
+  paintChain = Promise.resolve()
+  protocolErrorShown = false
   errorText.value = ''
   sessionNo.value = ''
   credentialVisible.value = false
@@ -138,9 +142,25 @@ function connect(): void {
     }
     const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null
     if (!bytes) return
-    const frame = parseBitmap(bytes)
-    if (!frame || !ctx2d) return
-    paintBitmap(ctx2d, frame)
+    paintChain = paintChain
+      .then(async () => {
+        if (protocolErrorShown || ws !== socket) return
+        const frame = parseBitmap(bytes)
+        if (!frame || !ctx2d) return
+        await paintBitmap(ctx2d, frame)
+      })
+      .catch((err: unknown) => {
+        if (!(err instanceof BitmapProtocolError)) {
+          console.error(err)
+          return
+        }
+        if (protocolErrorShown || ws !== socket) return
+        protocolErrorShown = true
+        errorText.value = err.message
+        status.value = 'error'
+        statusText.value = '协议不兼容'
+        closeSocket()
+      })
   }
   socket.onerror = () => {
     if (ws !== socket) return

@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,7 +71,7 @@ type deskInput struct {
 // WebDesktopHandler 是 RDP / VNC 的浏览器画面通道（WebSocket）。
 //
 // 身份、授权、会话建档与强制中断跟 WebSSH 同一条链路。
-// 接通之后二进制帧是一块画面（见 marshalBitmap），文本帧是鼠标键盘。
+// 接通之后二进制帧是一块 JPEG 画面（见 marshalBitmap），文本帧是鼠标键盘。
 // 目标口令只留在代理进程里，不下发给浏览器。
 //
 // 本通道不做图形录像。会话开始和结束仍写入 ops_session。
@@ -280,17 +279,16 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		"recording": false,
 	})
 
+	batch := newBitmapBatch(width, height, bitmapFrameInterval, func(payload []byte) error {
+		wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		return ws.write(wctx, payload)
+	})
+	defer batch.Close()
+
 	pumpErr := make(chan error, 1)
 	go func() {
-		pumpErr <- peer.Pump(ctx, func(rect deskRect) error {
-			payload, err := marshalBitmap(rect)
-			if err != nil {
-				return err
-			}
-			wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			return ws.write(wctx, payload)
-		})
+		pumpErr <- peer.Pump(ctx, batch.Push)
 	}()
 
 	inputDone := make(chan struct{})
@@ -482,27 +480,4 @@ func msgSuffix(msg string) string {
 		return ""
 	}
 	return "：" + msg
-}
-
-// marshalBitmap 把一块 RGBA 打成二进制帧。
-//
-//	0-1  'B''M'
-//	2-3  x  4-5 y  6-7 w  8-9 h（大端 uint16）
-//	10-11 保留
-//	12..  RGBA，长度必须是 w*h*4
-func marshalBitmap(rect deskRect) ([]byte, error) {
-	if rect.W <= 0 || rect.H <= 0 || rect.W > 4096 || rect.H > 4096 {
-		return nil, fmt.Errorf("画面矩形无效")
-	}
-	if len(rect.RGBA) != rect.W*rect.H*4 {
-		return nil, fmt.Errorf("画面像素长度不匹配")
-	}
-	buf := make([]byte, 12+len(rect.RGBA))
-	buf[0], buf[1] = 'B', 'M'
-	binary.BigEndian.PutUint16(buf[2:], uint16(rect.X))
-	binary.BigEndian.PutUint16(buf[4:], uint16(rect.Y))
-	binary.BigEndian.PutUint16(buf[6:], uint16(rect.W))
-	binary.BigEndian.PutUint16(buf[8:], uint16(rect.H))
-	copy(buf[12:], rect.RGBA)
-	return buf, nil
 }

@@ -27,6 +27,20 @@ export function isCopyChord(event: ChordEvent): boolean {
   return isChord(event, 'c', 'KeyC')
 }
 
+/**
+ * 用户在远端按下的复制/剪切。只有这时才允许把远端剪贴板写回本机。
+ * 重命名框里被选中的文件名会以 ServerCutText 送回来，那不是复制。
+ * Ctrl+Shift+C / X 算上：Linux 终端和部分文件管理器用这个组合。
+ */
+export function isRemoteCopyChord(event: ChordEvent): boolean {
+  if (event.altKey) return false
+  if (!event.ctrlKey && !event.metaKey) return false
+  const key = event.key.toLowerCase()
+  if (key === 'c' || event.code === 'KeyC' || key === 'x' || event.code === 'KeyX') return true
+  if (event.shiftKey) return false
+  return key === 'insert' || event.code === 'Insert'
+}
+
 function isChord(event: ChordEvent, key: string, code: string): boolean {
   if (event.altKey || event.shiftKey) return false
   if (!event.ctrlKey && !event.metaKey) return false
@@ -152,14 +166,49 @@ export function releasePasteChord(
   return chord.cancel()
 }
 
-/**
- * 本机粘贴发出之后的一小段时间里，远端剪贴板回声不能写回本机。
- * quietUntil 为 0 表示不拦截。和代理的 pasteEchoQuiet 是同一段窗口。
- */
-export const pasteEchoQuietMs = 600
+/** 复制键按下之后，这段时间内到达的远端剪贴板才写回本机。 */
+export const remoteCopyWindowMs = 3000
 
-export function acceptRemoteCopy(now: number, quietUntil: number): boolean {
-  return !(quietUntil > now)
+export function acceptRemoteCopy(now: number, copyChordUntil: number): boolean {
+  return copyChordUntil > now
+}
+
+/** 与代理 clipboardMaxBytes 相同。面板和发送都按这个上限截断，不拆开汉字。 */
+export const sessionClipboardMaxBytes = 256 * 1024
+
+export type SessionClipOrigin = '' | 'local' | 'remote'
+
+/** 按 UTF-8 字节截断，落在多字节字符中间时丢掉这个字符。 */
+export function fitSessionClipboard(text: string, maxBytes = sessionClipboardMaxBytes): string {
+  const cleaned = text.replaceAll('\0', '')
+  const bytes = new TextEncoder().encode(cleaned)
+  if (bytes.length <= maxBytes) return cleaned
+  let end = maxBytes
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1
+  return new TextDecoder().decode(bytes.subarray(0, end))
+}
+
+export function canSendSessionClip(canPaste: boolean, connected: boolean, text: string): boolean {
+  return connected && canPaste && fitSessionClipboard(text).length > 0
+}
+
+/** 面板里的远端文本要 can_copy 才能写回本机。用户自己键入的不从这里导出。 */
+export function canExportSessionClip(canCopy: boolean, text: string): boolean {
+  return canCopy && fitSessionClipboard(text).length > 0
+}
+
+export function canImportLocalClip(canPaste: boolean, connected: boolean): boolean {
+  return connected && canPaste
+}
+
+/** 面板「送到远端」之后补的按键。先按下 Ctrl，再按 V，避免只打出一个 v。 */
+export function sessionPasteKeys(): OutgoingKey[] {
+  return [
+    { down: true, key: 'Control', code: 'ControlLeft' },
+    { down: true, key: 'v', code: 'KeyV' },
+    { down: false, key: 'v', code: 'KeyV' },
+    { down: false, key: 'Control', code: 'ControlLeft' },
+  ]
 }
 
 /**

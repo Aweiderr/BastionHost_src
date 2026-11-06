@@ -24,7 +24,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
 import { base64ToBytes, strToBase64 } from '../utils/base64'
-import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
+import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons, type KeyMods } from '../utils/frame'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
   DB_PASSWORD_PLACEHOLDER,
@@ -52,12 +52,19 @@ import { ClipboardGetText, ClipboardSetText, EventsOff, EventsOn } from '../../w
 import {
   acceptRemoteCopy,
   browserClipboardWriter,
+  canExportSessionClip,
+  canImportLocalClip,
+  canSendSessionClip,
   clipboardFlags,
   createLocalClipboardWriter,
   createPasteChord,
-  pasteEchoQuietMs,
+  fitSessionClipboard,
+  isRemoteCopyChord,
   releasePasteChord,
+  remoteCopyWindowMs,
+  sessionPasteKeys,
   type OutgoingKey,
+  type SessionClipOrigin,
 } from '../utils/desktopClipboard'
 
 const writeClipboard = createLocalClipboardWriter()
@@ -92,7 +99,10 @@ interface SessionTab {
   credPassword: string
   canCopy: boolean
   canPaste: boolean
-  pasteQuietUntil: number
+  remoteCopyUntil: number
+  clipOpen: boolean
+  clipText: string
+  clipOrigin: SessionClipOrigin
 }
 
 interface TermRuntime {
@@ -322,9 +332,14 @@ function handleDeskControl(key: string, raw: string) {
     return
   }
   if (payload.type === 'clipboard' && payload.direction === 'copy' && tab.canCopy && payload.text) {
-    if (!acceptRemoteCopy(Date.now(), tab.pasteQuietUntil)) return
-    void writeClipboard(String(payload.text), localClipboardTarget()).then((result) => {
-      if (result === 'failed') notify('写入本机剪贴板失败', 'err')
+    if (!acceptRemoteCopy(Date.now(), tab.remoteCopyUntil)) return
+    const shown = fitSessionClipboard(String(payload.text))
+    tab.clipText = shown
+    tab.clipOrigin = 'remote'
+    tab.clipOpen = true
+    void writeClipboard(shown, localClipboardTarget()).then((result) => {
+      canvases.get(key)?.focus()
+      if (result === 'failed') notify('写入本机剪贴板失败，文本已留在会话剪贴板', 'err')
     })
     return
   }
@@ -404,7 +419,10 @@ async function connect(acc?: Account) {
     credPassword: '',
     canCopy: false,
     canPaste: false,
-    pasteQuietUntil: 0,
+    remoteCopyUntil: 0,
+    clipOpen: false,
+    clipText: '',
+    clipOrigin: '',
   }
   tabs.value.push(tab)
   activate(key)
@@ -655,20 +673,77 @@ async function enqueueDeskOk(key: string, payload: string): Promise<boolean> {
   return ok
 }
 
-function sendDeskStroke(key: string, stroke: OutgoingKey): Promise<void> {
+function sendDeskStroke(key: string, stroke: OutgoingKey, mods?: KeyMods): Promise<void> {
   return enqueueDesk(
     key,
     JSON.stringify({
       type: 'key',
       down: stroke.down,
-      keysym: keysymOf(stroke.key, stroke.code),
+      keysym: keysymOf(stroke.key, stroke.code, mods),
       code: stroke.code,
     }),
   )
 }
 
+function onDeskClipInput(key: string, event: Event) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab) return
+  tab.clipText = (event.target as HTMLTextAreaElement).value
+  tab.clipOrigin = 'local'
+}
+
+async function importDeskClip(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || !canImportLocalClip(tab.canPaste, tab.status === 'connected')) return
+  try {
+    const text = (await ClipboardGetText()) ?? ''
+    if (!text) {
+      notify('本机剪贴板是空的，也可以直接贴进会话剪贴板', 'info')
+      return
+    }
+    tab.clipText = fitSessionClipboard(text)
+    tab.clipOrigin = 'local'
+    tab.clipOpen = true
+  } catch {
+    notify('读取本机剪贴板失败，请直接贴进会话剪贴板', 'err')
+  }
+}
+
+async function sendDeskClip(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab) return
+  const text = fitSessionClipboard(tab.clipText)
+  if (!canSendSessionClip(tab.canPaste, tab.status === 'connected', text)) return
+  tab.clipText = text
+  tab.remoteCopyUntil = 0
+  const ok = await enqueueDeskOk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
+  if (!ok) {
+    notify('无法把剪贴板送到远端', 'err')
+    return
+  }
+  for (const stroke of sessionPasteKeys()) await sendDeskStroke(key, stroke)
+  canvases.get(key)?.focus()
+  notify('已送到远端', 'ok')
+}
+
+async function exportDeskClip(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab) return
+  const text = fitSessionClipboard(tab.clipText)
+  if (!canExportSessionClip(tab.canCopy, text)) return
+  const result = await writeClipboard(text, localClipboardTarget())
+  canvases.get(key)?.focus()
+  if (result === 'written') notify('已复制到本机剪贴板', 'ok')
+  else if (result === 'failed') notify('写入本机剪贴板失败，请在会话剪贴板里手动选择', 'err')
+}
+
 function sendDeskKey(key: string, event: KeyboardEvent, down: boolean) {
-  sendDeskStroke(key, { down, key: event.key, code: event.code })
+  sendDeskStroke(key, { down, key: event.key, code: event.code }, {
+    ctrl: event.ctrlKey,
+    meta: event.metaKey,
+    alt: event.altKey,
+    shift: event.shiftKey,
+  })
 }
 
 function chordFor(key: string) {
@@ -700,7 +775,6 @@ async function pasteDesktop(key: string) {
     if (failed) notify('读取本机剪贴板失败', 'err')
     else if (!text) notify('本机剪贴板是空的', 'info')
     else {
-      tab.pasteQuietUntil = Date.now() + pasteEchoQuietMs
       sent = await enqueueDeskOk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
     }
   } catch (e: any) {
@@ -719,11 +793,12 @@ function deskKey(key: string, event: KeyboardEvent, down: boolean) {
   const action = chordFor(key).onKey(down, event, tab.canPaste)
   if (action === 'suppress') return
   if (action === 'begin') {
-    tab.pasteQuietUntil = Date.now() + pasteEchoQuietMs
+    tab.remoteCopyUntil = 0
     writeClipboard.discardPending()
     void pasteDesktop(key)
     return
   }
+  if (down && isRemoteCopyChord(event)) tab.remoteCopyUntil = Date.now() + remoteCopyWindowMs
   sendDeskKey(key, event, down)
 }
 
@@ -1021,6 +1096,7 @@ function connectLabel(protocol: string) {
             </div>
           </div>
           <div v-else-if="t.kind === 'desktop'" class="desk-host">
+            <button class="desk-clip-toggle" type="button" @click="t.clipOpen = !t.clipOpen">剪贴板</button>
             <canvas
               :ref="(el) => bindCanvas(t.key, el)"
               class="desk-canvas"
@@ -1036,6 +1112,49 @@ function connectLabel(protocol: string) {
             <div v-if="t.status !== 'connected' && !t.credOpen" class="desk-wait">
               <p class="desk-wait-msg">{{ desktopWaitText(t) }}</p>
             </div>
+            <aside v-if="t.clipOpen" class="desk-clip" @keydown.stop>
+              <div class="desk-clip-head">
+                <strong>会话剪贴板</strong>
+                <span>复制{{ t.canCopy ? '允许' : '禁止' }} · 粘贴{{ t.canPaste ? '允许' : '禁止' }}</span>
+              </div>
+              <p class="desk-clip-hint">
+                在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。文本也可以直接贴进下面，再送到远端。
+              </p>
+              <textarea
+                class="desk-clip-box"
+                :value="t.clipText"
+                :readonly="!t.canPaste"
+                spellcheck="false"
+                placeholder="会话文本"
+                @input="onDeskClipInput(t.key, $event)"
+              />
+              <div class="desk-clip-actions">
+                <button
+                  class="ghost sm"
+                  type="button"
+                  :disabled="!canImportLocalClip(t.canPaste, t.status === 'connected')"
+                  @click="importDeskClip(t.key)"
+                >
+                  从本机读入
+                </button>
+                <button
+                  class="primary sm"
+                  type="button"
+                  :disabled="!canSendSessionClip(t.canPaste, t.status === 'connected', t.clipText)"
+                  @click="sendDeskClip(t.key)"
+                >
+                  送到远端
+                </button>
+                <button
+                  class="ghost sm"
+                  type="button"
+                  :disabled="!canExportSessionClip(t.canCopy, t.clipText)"
+                  @click="exportDeskClip(t.key)"
+                >
+                  复制到本机
+                </button>
+              </div>
+            </aside>
             <form v-if="t.credOpen" class="desk-cred" @submit.prevent="submitDeskPassword(t.key)">
               <div>{{ t.credReason }}</div>
               <input v-model="t.credPassword" type="password" autocomplete="off" placeholder="目标口令" />

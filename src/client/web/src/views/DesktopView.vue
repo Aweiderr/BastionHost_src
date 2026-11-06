@@ -21,15 +21,22 @@ import {
   acceptRemoteCopy,
   clipboardFlags,
   createPasteChord,
-  pasteEchoQuietMs,
+  isRemoteCopyChord,
+  canExportSessionClip,
+  canImportLocalClip,
+  canSendSessionClip,
+  fitSessionClipboard,
   readPasteText,
   releasePasteChord,
+  remoteCopyWindowMs,
+  sessionPasteKeys,
   textFromClipboardData,
   type OutgoingKey,
+  type SessionClipOrigin,
 } from '@/utils/desktopClipboard'
 import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
-import { keysymOf } from '@/utils/keysym'
+import { keysymOf, type KeyMods } from '@/utils/keysym'
 
 defineOptions({ name: 'DesktopView' })
 
@@ -58,14 +65,17 @@ const credentialReason = ref('')
 const credentialSubmitting = ref(false)
 const canCopy = ref(false)
 const canPaste = ref(false)
+const clipOpen = ref(false)
+const clipText = ref('')
+const clipOrigin = ref<SessionClipOrigin>('')
 
 const pasteChord = createPasteChord()
 let pasteGeneration = 0
-let pasteQuietUntil = 0
+let remoteCopyUntil = 0
 let pasteCapture: { finish: (text: string | null) => void } | null = null
 
-function holdRemoteCopy(): void {
-  pasteQuietUntil = Date.now() + pasteEchoQuietMs
+function armRemoteCopy(): void {
+  remoteCopyUntil = Date.now() + remoteCopyWindowMs
 }
 
 let ws: WebSocket | null = null
@@ -155,6 +165,8 @@ function connect(): void {
   credentialVisible.value = false
   canCopy.value = false
   canPaste.value = false
+  clipText.value = ''
+  clipOrigin.value = ''
   status.value = 'connecting'
   statusText.value = '连接中…'
   const size = viewportSize()
@@ -269,9 +281,16 @@ function handleControl(raw: string): void {
       break
     case 'clipboard':
       if (payload.direction === 'copy' && canCopy.value && payload.text) {
-        if (!acceptRemoteCopy(Date.now(), pasteQuietUntil)) break
-        void copyToClipboard(payload.text).then((ok) => {
-          if (!ok) app.info('浏览器拒绝写入剪贴板。请使用 HTTPS、localhost，或改用桌面客户端。')
+        // 重命名框选中文件名也会推 ServerCutText。没按过复制就不要写回本机，
+        // 否则下一次 Ctrl+V 会把文件名和上一次粘贴的内容混在一起。
+        if (!acceptRemoteCopy(Date.now(), remoteCopyUntil)) break
+        const shown = fitSessionClipboard(payload.text)
+        clipText.value = shown
+        clipOrigin.value = 'remote'
+        clipOpen.value = true
+        void copyToClipboard(shown).then((ok) => {
+          canvasEl.value?.focus()
+          if (!ok) app.info('浏览器拒绝写入剪贴板。文本已留在会话剪贴板里，可以手动复制。')
         })
       }
       break
@@ -336,6 +355,7 @@ function disconnect(): void {
 }
 
 function pointer(event: MouseEvent): void {
+  canvasEl.value?.focus()
   if (status.value !== 'connected' || !canvasEl.value) return
   const box = canvasEl.value.getBoundingClientRect()
   const point = mapDesktopPoint(box, remoteW.value, remoteH.value, event.clientX, event.clientY)
@@ -351,12 +371,57 @@ function wheel(event: WheelEvent): void {
   send({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 })
 }
 
-function sendStroke(stroke: OutgoingKey): void {
-  send({ type: 'key', down: stroke.down, keysym: keysymOf(stroke.key, stroke.code), code: stroke.code })
+function sendStroke(stroke: OutgoingKey, mods?: KeyMods): void {
+  send({ type: 'key', down: stroke.down, keysym: keysymOf(stroke.key, stroke.code, mods), code: stroke.code })
+}
+
+function modsOf(event: KeyboardEvent): KeyMods {
+  return { ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey, shift: event.shiftKey }
 }
 
 function sendKey(event: KeyboardEvent, down: boolean): void {
-  sendStroke({ down, key: event.key, code: event.code })
+  sendStroke({ down, key: event.key, code: event.code }, modsOf(event))
+}
+
+function onClipInput(event: Event): void {
+  const value = (event.target as HTMLTextAreaElement).value
+  clipText.value = value
+  clipOrigin.value = 'local'
+}
+
+async function importLocalClip(): Promise<void> {
+  if (!canImportLocalClip(canPaste.value, status.value === 'connected')) return
+  try {
+    const text = await readBrowserClipboard()
+    if (!text) {
+      app.info('本机剪贴板是空的。也可以直接把文本贴进会话剪贴板。')
+      return
+    }
+    clipText.value = fitSessionClipboard(text)
+    clipOrigin.value = 'local'
+    clipOpen.value = true
+  } catch {
+    app.info('读不到本机剪贴板。请把文本直接贴进会话剪贴板，再点「送到远端」。')
+  }
+}
+
+function sendClipToRemote(): void {
+  const text = fitSessionClipboard(clipText.value)
+  if (!canSendSessionClip(canPaste.value, status.value === 'connected', text)) return
+  clipText.value = text
+  remoteCopyUntil = 0
+  send({ type: 'clipboard', direction: 'paste', text })
+  for (const stroke of sessionPasteKeys()) sendStroke(stroke)
+  canvasEl.value?.focus()
+}
+
+async function exportClipLocal(): Promise<void> {
+  const text = fitSessionClipboard(clipText.value)
+  if (!canExportSessionClip(canCopy.value, text)) return
+  const ok = await copyToClipboard(text)
+  canvasEl.value?.focus()
+  if (ok) app.info('已复制到本机剪贴板')
+  else app.info('浏览器拒绝写入剪贴板。请在会话剪贴板里手动选择文本。')
 }
 
 function readBrowserClipboard(): Promise<string> {
@@ -393,7 +458,6 @@ function armPasteWait(): Promise<string | null> {
 
 function endPasteGesture(): void {
   pasteGeneration += 1
-  pasteQuietUntil = 0
   pasteCapture?.finish('')
   for (const stroke of pasteChord.cancel()) sendStroke(stroke)
 }
@@ -410,7 +474,6 @@ async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<
   // 读完之前修饰键的抬起被扣着。这里同步把剪贴板和按键发出去，避免中间再插入一次 keyup。
   if (gen !== pasteGeneration || !pasteChord.active) return
   if (text) {
-    holdRemoteCopy()
     send({ type: 'clipboard', direction: 'paste', text })
   } else {
     app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
@@ -430,13 +493,14 @@ function key(event: KeyboardEvent, down: boolean): void {
   }
   if (action === 'begin') {
     // 不能 preventDefault，否则浏览器不会派发 paste，HTTP 页面就拿不到 clipboardData。
-    // 同时按住远端回声：这次 Ctrl+V 会让 VNC 把界面里的剪贴板推回来。
-    holdRemoteCopy()
+    // 粘贴开始后，刚才的复制窗口作废，避免重命名选区跟着写回本机。
+    remoteCopyUntil = 0
     const gen = pasteGeneration
     const pasted = armPasteWait()
     void pasteLocal(gen, pasted)
     return
   }
+  if (down && isRemoteCopyChord(event)) armRemoteCopy()
   event.preventDefault()
   sendKey(event, down)
 }
@@ -546,6 +610,15 @@ onBeforeUnmount(() => {
             {{ acc.account_name }}
           </button>
           <button
+            v-if="status === 'connected'"
+            class="btn btn-sm"
+            :class="{ 'btn-primary': clipOpen }"
+            type="button"
+            @click="clipOpen = !clipOpen"
+          >
+            剪贴板
+          </button>
+          <button
             v-if="status !== 'connected' && status !== 'connecting'"
             class="btn btn-primary btn-sm"
             type="button"
@@ -562,21 +635,57 @@ onBeforeUnmount(() => {
         <span style="margin-left: 8px">{{ errorText }}</span>
       </div>
 
-      <div ref="stageEl" class="stage">
-        <canvas
-          ref="canvasEl"
-          tabindex="0"
-          @mousedown="pointer"
-          @mouseup="pointer"
-          @mousemove="pointer"
-          @contextmenu.prevent
-          @wheel.prevent="wheel"
-          @keydown="key($event, true)"
-          @keyup="key($event, false)"
-        />
-        <div v-if="status !== 'connected'" class="stage-hint">
-          {{ status === 'connecting' ? '正在建立图形会话…' : '连接后在这里显示远端桌面。点击画面后可以用键盘。' }}
+      <div class="session-body">
+        <div ref="stageEl" class="stage">
+          <canvas
+            ref="canvasEl"
+            tabindex="0"
+            @mousedown="pointer"
+            @mouseup="pointer"
+            @mousemove="pointer"
+            @contextmenu.prevent
+            @wheel.prevent="wheel"
+            @keydown="key($event, true)"
+            @keyup="key($event, false)"
+          />
+          <div v-if="status !== 'connected'" class="stage-hint">
+            {{ status === 'connecting' ? '正在建立图形会话…' : '连接后在这里显示远端桌面。点击画面后可以用键盘。' }}
+          </div>
         </div>
+        <aside v-if="clipOpen" class="clip-panel">
+          <div class="clip-head">
+            <strong>会话剪贴板</strong>
+            <span class="text-secondary">复制{{ canCopy ? '允许' : '禁止' }} · 粘贴{{ canPaste ? '允许' : '禁止' }}</span>
+          </div>
+          <p class="clip-hint">
+            在远端按 Ctrl+C 后，文本会出现在这里，并尽量写入本机剪贴板。只选中重命名框里的文件名不会进来。也可以把文本贴进下面，再送到远端。
+          </p>
+          <textarea
+            class="clip-box"
+            :value="clipText"
+            :readonly="!canPaste"
+            spellcheck="false"
+            placeholder="会话文本"
+            @input="onClipInput"
+            @keydown.stop
+          />
+          <div class="clip-actions">
+            <button class="btn btn-sm" type="button" :disabled="!canImportLocalClip(canPaste, status === 'connected')" @click="importLocalClip">
+              从本机读入
+            </button>
+            <button
+              class="btn btn-primary btn-sm"
+              type="button"
+              :disabled="!canSendSessionClip(canPaste, status === 'connected', clipText)"
+              @click="sendClipToRemote"
+            >
+              送到远端
+            </button>
+            <button class="btn btn-sm" type="button" :disabled="!canExportSessionClip(canCopy, clipText)" @click="exportClipLocal">
+              复制到本机
+            </button>
+          </div>
+        </aside>
       </div>
     </template>
 
@@ -595,13 +704,61 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.session-body {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
 .stage {
   position: relative;
+  flex: 1;
+  min-width: 0;
   height: calc(100vh - 240px);
   min-height: 420px;
   background: #0b1220;
   border-radius: 8px;
   overflow: hidden;
+}
+.clip-panel {
+  flex: 0 0 300px;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  min-height: 420px;
+  max-height: calc(100vh - 240px);
+}
+.clip-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.clip-hint {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.clip-box {
+  flex: 1;
+  min-height: 180px;
+  width: 100%;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface-soft, #f8fafc);
+  color: var(--color-text);
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.clip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .stage canvas {
   width: 100%;

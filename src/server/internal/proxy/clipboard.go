@@ -134,6 +134,9 @@ func sanitizeClipboard(text string) string {
 	text = strings.ReplaceAll(text, "\x00", "")
 	if len(text) > clipboardMaxBytes {
 		text = text[:clipboardMaxBytes]
+		for len(text) > 0 && !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
 	}
 	if !utf8.ValidString(text) {
 		text = strings.ToValidUTF8(text, "")
@@ -142,11 +145,12 @@ func sanitizeClipboard(text string) string {
 }
 
 // encodeClientCutText 组装 RFB ClientCutText（类型 6）。
-// 能放进 Latin-1 的按协议编码；否则按 UTF-8 发送（TigerVNC 等常见实现能收）。
+// ASCII / Latin-1 按协议单字节发送。出现汉字等非 Latin-1 字符时整段改用 UTF-8，
+// TigerVNC 等常见实现能收。不会把汉字拆成 Latin-1。
 //
-// 扩展剪贴板（长度为负，伪编码 0xC0A1E5CE）要先交换 Caps，再 zlib 压缩 UTF-8。
+// 扩展剪贴板（长度为负，伪编码 0xC0A1E5CE）仍不发送，也不在 SetEncodings 里宣告。
 // 对不认识负长度的服务器，这条消息会被当成超长正文，后面的画面就读坏了。
-// 所以这里仍发经典 ClientCutText。只认扩展 Provide 的服务端不会把文本放进系统剪贴板。
+// 收到的扩展 ServerCutText 只丢弃正文，避免画面失步。
 func encodeClientCutText(text string) []byte {
 	payload := clipboardWireBytes(text)
 	msg := make([]byte, 8+len(payload))

@@ -42,6 +42,15 @@ type App struct {
 	seq      int
 	// watchCancel 停止“是否被另一端踢下线”的轮询。
 	watchCancel context.CancelFunc
+
+	// persistCoreURL 为真时，SetCoreURL 把地址写入本机配置。
+	// 只在正式启动时打开。测试里的 NewApp 默认关闭，避免写到开发者的配置目录。
+	persistCoreURL bool
+	// envCoreURL 是本次进程由 BASTION_CORE_URL 规范化后的地址。
+	// 登录页挂载时会用当前输入再调一次 SetCoreURL。与环境变量相同的那一次不写文件，
+	// 这样展台或自动化不会把操作员已经记住的地址覆盖掉。
+	// 用户改成别的地址再检测或登录时仍会更新记录。
+	envCoreURL string
 }
 
 // NewApp 创建应用对象。
@@ -110,15 +119,21 @@ func (a *App) shutdown(ctx context.Context) {
 func (a *App) GetCoreURL() string { return a.api.Base() }
 
 // SetCoreURL 修改管理服务地址（登录页可切换环境）。
+//
+// 空输入保持当前地址。非空输入整理后立刻作为后续 Ping、登录和会话的基址。
+// 正式启动时还会把这个地址写入本机配置，下次没有 BASTION_CORE_URL 时填回登录页。
+// 服务当时不可达也记住：用户要的是下次还显示这次填写的地址。
 func (a *App) SetCoreURL(url string) string {
-	url = strings.TrimSpace(url)
+	url = normalizeCoreURL(url)
 	if url == "" {
 		return a.api.Base()
 	}
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		url = "http://" + url
-	}
 	a.api.SetBase(url)
+	if a.persistCoreURL && url != a.envCoreURL {
+		if err := saveRememberedCoreURL(url); err != nil {
+			slog.Warn("保存管理服务地址失败", "err", err)
+		}
+	}
 	return a.api.Base()
 }
 
@@ -595,7 +610,7 @@ func (a *App) desktopSocketURL() string {
 	if v := strings.TrimSpace(os.Getenv("BASTION_DESKTOP_GATEWAY")); v != "" {
 		return v
 	}
-	raw := "http://127.0.0.1:8080"
+	raw := defaultCoreURL
 	if a.api != nil && a.api.Base() != "" {
 		raw = a.api.Base()
 	}

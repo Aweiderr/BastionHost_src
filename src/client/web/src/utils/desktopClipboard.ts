@@ -201,6 +201,15 @@ export function canImportLocalClip(canPaste: boolean, connected: boolean): boole
   return connected && canPaste
 }
 
+/**
+ * 面板「送到远端」成功之后，Ctrl/Cmd+V 只把按键交给远端，粘贴刚装上的远端剪贴板。
+ * 这时不能再读本机剪贴板，否则会把本机最新内容盖掉刚送出的文本。
+ * 用户点「从本机读入」之后，快捷键才恢复成“本机剪贴板 → 远端”。
+ */
+export function forwardInstalledPaste(panelInstalled: boolean): boolean {
+  return panelInstalled
+}
+
 /** 面板「送到远端」之后补的按键。先按下 Ctrl，再按 V，避免只打出一个 v。 */
 export function sessionPasteKeys(): OutgoingKey[] {
   return [

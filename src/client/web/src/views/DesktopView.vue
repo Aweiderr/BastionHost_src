@@ -5,7 +5,8 @@
  * 像素和键鼠都走代理的 /api/v1/webdesktop，目标口令不下发到浏览器。
  * 连接和窗口变化时把视口发给代理，由 VNC SetDesktopSize 改远端分辨率。
  * 剪贴板按授权双向同步：can_copy 是远端到本机，can_paste 是本机到远端。
- * Ctrl/Cmd+V 先把本机文本放进远端剪贴板，再在修饰键仍按住时发出 V。
+ * Ctrl/Cmd+V 默认先把本机文本放进远端剪贴板，再在修饰键仍按住时发出 V。
+ * 面板「送到远端」成功之后，Ctrl/Cmd+V 只转发按键，粘贴刚送出的那段文字。
  * 局域网 HTTP 读不到 navigator.clipboard，改用 paste 事件里的 clipboardData。
  * 磁盘映射仍不做。
  */
@@ -21,6 +22,8 @@ import {
   acceptRemoteCopy,
   clipboardFlags,
   createPasteChord,
+  forwardInstalledPaste,
+  isPasteChord,
   isRemoteCopyChord,
   canExportSessionClip,
   canImportLocalClip,
@@ -68,6 +71,8 @@ const canPaste = ref(false)
 const clipOpen = ref(false)
 const clipText = ref('')
 const clipOrigin = ref<SessionClipOrigin>('')
+/** 面板已把文本装进远端。此后 Ctrl/Cmd+V 不再读本机剪贴板。 */
+let panelPasteInstalled = false
 
 const pasteChord = createPasteChord()
 let pasteGeneration = 0
@@ -108,9 +113,10 @@ function ensureCanvas(w: number, h: number): void {
   ctx2d = canvas.getContext('2d')
 }
 
-function send(payload: unknown): void {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return
+function send(payload: unknown): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false
   ws.send(JSON.stringify(payload))
+  return true
 }
 
 function viewportSize(): { width: number; height: number } {
@@ -167,6 +173,7 @@ function connect(): void {
   canPaste.value = false
   clipText.value = ''
   clipOrigin.value = ''
+  panelPasteInstalled = false
   status.value = 'connecting'
   statusText.value = '连接中…'
   const size = viewportSize()
@@ -400,6 +407,7 @@ async function importLocalClip(): Promise<void> {
     clipText.value = fitSessionClipboard(text)
     clipOrigin.value = 'local'
     clipOpen.value = true
+    panelPasteInstalled = false
   } catch {
     app.info('读不到本机剪贴板。请把文本直接贴进会话剪贴板，再点「送到远端」。')
   }
@@ -410,9 +418,11 @@ function sendClipToRemote(): void {
   if (!canSendSessionClip(canPaste.value, status.value === 'connected', text)) return
   clipText.value = text
   remoteCopyUntil = 0
-  send({ type: 'clipboard', direction: 'paste', text })
+  if (!send({ type: 'clipboard', direction: 'paste', text })) return
   for (const stroke of sessionPasteKeys()) sendStroke(stroke)
+  panelPasteInstalled = true
   canvasEl.value?.focus()
+  app.info('已送到远端。在画面里按 Ctrl+V 会粘贴这段文字，不会改用本机剪贴板。')
 }
 
 async function exportClipLocal(): Promise<void> {
@@ -486,6 +496,11 @@ async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<
 function key(event: KeyboardEvent, down: boolean): void {
   if (status.value !== 'connected') return
   if (credentialVisible.value) return
+  if (forwardInstalledPaste(panelPasteInstalled) && isPasteChord(event)) {
+    event.preventDefault()
+    sendKey(event, down)
+    return
+  }
   const action = pasteChord.onKey(down, event, canPaste.value)
   if (action === 'suppress') {
     event.preventDefault()
@@ -658,7 +673,7 @@ onBeforeUnmount(() => {
             <span class="text-secondary">复制{{ canCopy ? '允许' : '禁止' }} · 粘贴{{ canPaste ? '允许' : '禁止' }}</span>
           </div>
           <p class="clip-hint">
-            在远端按 Ctrl+C 后，文本会出现在这里，并尽量写入本机剪贴板。只选中重命名框里的文件名不会进来。也可以把文本贴进下面，再送到远端。
+            在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里按 Ctrl+V 会粘贴刚送出的文字，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
           </p>
           <textarea
             class="clip-box"

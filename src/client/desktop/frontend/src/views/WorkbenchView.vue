@@ -13,6 +13,9 @@
  * 口令保持占位符，不在本窗口建立数据库会话。
  * 其他协议只打开说明标签，不拨 SSH，也不拨画面通道。
  *
+ * 图形粘贴读系统剪贴板（ClipboardGetText）。读完之前不把 Ctrl/Cmd 的抬起发给远端，
+ * 否则远端先松开修饰键，再收到单独的 V，粘贴不会落进画面。
+ *
  * 事件监听必须在 OpenSession / OpenDesktopSession 之前注册。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -50,7 +53,8 @@ import {
   browserClipboardWriter,
   clipboardFlags,
   createLocalClipboardWriter,
-  isPasteChord,
+  createPasteChord,
+  type OutgoingKey,
 } from '../utils/desktopClipboard'
 
 const writeClipboard = createLocalClipboardWriter()
@@ -85,8 +89,6 @@ interface SessionTab {
   credPassword: string
   canCopy: boolean
   canPaste: boolean
-  pasteHold: boolean
-  pasteUpQueued: boolean
 }
 
 interface TermRuntime {
@@ -106,6 +108,7 @@ const hosts = new Map<string, HTMLElement>()
 const canvases = new Map<string, HTMLCanvasElement>()
 const paintQueues = new Map<string, Promise<void>>()
 const runtimes = new Map<string, TermRuntime>()
+const pasteChords = new Map<string, ReturnType<typeof createPasteChord>>()
 
 const activeTab = computed(() => tabs.value.find((t) => t.key === activeKey.value) || null)
 
@@ -395,8 +398,6 @@ async function connect(acc?: Account) {
     credPassword: '',
     canCopy: false,
     canPaste: false,
-    pasteHold: false,
-    pasteUpQueued: false,
   }
   tabs.value.push(tab)
   activate(key)
@@ -550,6 +551,11 @@ function focusActive() {
 function dropTab(key: string) {
   destroyTerm(key)
   stopDeskResize(key)
+  const chord = pasteChords.get(key)
+  if (chord) {
+    for (const stroke of chord.cancel()) sendDeskStroke(key, stroke)
+    pasteChords.delete(key)
+  }
   canvases.delete(key)
   const idx = tabs.value.findIndex((t) => t.key === key)
   if (idx < 0) return
@@ -613,45 +619,67 @@ function deskWheel(key: string, event: WheelEvent) {
   ).catch(() => {})
 }
 
-function sendDeskKey(key: string, event: KeyboardEvent, down: boolean) {
+function sendDeskStroke(key: string, stroke: OutgoingKey) {
   WriteDesktopInput(
     key,
-    JSON.stringify({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code }),
+    JSON.stringify({
+      type: 'key',
+      down: stroke.down,
+      keysym: keysymOf(stroke.key, stroke.code),
+      code: stroke.code,
+    }),
   ).catch(() => {})
+}
+
+function sendDeskKey(key: string, event: KeyboardEvent, down: boolean) {
+  sendDeskStroke(key, { down, key: event.key, code: event.code })
+}
+
+function chordFor(key: string) {
+  let chord = pasteChords.get(key)
+  if (!chord) {
+    chord = createPasteChord()
+    pasteChords.set(key, chord)
+  }
+  return chord
+}
+
+async function pasteDesktop(key: string) {
+  const chord = chordFor(key)
+  let text = ''
+  let failed = false
+  try {
+    text = (await ClipboardGetText()) ?? ''
+  } catch {
+    failed = true
+  }
+  const tab = tabs.value.find((t) => t.key === key)
+  // 会话已经结束就不要再补 V。若抬起还扣在手里，先放掉，避免远端的 Ctrl 粘住。
+  if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || !chord.active) {
+    for (const stroke of chord.cancel()) sendDeskStroke(key, stroke)
+    return
+  }
+  try {
+    if (failed) notify('读取本机剪贴板失败', 'err')
+    else if (text) await WriteDesktopInput(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
+    else notify('本机剪贴板是空的', 'info')
+  } catch (e: any) {
+    notify(String(e?.message || e), 'err')
+  }
+  if (!chord.active) return
+  // 剪贴板调用返回之后同步把按键交出去，避免等待 IPC 时又插入一次 keyup。
+  const strokes = chord.finish()
+  for (const stroke of strokes) sendDeskStroke(key, stroke)
 }
 
 function deskKey(key: string, event: KeyboardEvent, down: boolean) {
   const tab = tabs.value.find((t) => t.key === key)
   if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || tab.credOpen) return
   event.preventDefault()
-  if (isPasteChord(event)) {
-    if (!tab.canPaste) {
-      sendDeskKey(key, event, down)
-      return
-    }
-    if (!down) {
-      if (tab.pasteHold) tab.pasteUpQueued = true
-      else sendDeskKey(key, event, false)
-      return
-    }
-    tab.pasteHold = true
-    tab.pasteUpQueued = false
-    ClipboardGetText()
-      .then((text) => {
-        if (text) {
-          return WriteDesktopInput(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
-        }
-        notify('本机剪贴板是空的', 'info')
-      })
-      .catch(() => notify('读取本机剪贴板失败', 'err'))
-      .finally(() => {
-        sendDeskKey(key, event, true)
-        if (tab.pasteUpQueued) {
-          tab.pasteUpQueued = false
-          sendDeskKey(key, event, false)
-        }
-        tab.pasteHold = false
-      })
+  const action = chordFor(key).onKey(down, event, tab.canPaste)
+  if (action === 'suppress') return
+  if (action === 'begin') {
+    void pasteDesktop(key)
     return
   }
   sendDeskKey(key, event, down)

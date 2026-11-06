@@ -1,6 +1,9 @@
 /**
  * 图形会话剪贴板方向。can_copy 是远端到本机，can_paste 是本机到远端。
  *
+ * 粘贴读的是系统剪贴板（Wails ClipboardGetText），不是浏览器 Clipboard API。
+ * 读取是异步的。Ctrl/Cmd 的抬起要压到 V 已经发给远端之后，否则远端只看到一个 V。
+ *
  * 本机写入先走 Wails ClipboardSetText。Windows 上它要 OpenClipboard，
  * 别的进程还占着剪贴板时会立刻失败或返回 false。这种情况再试一到两次。
  * 只有返回值严格等于 true 才算写上。仍然失败才用 navigator.clipboard.writeText。
@@ -26,6 +29,107 @@ export function clipboardFlags(payload: { can_copy?: unknown; can_paste?: unknow
   canPaste: boolean
 } {
   return { canCopy: payload.can_copy === true, canPaste: payload.can_paste === true }
+}
+
+/** 发给远端的一记按键。key / code 用来换 keysym，RDP 还要靠 code 取扫描码。 */
+export interface OutgoingKey {
+  down: boolean
+  key: string
+  code: string
+}
+
+/** forward：照常下发。begin：开始读剪贴板，先不要把 V 发走。suppress：这次抬起先扣下。 */
+export type PasteKeyAction = 'forward' | 'begin' | 'suppress'
+
+interface PasteKeyEvent extends ChordEvent {
+  repeat?: boolean
+}
+
+const CHORD_MODIFIER_CODES = new Set(['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'])
+
+function isChordModifier(event: { key: string; code: string }): boolean {
+  if (CHORD_MODIFIER_CODES.has(event.code)) return true
+  return event.key === 'Control' || event.key === 'Meta' || event.key === 'OS'
+}
+
+function isPasteKey(event: { key: string; code: string }): boolean {
+  return event.key.toLowerCase() === 'v' || event.code === 'KeyV'
+}
+
+/**
+ * 一次 Ctrl/Cmd+V。
+ *
+ * 修饰键的 keydown 已经发给远端。读剪贴板的空隙里如果把 keyup 也发走，
+ * 远端会在 V 到达之前松开 Ctrl/Cmd。V 的 keyup 同样先扣下：
+ * 用户可能先松开 Ctrl，此时 V 的 keyup 上 ctrlKey 已经是 false，不能再靠快捷键组合来认。
+ * finish 的顺序是 V 按下、必要时 V 抬起、然后才是被扣下的修饰键抬起。
+ * 与 Web 端同一套状态机。桌面端的文本来自 ClipboardGetText，不走 paste 事件。
+ */
+export function createPasteChord(): {
+  readonly active: boolean
+  onKey(down: boolean, event: PasteKeyEvent, canPaste: boolean): PasteKeyAction
+  finish(): OutgoingKey[]
+  cancel(): OutgoingKey[]
+} {
+  let active = false
+  let pasteKey = { key: 'v', code: 'KeyV' }
+  let pasteUp = false
+  let modifiers: OutgoingKey[] = []
+
+  function reset(): void {
+    active = false
+    pasteUp = false
+    modifiers = []
+  }
+
+  return {
+    get active() {
+      return active
+    },
+    onKey(down, event, canPaste) {
+      if (active && !down && isPasteKey(event)) {
+        pasteUp = true
+        return 'suppress'
+      }
+      if (active && !down && isChordModifier(event)) {
+        const id = event.code || event.key
+        if (!modifiers.some((item) => (item.code || item.key) === id)) {
+          modifiers.push({ down: false, key: event.key, code: event.code })
+        }
+        return 'suppress'
+      }
+      if (active && down && isChordModifier(event)) {
+        const id = event.code || event.key
+        modifiers = modifiers.filter((item) => (item.code || item.key) !== id)
+        return 'forward'
+      }
+      if (down && isPasteChord(event)) {
+        if (!canPaste) return 'forward'
+        // 按住不放时的连发会在上一次还没写完时再开一次，把已经扣下的抬起重置掉。
+        if (active || event.repeat) return 'suppress'
+        active = true
+        pasteUp = false
+        modifiers = []
+        pasteKey = { key: event.key || 'v', code: event.code || 'KeyV' }
+        return 'begin'
+      }
+      return 'forward'
+    },
+    finish() {
+      if (!active) return []
+      const out: OutgoingKey[] = [{ down: true, key: pasteKey.key, code: pasteKey.code }]
+      if (pasteUp) out.push({ down: false, key: pasteKey.key, code: pasteKey.code })
+      out.push(...modifiers)
+      reset()
+      return out
+    },
+    cancel() {
+      if (!active) return []
+      const out = modifiers.map((item) => ({ down: false, key: item.key, code: item.code }))
+      reset()
+      return out
+    },
+  }
 }
 
 /** 第一次失败后再试的间隔。两次，都短，避免把粘贴拖成可感知的等待。 */

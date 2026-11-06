@@ -21,15 +21,16 @@ import {
   acceptRemoteCopy,
   clipboardFlags,
   createPasteChord,
-  pasteEchoQuietMs,
+  isRemoteCopyChord,
   readPasteText,
   releasePasteChord,
+  remoteCopyWindowMs,
   textFromClipboardData,
   type OutgoingKey,
 } from '@/utils/desktopClipboard'
 import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
-import { keysymOf } from '@/utils/keysym'
+import { keysymOf, type KeyMods } from '@/utils/keysym'
 
 defineOptions({ name: 'DesktopView' })
 
@@ -61,11 +62,11 @@ const canPaste = ref(false)
 
 const pasteChord = createPasteChord()
 let pasteGeneration = 0
-let pasteQuietUntil = 0
+let remoteCopyUntil = 0
 let pasteCapture: { finish: (text: string | null) => void } | null = null
 
-function holdRemoteCopy(): void {
-  pasteQuietUntil = Date.now() + pasteEchoQuietMs
+function armRemoteCopy(): void {
+  remoteCopyUntil = Date.now() + remoteCopyWindowMs
 }
 
 let ws: WebSocket | null = null
@@ -269,8 +270,11 @@ function handleControl(raw: string): void {
       break
     case 'clipboard':
       if (payload.direction === 'copy' && canCopy.value && payload.text) {
-        if (!acceptRemoteCopy(Date.now(), pasteQuietUntil)) break
+        // 重命名框选中文件名也会推 ServerCutText。没按过复制就不要写回本机，
+        // 否则下一次 Ctrl+V 会把文件名和上一次粘贴的内容混在一起。
+        if (!acceptRemoteCopy(Date.now(), remoteCopyUntil)) break
         void copyToClipboard(payload.text).then((ok) => {
+          canvasEl.value?.focus()
           if (!ok) app.info('浏览器拒绝写入剪贴板。请使用 HTTPS、localhost，或改用桌面客户端。')
         })
       }
@@ -336,6 +340,7 @@ function disconnect(): void {
 }
 
 function pointer(event: MouseEvent): void {
+  canvasEl.value?.focus()
   if (status.value !== 'connected' || !canvasEl.value) return
   const box = canvasEl.value.getBoundingClientRect()
   const point = mapDesktopPoint(box, remoteW.value, remoteH.value, event.clientX, event.clientY)
@@ -351,12 +356,16 @@ function wheel(event: WheelEvent): void {
   send({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 })
 }
 
-function sendStroke(stroke: OutgoingKey): void {
-  send({ type: 'key', down: stroke.down, keysym: keysymOf(stroke.key, stroke.code), code: stroke.code })
+function sendStroke(stroke: OutgoingKey, mods?: KeyMods): void {
+  send({ type: 'key', down: stroke.down, keysym: keysymOf(stroke.key, stroke.code, mods), code: stroke.code })
+}
+
+function modsOf(event: KeyboardEvent): KeyMods {
+  return { ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey, shift: event.shiftKey }
 }
 
 function sendKey(event: KeyboardEvent, down: boolean): void {
-  sendStroke({ down, key: event.key, code: event.code })
+  sendStroke({ down, key: event.key, code: event.code }, modsOf(event))
 }
 
 function readBrowserClipboard(): Promise<string> {
@@ -393,7 +402,6 @@ function armPasteWait(): Promise<string | null> {
 
 function endPasteGesture(): void {
   pasteGeneration += 1
-  pasteQuietUntil = 0
   pasteCapture?.finish('')
   for (const stroke of pasteChord.cancel()) sendStroke(stroke)
 }
@@ -410,7 +418,6 @@ async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<
   // 读完之前修饰键的抬起被扣着。这里同步把剪贴板和按键发出去，避免中间再插入一次 keyup。
   if (gen !== pasteGeneration || !pasteChord.active) return
   if (text) {
-    holdRemoteCopy()
     send({ type: 'clipboard', direction: 'paste', text })
   } else {
     app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
@@ -430,13 +437,14 @@ function key(event: KeyboardEvent, down: boolean): void {
   }
   if (action === 'begin') {
     // 不能 preventDefault，否则浏览器不会派发 paste，HTTP 页面就拿不到 clipboardData。
-    // 同时按住远端回声：这次 Ctrl+V 会让 VNC 把界面里的剪贴板推回来。
-    holdRemoteCopy()
+    // 粘贴开始后，刚才的复制窗口作废，避免重命名选区跟着写回本机。
+    remoteCopyUntil = 0
     const gen = pasteGeneration
     const pasted = armPasteWait()
     void pasteLocal(gen, pasted)
     return
   }
+  if (down && isRemoteCopyChord(event)) armRemoteCopy()
   event.preventDefault()
   sendKey(event, down)
 }

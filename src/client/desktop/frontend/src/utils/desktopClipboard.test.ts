@@ -8,6 +8,7 @@ import {
   createLocalClipboardWriter,
   createPasteChord,
   isPasteChord,
+  isRemoteCopyChord,
   releasePasteChord,
   writeLocalClipboard,
   type ChordEvent,
@@ -302,8 +303,10 @@ test('合成的粘贴键始终是小写 v，空文本不发 V', () => {
   empty.onKey(true, vDown, true)
   empty.onKey(false, ctrlUp, true)
   assert.deepEqual(releasePasteChord(empty, ''), [{ down: false, key: 'Control', code: 'ControlLeft' }])
-  assert.equal(acceptRemoteCopy(10, 20), false)
-  assert.equal(acceptRemoteCopy(20, 20), true)
+  assert.equal(isRemoteCopyChord({ ...vDown, key: 'c', code: 'KeyC' }), true)
+  assert.equal(isRemoteCopyChord({ ...vDown, key: 'a', code: 'KeyA' }), false)
+  assert.equal(acceptRemoteCopy(10, 20), true)
+  assert.equal(acceptRemoteCopy(20, 20), false)
 })
 
 test('discardPending 会放弃还在重试的旧文本', async () => {

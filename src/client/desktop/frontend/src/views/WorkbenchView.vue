@@ -24,7 +24,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { state, notify, type Asset, type Account } from '../store'
 import { base64ToBytes, strToBase64 } from '../utils/base64'
-import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '../utils/frame'
+import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons, type KeyMods } from '../utils/frame'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
   DB_PASSWORD_PLACEHOLDER,
@@ -55,8 +55,9 @@ import {
   clipboardFlags,
   createLocalClipboardWriter,
   createPasteChord,
-  pasteEchoQuietMs,
+  isRemoteCopyChord,
   releasePasteChord,
+  remoteCopyWindowMs,
   type OutgoingKey,
 } from '../utils/desktopClipboard'
 
@@ -92,7 +93,7 @@ interface SessionTab {
   credPassword: string
   canCopy: boolean
   canPaste: boolean
-  pasteQuietUntil: number
+  remoteCopyUntil: number
 }
 
 interface TermRuntime {
@@ -322,8 +323,9 @@ function handleDeskControl(key: string, raw: string) {
     return
   }
   if (payload.type === 'clipboard' && payload.direction === 'copy' && tab.canCopy && payload.text) {
-    if (!acceptRemoteCopy(Date.now(), tab.pasteQuietUntil)) return
+    if (!acceptRemoteCopy(Date.now(), tab.remoteCopyUntil)) return
     void writeClipboard(String(payload.text), localClipboardTarget()).then((result) => {
+      canvases.get(key)?.focus()
       if (result === 'failed') notify('写入本机剪贴板失败', 'err')
     })
     return
@@ -404,7 +406,7 @@ async function connect(acc?: Account) {
     credPassword: '',
     canCopy: false,
     canPaste: false,
-    pasteQuietUntil: 0,
+    remoteCopyUntil: 0,
   }
   tabs.value.push(tab)
   activate(key)
@@ -655,20 +657,25 @@ async function enqueueDeskOk(key: string, payload: string): Promise<boolean> {
   return ok
 }
 
-function sendDeskStroke(key: string, stroke: OutgoingKey): Promise<void> {
+function sendDeskStroke(key: string, stroke: OutgoingKey, mods?: KeyMods): Promise<void> {
   return enqueueDesk(
     key,
     JSON.stringify({
       type: 'key',
       down: stroke.down,
-      keysym: keysymOf(stroke.key, stroke.code),
+      keysym: keysymOf(stroke.key, stroke.code, mods),
       code: stroke.code,
     }),
   )
 }
 
 function sendDeskKey(key: string, event: KeyboardEvent, down: boolean) {
-  sendDeskStroke(key, { down, key: event.key, code: event.code })
+  sendDeskStroke(key, { down, key: event.key, code: event.code }, {
+    ctrl: event.ctrlKey,
+    meta: event.metaKey,
+    alt: event.altKey,
+    shift: event.shiftKey,
+  })
 }
 
 function chordFor(key: string) {
@@ -700,7 +707,6 @@ async function pasteDesktop(key: string) {
     if (failed) notify('读取本机剪贴板失败', 'err')
     else if (!text) notify('本机剪贴板是空的', 'info')
     else {
-      tab.pasteQuietUntil = Date.now() + pasteEchoQuietMs
       sent = await enqueueDeskOk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
     }
   } catch (e: any) {
@@ -719,11 +725,12 @@ function deskKey(key: string, event: KeyboardEvent, down: boolean) {
   const action = chordFor(key).onKey(down, event, tab.canPaste)
   if (action === 'suppress') return
   if (action === 'begin') {
-    tab.pasteQuietUntil = Date.now() + pasteEchoQuietMs
+    tab.remoteCopyUntil = 0
     writeClipboard.discardPending()
     void pasteDesktop(key)
     return
   }
+  if (down && isRemoteCopyChord(event)) tab.remoteCopyUntil = Date.now() + remoteCopyWindowMs
   sendDeskKey(key, event, down)
 }
 

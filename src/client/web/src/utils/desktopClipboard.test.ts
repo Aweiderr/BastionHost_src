@@ -6,6 +6,7 @@ import {
   createPasteChord,
   isCopyChord,
   isPasteChord,
+  isRemoteCopyChord,
   readPasteText,
   releasePasteChord,
   textFromClipboardData,
@@ -214,8 +215,26 @@ test('没读到本机文本时不发 V，只松开扣下的 Ctrl', () => {
   assert.equal(chord.active, false)
 })
 
-test('粘贴窗口内不接收远端剪贴板，窗口结束后可以', () => {
-  assert.equal(acceptRemoteCopy(1_000, 0), true)
-  assert.equal(acceptRemoteCopy(1_000, 1_500), false)
-  assert.equal(acceptRemoteCopy(1_500, 1_500), true)
+test('只有刚按过复制或剪切，才接收远端剪贴板', () => {
+  const bare = { key: 'a', code: 'KeyA', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false }
+  assert.equal(isRemoteCopyChord({ ...bare, key: 'c', code: 'KeyC', ctrlKey: true }), true)
+  assert.equal(isRemoteCopyChord({ ...bare, key: 'x', code: 'KeyX', ctrlKey: true }), true)
+  assert.equal(isRemoteCopyChord({ ...bare, key: 'c', code: 'KeyC', ctrlKey: true, shiftKey: true }), true)
+  assert.equal(isRemoteCopyChord({ ...bare, key: 'Insert', code: 'Insert', ctrlKey: true }), true)
+  assert.equal(isRemoteCopyChord({ ...bare, key: 'v', code: 'KeyV', ctrlKey: true }), false)
+  assert.equal(isRemoteCopyChord({ ...bare, ctrlKey: true }), false)
+  assert.equal(isRemoteCopyChord({ ...bare, key: 'Insert', code: 'Insert', shiftKey: true }), false)
+  assert.equal(acceptRemoteCopy(1_000, 0), false)
+  assert.equal(acceptRemoteCopy(1_000, 1_500), true)
+  assert.equal(acceptRemoteCopy(1_500, 1_500), false)
+})
+
+test('Ctrl+A、Delete、Backspace 会照常发给远端，不当作粘贴', () => {
+  const chord = createPasteChord()
+  const mods = { metaKey: false, altKey: false, shiftKey: false }
+  assert.equal(chord.onKey(true, { key: 'a', code: 'KeyA', ctrlKey: true, ...mods }, true), 'forward')
+  assert.equal(chord.onKey(true, { key: 'A', code: 'KeyA', ctrlKey: true, ...mods }, true), 'forward')
+  assert.equal(chord.onKey(true, { key: 'Delete', code: 'Delete', ctrlKey: false, ...mods }, true), 'forward')
+  assert.equal(chord.onKey(true, { key: 'Backspace', code: 'Backspace', ctrlKey: false, ...mods }, true), 'forward')
+  assert.equal(chord.active, false)
 })

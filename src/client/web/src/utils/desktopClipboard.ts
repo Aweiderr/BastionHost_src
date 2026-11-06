@@ -27,6 +27,20 @@ export function isCopyChord(event: ChordEvent): boolean {
   return isChord(event, 'c', 'KeyC')
 }
 
+/**
+ * 用户在远端按下的复制/剪切。只有这时才允许把远端剪贴板写回本机。
+ * 重命名框里被选中的文件名会以 ServerCutText 送回来，那不是复制。
+ * Ctrl+Shift+C / X 算上：Linux 终端和部分文件管理器用这个组合。
+ */
+export function isRemoteCopyChord(event: ChordEvent): boolean {
+  if (event.altKey) return false
+  if (!event.ctrlKey && !event.metaKey) return false
+  const key = event.key.toLowerCase()
+  if (key === 'c' || event.code === 'KeyC' || key === 'x' || event.code === 'KeyX') return true
+  if (event.shiftKey) return false
+  return key === 'insert' || event.code === 'Insert'
+}
+
 function isChord(event: ChordEvent, key: string, code: string): boolean {
   if (event.altKey || event.shiftKey) return false
   if (!event.ctrlKey && !event.metaKey) return false
@@ -152,14 +166,11 @@ export function releasePasteChord(
   return chord.cancel()
 }
 
-/**
- * 本机粘贴发出之后的一小段时间里，远端剪贴板回声不能写回本机。
- * quietUntil 为 0 表示不拦截。和代理的 pasteEchoQuiet 是同一段窗口。
- */
-export const pasteEchoQuietMs = 600
+/** 复制键按下之后，这段时间内到达的远端剪贴板才写回本机。 */
+export const remoteCopyWindowMs = 3000
 
-export function acceptRemoteCopy(now: number, quietUntil: number): boolean {
-  return !(quietUntil > now)
+export function acceptRemoteCopy(now: number, copyChordUntil: number): boolean {
+  return copyChordUntil > now
 }
 
 /**

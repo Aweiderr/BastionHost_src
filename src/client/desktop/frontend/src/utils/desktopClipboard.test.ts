@@ -12,7 +12,7 @@ import {
   canExportSessionClip,
   canSendSessionClip,
   fitSessionClipboard,
-  forwardInstalledPaste,
+  textForKeyboardPaste,
   releasePasteChord,
   sessionPasteKeys,
   writeLocalClipboard,
@@ -321,8 +321,9 @@ test('合成的粘贴键始终是小写 v，空文本不发 V', () => {
     sessionPasteKeys().map((item) => item.code),
     ['ControlLeft', 'KeyV', 'KeyV', 'ControlLeft'],
   )
-  assert.equal(forwardInstalledPaste(false), false)
-  assert.equal(forwardInstalledPaste(true), true)
+  assert.equal(textForKeyboardPaste('local-text', 'panel-text'), 'local-text')
+  assert.equal(textForKeyboardPaste('', 'panel-text'), 'panel-text')
+  assert.equal(textForKeyboardPaste('', ''), '')
 })
 
 test('discardPending 会放弃还在重试的旧文本', async () => {

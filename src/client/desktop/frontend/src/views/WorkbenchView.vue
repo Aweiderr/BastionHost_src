@@ -57,11 +57,13 @@ import {
   canSendSessionClip,
   clipboardFlags,
   createLocalClipboardWriter,
+  COPY_DENIED_MESSAGE,
   createPasteChord,
   fitSessionClipboard,
-  forwardInstalledPaste,
   isPasteChord,
   isRemoteCopyChord,
+  PASTE_DENIED_MESSAGE,
+  textForKeyboardPaste,
   releasePasteChord,
   remoteCopyWindowMs,
   sessionPasteKeys,
@@ -105,7 +107,7 @@ interface SessionTab {
   clipOpen: boolean
   clipText: string
   clipOrigin: SessionClipOrigin
-  panelPasteInstalled: boolean
+  lastPanelPaste: string
 }
 
 interface TermRuntime {
@@ -426,7 +428,7 @@ async function connect(acc?: Account) {
     clipOpen: false,
     clipText: '',
     clipOrigin: '',
-    panelPasteInstalled: false,
+    lastPanelPaste: '',
   }
   tabs.value.push(tab)
   activate(key)
@@ -708,7 +710,6 @@ async function importDeskClip(key: string) {
     tab.clipText = fitSessionClipboard(text)
     tab.clipOrigin = 'local'
     tab.clipOpen = true
-    tab.panelPasteInstalled = false
   } catch {
     notify('读取本机剪贴板失败，请直接贴进会话剪贴板', 'err')
   }
@@ -726,10 +727,10 @@ async function sendDeskClip(key: string) {
     notify('无法把剪贴板送到远端', 'err')
     return
   }
+  tab.lastPanelPaste = text
   for (const stroke of sessionPasteKeys()) await sendDeskStroke(key, stroke)
-  tab.panelPasteInstalled = true
   canvases.get(key)?.focus()
-  notify('已送到远端。在画面里按 Ctrl+V 会粘贴这段文字，不会改用本机剪贴板。', 'ok')
+  notify('已送到远端', 'ok')
 }
 
 async function exportDeskClip(key: string) {
@@ -776,19 +777,20 @@ async function pasteDesktop(key: string) {
     for (const stroke of chord.cancel()) sendDeskStroke(key, stroke)
     return
   }
+  const chosen = textForKeyboardPaste(failed ? '' : text, tab.lastPanelPaste)
   let sent = false
   try {
-    if (failed) notify('读取本机剪贴板失败', 'err')
-    else if (!text) notify('本机剪贴板是空的', 'info')
+    if (!chosen) notify('没有可粘贴的文本。请先在本机复制，或在会话剪贴板填写后点「送到远端」。', 'info')
     else {
-      sent = await enqueueDeskOk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
+      sent = await enqueueDeskOk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text: chosen }))
+      if (sent) tab.lastPanelPaste = chosen
     }
   } catch (e: any) {
     notify(String(e?.message || e), 'err')
   }
   if (!chord.active) return
   // 没写上远端剪贴板就不补 V，否则远端会粘贴它自己的内容再推回本机。
-  const strokes = releasePasteChord(chord, sent ? text : '')
+  const strokes = releasePasteChord(chord, sent ? chosen : '')
   for (const stroke of strokes) await sendDeskStroke(key, stroke)
 }
 
@@ -796,9 +798,11 @@ function deskKey(key: string, event: KeyboardEvent, down: boolean) {
   const tab = tabs.value.find((t) => t.key === key)
   if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || tab.credOpen) return
   event.preventDefault()
-  if (forwardInstalledPaste(tab.panelPasteInstalled) && isPasteChord(event)) {
-    sendDeskKey(key, event, down)
-    return
+  if (down && !event.repeat && isPasteChord(event) && !tab.canPaste) {
+    notify(PASTE_DENIED_MESSAGE, 'info')
+  }
+  if (down && !event.repeat && isRemoteCopyChord(event) && !tab.canCopy) {
+    notify(COPY_DENIED_MESSAGE, 'info')
   }
   const action = chordFor(key).onKey(down, event, tab.canPaste)
   if (action === 'suppress') return
@@ -1128,7 +1132,7 @@ function connectLabel(protocol: string) {
                 <span>复制{{ t.canCopy ? '允许' : '禁止' }} · 粘贴{{ t.canPaste ? '允许' : '禁止' }}</span>
               </div>
               <p class="desk-clip-hint">
-                在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里按 Ctrl+V 会粘贴刚送出的文字，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
+                在本机复制后，直接在画面里按 Ctrl+V 即可粘贴，不必先打开这里。在远端按 Ctrl+C 会把文字带到本机。没有复制或粘贴权限时会提示。这里用来查看、修改，或手动输入。只选中文件名不会进来。
               </p>
               <textarea
                 class="desk-clip-box"

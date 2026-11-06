@@ -11,7 +11,7 @@ import {
   canExportSessionClip,
   canSendSessionClip,
   fitSessionClipboard,
-  forwardInstalledPaste,
+  textForKeyboardPaste,
   releasePasteChord,
   sessionPasteKeys,
   textFromClipboardData,
@@ -248,8 +248,9 @@ test('会话剪贴板按 UTF-8 截断，送到远端的按键先按 Ctrl 再按 
     sessionPasteKeys().map((item) => `${item.down ? 'down' : 'up'}:${item.code}`),
     ['down:ControlLeft', 'down:KeyV', 'up:KeyV', 'up:ControlLeft'],
   )
-  assert.equal(forwardInstalledPaste(false), false)
-  assert.equal(forwardInstalledPaste(true), true)
+  assert.equal(textForKeyboardPaste('local-text', 'panel-text'), 'local-text')
+  assert.equal(textForKeyboardPaste('', 'panel-text'), 'panel-text')
+  assert.equal(textForKeyboardPaste('', ''), '')
 })
 
 test('Ctrl+A、Delete、Backspace 会照常发给远端，不当作粘贴', () => {

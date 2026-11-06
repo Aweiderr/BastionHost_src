@@ -189,13 +189,18 @@ export function canImportLocalClip(canPaste: boolean, connected: boolean): boole
   return connected && canPaste
 }
 
+export const PASTE_DENIED_MESSAGE = '当前授权不允许把本机内容粘贴到远端'
+export const COPY_DENIED_MESSAGE = '当前授权不允许从远端复制到本机'
+
 /**
- * 面板「送到远端」成功之后，Ctrl/Cmd+V 只把按键交给远端，粘贴刚装上的远端剪贴板。
- * 这时不能再读本机剪贴板，否则会把本机最新内容盖掉刚送出的文本。
- * 用户点「从本机读入」之后，快捷键才恢复成“本机剪贴板 → 远端”。
+ * Ctrl/Cmd+V 要写进远端的文本。
+ * 本机剪贴板有内容就用它，日常复制粘贴不经过面板。
+ * 本机读不到时，用最近一次「送到远端」的文字，避免远端剪贴板是空的、粘贴出空白。
  */
-export function forwardInstalledPaste(panelInstalled: boolean): boolean {
-  return panelInstalled
+export function textForKeyboardPaste(localText: string, lastSent: string): string {
+  const local = fitSessionClipboard(localText)
+  if (local.length > 0) return local
+  return fitSessionClipboard(lastSent)
 }
 
 /** 面板「送到远端」之后补的按键。先按下 Ctrl，再按 V，避免只打出一个 v。 */

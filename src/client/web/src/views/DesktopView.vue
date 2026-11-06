@@ -5,8 +5,8 @@
  * 像素和键鼠都走代理的 /api/v1/webdesktop，目标口令不下发到浏览器。
  * 连接和窗口变化时把视口发给代理，由 VNC SetDesktopSize 改远端分辨率。
  * 剪贴板按授权双向同步：can_copy 是远端到本机，can_paste 是本机到远端。
- * Ctrl/Cmd+V 默认先把本机文本放进远端剪贴板，再在修饰键仍按住时发出 V。
- * 面板「送到远端」成功之后，Ctrl/Cmd+V 只转发按键，粘贴刚送出的那段文字。
+ * Ctrl/Cmd+V 把本机剪贴板写进远端再发出 V。允许粘贴时不必打开剪贴板面板。
+ * 本机剪贴板读不到时，用最近一次「送到远端」的文字，避免粘贴出空白。
  * 局域网 HTTP 读不到 navigator.clipboard，改用 paste 事件里的 clipboardData。
  * 磁盘映射仍不做。
  */
@@ -21,10 +21,12 @@ import { copyToClipboard } from '@/utils/clipboard'
 import {
   acceptRemoteCopy,
   clipboardFlags,
+  COPY_DENIED_MESSAGE,
   createPasteChord,
-  forwardInstalledPaste,
   isPasteChord,
   isRemoteCopyChord,
+  PASTE_DENIED_MESSAGE,
+  textForKeyboardPaste,
   canExportSessionClip,
   canImportLocalClip,
   canSendSessionClip,
@@ -71,8 +73,8 @@ const canPaste = ref(false)
 const clipOpen = ref(false)
 const clipText = ref('')
 const clipOrigin = ref<SessionClipOrigin>('')
-/** 面板已把文本装进远端。此后 Ctrl/Cmd+V 不再读本机剪贴板。 */
-let panelPasteInstalled = false
+/** 最近一次成功写进远端的文字。本机剪贴板为空时，Ctrl+V 用它，避免粘贴空白。 */
+let lastPanelPaste = ''
 
 const pasteChord = createPasteChord()
 let pasteGeneration = 0
@@ -173,7 +175,7 @@ function connect(): void {
   canPaste.value = false
   clipText.value = ''
   clipOrigin.value = ''
-  panelPasteInstalled = false
+  lastPanelPaste = ''
   status.value = 'connecting'
   statusText.value = '连接中…'
   const size = viewportSize()
@@ -407,7 +409,6 @@ async function importLocalClip(): Promise<void> {
     clipText.value = fitSessionClipboard(text)
     clipOrigin.value = 'local'
     clipOpen.value = true
-    panelPasteInstalled = false
   } catch {
     app.info('读不到本机剪贴板。请把文本直接贴进会话剪贴板，再点「送到远端」。')
   }
@@ -419,10 +420,10 @@ function sendClipToRemote(): void {
   clipText.value = text
   remoteCopyUntil = 0
   if (!send({ type: 'clipboard', direction: 'paste', text })) return
+  lastPanelPaste = text
   for (const stroke of sessionPasteKeys()) sendStroke(stroke)
-  panelPasteInstalled = true
   canvasEl.value?.focus()
-  app.info('已送到远端。在画面里按 Ctrl+V 会粘贴这段文字，不会改用本机剪贴板。')
+  app.info('已送到远端')
 }
 
 async function exportClipLocal(): Promise<void> {
@@ -481,14 +482,15 @@ async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<
   } catch {
     text = ''
   }
+  text = textForKeyboardPaste(text, lastPanelPaste)
   // 读完之前修饰键的抬起被扣着。这里同步把剪贴板和按键发出去，避免中间再插入一次 keyup。
   if (gen !== pasteGeneration || !pasteChord.active) return
   if (text) {
-    send({ type: 'clipboard', direction: 'paste', text })
+    if (send({ type: 'clipboard', direction: 'paste', text })) lastPanelPaste = text
   } else {
-    app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
+    app.info('没有可粘贴的文本。请先在本机复制，或在会话剪贴板里填写后点「送到远端」。')
   }
-  // 没有文本就不发 V。否则远端会粘贴它自己的剪贴板，再把那段文本推回本机。
+  // 没有文本就不发 V，避免在空的远端剪贴板上粘贴出空白。
   for (const stroke of releasePasteChord(pasteChord, text)) sendStroke(stroke)
   canvasEl.value?.focus()
 }
@@ -496,10 +498,11 @@ async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<
 function key(event: KeyboardEvent, down: boolean): void {
   if (status.value !== 'connected') return
   if (credentialVisible.value) return
-  if (forwardInstalledPaste(panelPasteInstalled) && isPasteChord(event)) {
-    event.preventDefault()
-    sendKey(event, down)
-    return
+  if (down && !event.repeat && isPasteChord(event) && !canPaste.value) {
+    app.info(PASTE_DENIED_MESSAGE)
+  }
+  if (down && !event.repeat && isRemoteCopyChord(event) && !canCopy.value) {
+    app.info(COPY_DENIED_MESSAGE)
   }
   const action = pasteChord.onKey(down, event, canPaste.value)
   if (action === 'suppress') {
@@ -673,7 +676,7 @@ onBeforeUnmount(() => {
             <span class="text-secondary">复制{{ canCopy ? '允许' : '禁止' }} · 粘贴{{ canPaste ? '允许' : '禁止' }}</span>
           </div>
           <p class="clip-hint">
-            在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里按 Ctrl+V 会粘贴刚送出的文字，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
+            在本机复制后，直接在画面里按 Ctrl+V 即可粘贴，不必先打开这里。在远端按 Ctrl+C 会把文字带到本机。没有复制或粘贴权限时会提示，不会静默失败。这里用来查看、修改，或在浏览器读不到剪贴板时手动输入。只选中文件名不会进来。
           </p>
           <textarea
             class="clip-box"

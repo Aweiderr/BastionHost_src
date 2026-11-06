@@ -328,10 +328,10 @@ func (a *App) stopSessionWatch() {
 
 // watchSession 定期用当前令牌访问 /auth/me。
 //
-// 被另一端踢下线不会推送到桌面，只能等下一次请求。这里每 15 秒问一次，
+// 被另一端踢下线不会推送到桌面，只能等下一次请求。这里每 3 秒问一次，
 // 收到 401 后 coreapi 会回调 onSessionEnded，界面回到登录页并提示原因。
 func (a *App) watchSession(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {

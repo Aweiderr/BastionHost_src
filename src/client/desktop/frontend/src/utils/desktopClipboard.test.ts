@@ -13,6 +13,7 @@ import {
   canSendSessionClip,
   fitSessionClipboard,
   forwardInstalledPaste,
+  replayPanelPaste,
   releasePasteChord,
   sessionPasteKeys,
   writeLocalClipboard,
@@ -323,6 +324,10 @@ test('合成的粘贴键始终是小写 v，空文本不发 V', () => {
   )
   assert.equal(forwardInstalledPaste(false), false)
   assert.equal(forwardInstalledPaste(true), true)
+  assert.equal(replayPanelPaste(true, true, false), true)
+  assert.equal(replayPanelPaste(true, true, true), false)
+  assert.equal(replayPanelPaste(true, false, false), false)
+  assert.equal(replayPanelPaste(false, true, false), false)
 })
 
 test('discardPending 会放弃还在重试的旧文本', async () => {

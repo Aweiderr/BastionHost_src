@@ -24,6 +24,7 @@ import {
   createPasteChord,
   forwardInstalledPaste,
   isPasteChord,
+  replayPanelPaste,
   isRemoteCopyChord,
   canExportSessionClip,
   canImportLocalClip,
@@ -71,8 +72,9 @@ const canPaste = ref(false)
 const clipOpen = ref(false)
 const clipText = ref('')
 const clipOrigin = ref<SessionClipOrigin>('')
-/** 面板已把文本装进远端。此后 Ctrl/Cmd+V 不再读本机剪贴板。 */
+/** 面板已把文本装进远端。此后 Ctrl/Cmd+V 不再读本机剪贴板，而是重放这段文字。 */
 let panelPasteInstalled = false
+let lastPanelPaste = ''
 
 const pasteChord = createPasteChord()
 let pasteGeneration = 0
@@ -174,6 +176,7 @@ function connect(): void {
   clipText.value = ''
   clipOrigin.value = ''
   panelPasteInstalled = false
+  lastPanelPaste = ''
   status.value = 'connecting'
   statusText.value = '连接中…'
   const size = viewportSize()
@@ -408,6 +411,7 @@ async function importLocalClip(): Promise<void> {
     clipOrigin.value = 'local'
     clipOpen.value = true
     panelPasteInstalled = false
+    lastPanelPaste = ''
   } catch {
     app.info('读不到本机剪贴板。请把文本直接贴进会话剪贴板，再点「送到远端」。')
   }
@@ -420,9 +424,10 @@ function sendClipToRemote(): void {
   remoteCopyUntil = 0
   if (!send({ type: 'clipboard', direction: 'paste', text })) return
   for (const stroke of sessionPasteKeys()) sendStroke(stroke)
+  lastPanelPaste = text
   panelPasteInstalled = true
   canvasEl.value?.focus()
-  app.info('已送到远端。在画面里按 Ctrl+V 会粘贴这段文字，不会改用本机剪贴板。')
+  app.info('已送到远端。若没出现在输入框里，再按 Ctrl+V，会粘贴这段文字，不会改用本机剪贴板。')
 }
 
 async function exportClipLocal(): Promise<void> {
@@ -498,6 +503,9 @@ function key(event: KeyboardEvent, down: boolean): void {
   if (credentialVisible.value) return
   if (forwardInstalledPaste(panelPasteInstalled) && isPasteChord(event)) {
     event.preventDefault()
+    if (replayPanelPaste(panelPasteInstalled, down, event.repeat) && lastPanelPaste) {
+      send({ type: 'clipboard', direction: 'paste', text: lastPanelPaste })
+    }
     sendKey(event, down)
     return
   }
@@ -673,7 +681,7 @@ onBeforeUnmount(() => {
             <span class="text-secondary">复制{{ canCopy ? '允许' : '禁止' }} · 粘贴{{ canPaste ? '允许' : '禁止' }}</span>
           </div>
           <p class="clip-hint">
-            在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里按 Ctrl+V 会粘贴刚送出的文字，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
+            在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里再按 Ctrl+V，会把刚送出的文字重新写入远端并粘贴，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
           </p>
           <textarea
             class="clip-box"

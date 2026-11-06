@@ -61,6 +61,7 @@ import {
   fitSessionClipboard,
   forwardInstalledPaste,
   isPasteChord,
+  replayPanelPaste,
   isRemoteCopyChord,
   releasePasteChord,
   remoteCopyWindowMs,
@@ -106,6 +107,7 @@ interface SessionTab {
   clipText: string
   clipOrigin: SessionClipOrigin
   panelPasteInstalled: boolean
+  lastPanelPaste: string
 }
 
 interface TermRuntime {
@@ -427,6 +429,7 @@ async function connect(acc?: Account) {
     clipText: '',
     clipOrigin: '',
     panelPasteInstalled: false,
+    lastPanelPaste: '',
   }
   tabs.value.push(tab)
   activate(key)
@@ -709,6 +712,7 @@ async function importDeskClip(key: string) {
     tab.clipOrigin = 'local'
     tab.clipOpen = true
     tab.panelPasteInstalled = false
+    tab.lastPanelPaste = ''
   } catch {
     notify('读取本机剪贴板失败，请直接贴进会话剪贴板', 'err')
   }
@@ -727,9 +731,10 @@ async function sendDeskClip(key: string) {
     return
   }
   for (const stroke of sessionPasteKeys()) await sendDeskStroke(key, stroke)
+  tab.lastPanelPaste = text
   tab.panelPasteInstalled = true
   canvases.get(key)?.focus()
-  notify('已送到远端。在画面里按 Ctrl+V 会粘贴这段文字，不会改用本机剪贴板。', 'ok')
+  notify('已送到远端。若没出现在输入框里，再按 Ctrl+V，会粘贴这段文字，不会改用本机剪贴板。', 'ok')
 }
 
 async function exportDeskClip(key: string) {
@@ -797,6 +802,9 @@ function deskKey(key: string, event: KeyboardEvent, down: boolean) {
   if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected' || tab.credOpen) return
   event.preventDefault()
   if (forwardInstalledPaste(tab.panelPasteInstalled) && isPasteChord(event)) {
+    if (replayPanelPaste(tab.panelPasteInstalled, down, event.repeat) && tab.lastPanelPaste) {
+      enqueueDesk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text: tab.lastPanelPaste }))
+    }
     sendDeskKey(key, event, down)
     return
   }
@@ -1128,7 +1136,7 @@ function connectLabel(protocol: string) {
                 <span>复制{{ t.canCopy ? '允许' : '禁止' }} · 粘贴{{ t.canPaste ? '允许' : '禁止' }}</span>
               </div>
               <p class="desk-clip-hint">
-                在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里按 Ctrl+V 会粘贴刚送出的文字，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
+                在远端按 Ctrl+C 后，文本会出现在这里。只选中文件名不会进来。「送到远端」之后，在画面里再按 Ctrl+V，会把刚送出的文字重新写入远端并粘贴，不会改用本机剪贴板。要改粘贴本机上的新内容，先点「从本机读入」。
               </p>
               <textarea
                 class="desk-clip-box"

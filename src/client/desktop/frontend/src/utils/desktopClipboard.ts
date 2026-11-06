@@ -198,6 +198,15 @@ export function forwardInstalledPaste(panelInstalled: boolean): boolean {
   return panelInstalled
 }
 
+/**
+ * 「送到远端」之后的第一次 Ctrl/Cmd+V 按下，要把刚送出的文本再写入远端剪贴板，然后再把 V 交给远端。
+ * 只转发按键时，远端剪贴板可能仍是空的，粘贴出来就是空白。
+ * 连发和抬起不再写一遍。
+ */
+export function replayPanelPaste(panelInstalled: boolean, down: boolean, repeat: boolean): boolean {
+  return panelInstalled && down && !repeat
+}
+
 /** 面板「送到远端」之后补的按键。先按下 Ctrl，再按 V，避免只打出一个 v。 */
 export function sessionPasteKeys(): OutgoingKey[] {
   return [

@@ -161,6 +161,44 @@ export function acceptRemoteCopy(now: number, copyChordUntil: number): boolean {
   return copyChordUntil > now
 }
 
+/** 与代理 clipboardMaxBytes 相同。面板和发送都按这个上限截断，不拆开汉字。 */
+export const sessionClipboardMaxBytes = 256 * 1024
+
+export type SessionClipOrigin = '' | 'local' | 'remote'
+
+/** 按 UTF-8 字节截断，落在多字节字符中间时丢掉这个字符。 */
+export function fitSessionClipboard(text: string, maxBytes = sessionClipboardMaxBytes): string {
+  const cleaned = text.replaceAll('\0', '')
+  const bytes = new TextEncoder().encode(cleaned)
+  if (bytes.length <= maxBytes) return cleaned
+  let end = maxBytes
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1
+  return new TextDecoder().decode(bytes.subarray(0, end))
+}
+
+export function canSendSessionClip(canPaste: boolean, connected: boolean, text: string): boolean {
+  return connected && canPaste && fitSessionClipboard(text).length > 0
+}
+
+/** 面板里的文本要 can_copy 才能写回本机。远端选区不会进入面板。 */
+export function canExportSessionClip(canCopy: boolean, text: string): boolean {
+  return canCopy && fitSessionClipboard(text).length > 0
+}
+
+export function canImportLocalClip(canPaste: boolean, connected: boolean): boolean {
+  return connected && canPaste
+}
+
+/** 面板「送到远端」之后补的按键。先按下 Ctrl，再按 V，避免只打出一个 v。 */
+export function sessionPasteKeys(): OutgoingKey[] {
+  return [
+    { down: true, key: 'Control', code: 'ControlLeft' },
+    { down: true, key: 'v', code: 'KeyV' },
+    { down: false, key: 'v', code: 'KeyV' },
+    { down: false, key: 'Control', code: 'ControlLeft' },
+  ]
+}
+
 /** 第一次失败后再试的间隔。两次，都短，避免把粘贴拖成可感知的等待。 */
 export const clipboardOpenRetryDelaysMs = [50, 100] as const
 

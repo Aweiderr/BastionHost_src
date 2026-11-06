@@ -9,7 +9,11 @@ import {
   createPasteChord,
   isPasteChord,
   isRemoteCopyChord,
+  canExportSessionClip,
+  canSendSessionClip,
+  fitSessionClipboard,
   releasePasteChord,
+  sessionPasteKeys,
   writeLocalClipboard,
   type ChordEvent,
 } from './desktopClipboard.ts'
@@ -307,6 +311,15 @@ test('合成的粘贴键始终是小写 v，空文本不发 V', () => {
   assert.equal(isRemoteCopyChord({ ...vDown, key: 'a', code: 'KeyA' }), false)
   assert.equal(acceptRemoteCopy(10, 20), true)
   assert.equal(acceptRemoteCopy(20, 20), false)
+  assert.equal(fitSessionClipboard('中文'), '中文')
+  assert.equal(fitSessionClipboard('a中', 2), 'a')
+  assert.equal(canSendSessionClip(true, true, '文件'), true)
+  assert.equal(canSendSessionClip(false, true, '文件'), false)
+  assert.equal(canExportSessionClip(false, '文件'), false)
+  assert.deepEqual(
+    sessionPasteKeys().map((item) => item.code),
+    ['ControlLeft', 'KeyV', 'KeyV', 'ControlLeft'],
+  )
 })
 
 test('discardPending 会放弃还在重试的旧文本', async () => {

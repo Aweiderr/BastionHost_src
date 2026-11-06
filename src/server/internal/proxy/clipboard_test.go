@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 func TestClipboardDirection(t *testing.T) {
@@ -83,6 +84,35 @@ func TestClipboardLimitAndNUL(t *testing.T) {
 	}
 	if len(out) != clipboardMaxBytes {
 		t.Fatalf("len %d", len(out))
+	}
+}
+
+func TestSanitizeDoesNotSplitRune(t *testing.T) {
+	raw := strings.Repeat("a", clipboardMaxBytes-1) + "中"
+	out := sanitizeClipboard(raw)
+	if !utf8.ValidString(out) {
+		t.Fatal("truncated clipboard is not utf-8")
+	}
+	if strings.Contains(out, "中") {
+		t.Fatal("partial rune was kept")
+	}
+	if len(out) != clipboardMaxBytes-1 {
+		t.Fatalf("len %d", len(out))
+	}
+}
+
+func TestClientCutTextUTF8Chinese(t *testing.T) {
+	msg := encodeClientCutText("中文")
+	if msg[0] != 6 {
+		t.Fatalf("type %d", msg[0])
+	}
+	// 汉字不能被收成 Latin-1。正文就是 UTF-8。
+	if !bytes.Contains(msg, []byte("中文")) {
+		t.Fatalf("payload %q", msg)
+	}
+	text, err := readRFBCutText(bytes.NewReader(msg[1:]))
+	if err != nil || text != "中文" {
+		t.Fatalf("text %q err %v", text, err)
 	}
 }
 

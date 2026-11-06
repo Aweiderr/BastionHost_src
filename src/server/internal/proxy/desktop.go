@@ -456,6 +456,20 @@ func (s *Server) dialDesktop(ctx context.Context, c *websocket.Conn, ws *wsWrite
 	return nil, fmt.Errorf("口令验证失败次数过多（%d 次），会话已终止；该尝试已计入审计", attempts)
 }
 
+func waitPasteSettle(ctx context.Context) bool {
+	if pasteSettle <= 0 {
+		return true
+	}
+	timer := time.NewTimer(pasteSettle)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer screenConn, touch func(), clips *clipGate) {
 	var generation atomic.Uint64
 	var timer *time.Timer
@@ -500,11 +514,23 @@ func (s *Server) readDesktopInput(ctx context.Context, c *websocket.Conn, peer s
 				}
 				continue
 			}
-			if err := peer.SetClipboard(text); err != nil && clips != nil && clips.write != nil {
-				clips.write(map[string]any{
-					"type": "clipboard-denied", "direction": "paste",
-					"message": "无法写入远端剪贴板：" + err.Error(),
-				})
+			if clips != nil {
+				clips.armPaste()
+			}
+			if err := peer.SetClipboard(text); err != nil {
+				if clips != nil {
+					clips.disarmPaste()
+					if clips.write != nil {
+						clips.write(map[string]any{
+							"type": "clipboard-denied", "direction": "paste",
+							"message": "无法写入远端剪贴板：" + err.Error(),
+						})
+					}
+				}
+				continue
+			}
+			if !waitPasteSettle(ctx) {
+				return
 			}
 		case "resize":
 			w, h := clampDesktopSize(msg.Width, msg.Height)

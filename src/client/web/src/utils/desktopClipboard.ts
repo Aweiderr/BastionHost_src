@@ -75,6 +75,8 @@ function isPasteKey(event: { key: string; code: string }): boolean {
  * 远端会在 V 到达之前松开 Ctrl/Cmd。V 的 keyup 同样先扣下：
  * 用户可能先松开 Ctrl，此时 V 的 keyup 上 ctrlKey 已经是 false，不能再靠快捷键组合来认。
  * finish 的顺序是 V 按下、必要时 V 抬起、然后才是被扣下的修饰键抬起。
+ * 发出去的永远是小写 v / KeyV。事件的 key 可能是控制字符，或和 code 不一致；
+ * 若照着 event.key 发，VNC 会收到 Ctrl+C，远端把界面里的文本复制回本机。
  */
 export function createPasteChord(): {
   readonly active: boolean
@@ -83,7 +85,6 @@ export function createPasteChord(): {
   cancel(): OutgoingKey[]
 } {
   let active = false
-  let pasteKey = { key: 'v', code: 'KeyV' }
   let pasteUp = false
   let modifiers: OutgoingKey[] = []
 
@@ -121,15 +122,14 @@ export function createPasteChord(): {
         active = true
         pasteUp = false
         modifiers = []
-        pasteKey = { key: event.key || 'v', code: event.code || 'KeyV' }
         return 'begin'
       }
       return 'forward'
     },
     finish() {
       if (!active) return []
-      const out: OutgoingKey[] = [{ down: true, key: pasteKey.key, code: pasteKey.code }]
-      if (pasteUp) out.push({ down: false, key: pasteKey.key, code: pasteKey.code })
+      const out: OutgoingKey[] = [{ down: true, key: 'v', code: 'KeyV' }]
+      if (pasteUp) out.push({ down: false, key: 'v', code: 'KeyV' })
       out.push(...modifiers)
       reset()
       return out
@@ -141,6 +141,25 @@ export function createPasteChord(): {
       return out
     },
   }
+}
+
+/** 读到本机文本才补 V。没有文本就只松开修饰键，避免远端去粘贴它自己的剪贴板。 */
+export function releasePasteChord(
+  chord: { finish(): OutgoingKey[]; cancel(): OutgoingKey[] },
+  text: string,
+): OutgoingKey[] {
+  if (text.length > 0) return chord.finish()
+  return chord.cancel()
+}
+
+/**
+ * 本机粘贴发出之后的一小段时间里，远端剪贴板回声不能写回本机。
+ * quietUntil 为 0 表示不拦截。和代理的 pasteEchoQuiet 是同一段窗口。
+ */
+export const pasteEchoQuietMs = 600
+
+export function acceptRemoteCopy(now: number, quietUntil: number): boolean {
+  return !(quietUntil > now)
 }
 
 /**

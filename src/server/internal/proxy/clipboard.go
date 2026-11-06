@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -17,6 +18,16 @@ import (
 // 默认都是 false。服务端强制执行，浏览器只是展示 ready 里带回的开关。
 const clipboardMaxBytes = 256 * 1024
 
+// pasteEchoQuiet 内不把远端剪贴板写回本机。
+// 本机 Ctrl+V 会先写 ClientCutText / cliprdr，再补一次真正的 Ctrl+V。
+// TigerVNC、RDP 经常在这时把远端当前剪贴板（界面里已经有的文本，或主选区）推回来。
+// 若照单写回本机，用户刚复制的内容就被盖掉，看起来像 Ctrl+V 在复制 VNC 里的文本。
+const pasteEchoQuiet = 600 * time.Millisecond
+
+// pasteSettle 让远端先装好本机文本，再收到粘贴键。
+// 键若紧跟着剪贴板消息，远端会粘贴它原来的内容。
+const pasteSettle = 100 * time.Millisecond
+
 // clipboardSource 是能把远端剪贴板变化交回来的画面连接。
 type clipboardSource interface {
 	setOnClipboard(func(string))
@@ -26,9 +37,46 @@ type clipGate struct {
 	canCopy  bool
 	canPaste bool
 	write    func(map[string]any)
+	now      func() time.Time
 
-	mu           sync.Mutex
-	toldCopyDeny bool
+	mu             sync.Mutex
+	toldCopyDeny   bool
+	pasteEchoUntil time.Time
+}
+
+func (g *clipGate) clock() time.Time {
+	if g != nil && g.now != nil {
+		return g.now()
+	}
+	return time.Now()
+}
+
+// armPaste 从写入远端剪贴板之前开始计时，回声往往就发生在这次写入里面。
+func (g *clipGate) armPaste() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.pasteEchoUntil = g.clock().Add(pasteEchoQuiet)
+	g.mu.Unlock()
+}
+
+func (g *clipGate) disarmPaste() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.pasteEchoUntil = time.Time{}
+	g.mu.Unlock()
+}
+
+func (g *clipGate) echoingPaste() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return !g.pasteEchoUntil.IsZero() && g.clock().Before(g.pasteEchoUntil)
 }
 
 func (g *clipGate) fromRemote(text string) {
@@ -37,6 +85,9 @@ func (g *clipGate) fromRemote(text string) {
 	}
 	text = sanitizeClipboard(text)
 	if text == "" {
+		return
+	}
+	if g.echoingPaste() {
 		return
 	}
 	if !g.canCopy {

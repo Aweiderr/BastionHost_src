@@ -50,10 +50,13 @@ import {
 } from '../../wailsjs/go/main/App'
 import { ClipboardGetText, ClipboardSetText, EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 import {
+  acceptRemoteCopy,
   browserClipboardWriter,
   clipboardFlags,
   createLocalClipboardWriter,
   createPasteChord,
+  pasteEchoQuietMs,
+  releasePasteChord,
   type OutgoingKey,
 } from '../utils/desktopClipboard'
 
@@ -89,6 +92,7 @@ interface SessionTab {
   credPassword: string
   canCopy: boolean
   canPaste: boolean
+  pasteQuietUntil: number
 }
 
 interface TermRuntime {
@@ -109,6 +113,7 @@ const canvases = new Map<string, HTMLCanvasElement>()
 const paintQueues = new Map<string, Promise<void>>()
 const runtimes = new Map<string, TermRuntime>()
 const pasteChords = new Map<string, ReturnType<typeof createPasteChord>>()
+const deskSendChain = new Map<string, Promise<void>>()
 
 const activeTab = computed(() => tabs.value.find((t) => t.key === activeKey.value) || null)
 
@@ -225,7 +230,7 @@ function scheduleDeskResize(key: string): void {
     if (!tab || tab.kind !== 'desktop' || tab.status !== 'connected') return
     const size = desktopViewport(key)
     if (size.width === tab.width && size.height === tab.height) return
-    WriteDesktopInput(key, JSON.stringify({ type: 'resize', width: size.width, height: size.height })).catch(() => {})
+    enqueueDesk(key, JSON.stringify({ type: 'resize', width: size.width, height: size.height }))
   }, 200)
 }
 
@@ -317,6 +322,7 @@ function handleDeskControl(key: string, raw: string) {
     return
   }
   if (payload.type === 'clipboard' && payload.direction === 'copy' && tab.canCopy && payload.text) {
+    if (!acceptRemoteCopy(Date.now(), tab.pasteQuietUntil)) return
     void writeClipboard(String(payload.text), localClipboardTarget()).then((result) => {
       if (result === 'failed') notify('写入本机剪贴板失败', 'err')
     })
@@ -398,6 +404,7 @@ async function connect(acc?: Account) {
     credPassword: '',
     canCopy: false,
     canPaste: false,
+    pasteQuietUntil: 0,
   }
   tabs.value.push(tab)
   activate(key)
@@ -556,6 +563,7 @@ function dropTab(key: string) {
     for (const stroke of chord.cancel()) sendDeskStroke(key, stroke)
     pasteChords.delete(key)
   }
+  deskSendChain.delete(key)
   canvases.delete(key)
   const idx = tabs.value.findIndex((t) => t.key === key)
   if (idx < 0) return
@@ -588,7 +596,7 @@ async function submitDeskPassword(key: string) {
   tab.credPassword = ''
   if (!value) return
   try {
-    await WriteDesktopInput(key, JSON.stringify({ type: 'credential', password: value }))
+    await enqueueDesk(key, JSON.stringify({ type: 'credential', password: value }))
   } catch (e: any) {
     notify(String(e?.message || e), 'err')
   }
@@ -601,10 +609,7 @@ function deskPointer(key: string, event: MouseEvent) {
   canvas.focus()
   const point = mapDesktopPoint(canvas.getBoundingClientRect(), tab.width, tab.height, event.clientX, event.clientY)
   if (!point) return
-  WriteDesktopInput(
-    key,
-    JSON.stringify({ type: 'pointer', x: point.x, y: point.y, buttons: rfbButtons(event.buttons) }),
-  ).catch(() => {})
+  enqueueDesk(key, JSON.stringify({ type: 'pointer', x: point.x, y: point.y, buttons: rfbButtons(event.buttons) }))
 }
 
 function deskWheel(key: string, event: WheelEvent) {
@@ -613,14 +618,45 @@ function deskWheel(key: string, event: WheelEvent) {
   if (!tab || tab.status !== 'connected' || !canvas) return
   const point = mapDesktopPoint(canvas.getBoundingClientRect(), tab.width, tab.height, event.clientX, event.clientY)
   if (!point) return
-  WriteDesktopInput(
-    key,
-    JSON.stringify({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 }),
-  ).catch(() => {})
+  enqueueDesk(key, JSON.stringify({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 }))
 }
 
-function sendDeskStroke(key: string, stroke: OutgoingKey) {
-  WriteDesktopInput(
+/** 同一条会话的控制消息按调用顺序写出去。Ctrl 的按下不能排到剪贴板和 V 的后面。 */
+function enqueueDesk(key: string, payload: string): Promise<void> {
+  const prev = deskSendChain.get(key) ?? Promise.resolve()
+  const next = prev
+    .catch(() => undefined)
+    .then(() => WriteDesktopInput(key, payload))
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+  deskSendChain.set(key, next)
+  return next
+}
+
+async function enqueueDeskOk(key: string, payload: string): Promise<boolean> {
+  const prev = deskSendChain.get(key) ?? Promise.resolve()
+  let ok = false
+  const done = prev.catch(() => undefined).then(async () => {
+    await WriteDesktopInput(key, payload)
+    ok = true
+  })
+  const settled = done.then(
+    () => undefined,
+    () => undefined,
+  )
+  deskSendChain.set(key, settled)
+  try {
+    await done
+  } catch {
+    return false
+  }
+  return ok
+}
+
+function sendDeskStroke(key: string, stroke: OutgoingKey): Promise<void> {
+  return enqueueDesk(
     key,
     JSON.stringify({
       type: 'key',
@@ -628,7 +664,7 @@ function sendDeskStroke(key: string, stroke: OutgoingKey) {
       keysym: keysymOf(stroke.key, stroke.code),
       code: stroke.code,
     }),
-  ).catch(() => {})
+  )
 }
 
 function sendDeskKey(key: string, event: KeyboardEvent, down: boolean) {
@@ -659,17 +695,21 @@ async function pasteDesktop(key: string) {
     for (const stroke of chord.cancel()) sendDeskStroke(key, stroke)
     return
   }
+  let sent = false
   try {
     if (failed) notify('读取本机剪贴板失败', 'err')
-    else if (text) await WriteDesktopInput(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
-    else notify('本机剪贴板是空的', 'info')
+    else if (!text) notify('本机剪贴板是空的', 'info')
+    else {
+      tab.pasteQuietUntil = Date.now() + pasteEchoQuietMs
+      sent = await enqueueDeskOk(key, JSON.stringify({ type: 'clipboard', direction: 'paste', text }))
+    }
   } catch (e: any) {
     notify(String(e?.message || e), 'err')
   }
   if (!chord.active) return
-  // 剪贴板调用返回之后同步把按键交出去，避免等待 IPC 时又插入一次 keyup。
-  const strokes = chord.finish()
-  for (const stroke of strokes) sendDeskStroke(key, stroke)
+  // 没写上远端剪贴板就不补 V，否则远端会粘贴它自己的内容再推回本机。
+  const strokes = releasePasteChord(chord, sent ? text : '')
+  for (const stroke of strokes) await sendDeskStroke(key, stroke)
 }
 
 function deskKey(key: string, event: KeyboardEvent, down: boolean) {
@@ -679,6 +719,8 @@ function deskKey(key: string, event: KeyboardEvent, down: boolean) {
   const action = chordFor(key).onKey(down, event, tab.canPaste)
   if (action === 'suppress') return
   if (action === 'begin') {
+    tab.pasteQuietUntil = Date.now() + pasteEchoQuietMs
+    writeClipboard.discardPending()
     void pasteDesktop(key)
     return
   }

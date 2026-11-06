@@ -86,7 +86,7 @@ async function checkFrontendVersion(): Promise<void> {
 }
 
 /**
- * 被另一端踢下线不会推送。停留在页面上时定期拉一次 /auth/me，
+ * 被另一端踢下线不会推送。停留在页面上时每 3 秒拉一次 /auth/me，
  * 401 由 http 层清会话并提示「已在其他端登录」。
  */
 async function checkSession(): Promise<void> {
@@ -106,7 +106,7 @@ onMounted(() => {
   const entry = readEntryFromDom()
   currentEntry = entry ? new URL(entry, window.location.origin).pathname : ''
   versionTimer = window.setInterval(() => void checkFrontendVersion(), 3 * 60 * 1000)
-  sessionTimer = window.setInterval(() => void checkSession(), 15 * 1000)
+  sessionTimer = window.setInterval(() => void checkSession(), 3 * 1000)
   document.addEventListener('visibilitychange', onVisible)
 })
 

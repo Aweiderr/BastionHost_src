@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
@@ -40,6 +41,37 @@ func TestClipboardDirection(t *testing.T) {
 	g.fromRemote("copied")
 	if len(notes) != 1 || notes[0]["text"] != "copied" || notes[0]["direction"] != "copy" {
 		t.Fatalf("copy %#v", notes)
+	}
+}
+
+func TestPasteEchoDoesNotReplaceLocalClipboard(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	var notes []map[string]any
+	g := &clipGate{
+		canCopy: true, canPaste: true,
+		now: func() time.Time { return now },
+		write: func(v map[string]any) {
+			notes = append(notes, v)
+		},
+	}
+	g.armPaste()
+	g.fromRemote("vnc-ui-text")
+	g.fromRemote("local-text")
+	if len(notes) != 0 {
+		t.Fatalf("echo during paste reached the client: %#v", notes)
+	}
+	g.disarmPaste()
+	g.fromRemote("after-disarm")
+	if len(notes) != 1 || notes[0]["text"] != "after-disarm" {
+		t.Fatalf("copy after disarm %#v", notes)
+	}
+
+	notes = nil
+	g.armPaste()
+	now = now.Add(pasteEchoQuiet + time.Millisecond)
+	g.fromRemote("real-copy")
+	if len(notes) != 1 || notes[0]["direction"] != "copy" || notes[0]["text"] != "real-copy" {
+		t.Fatalf("copy after the quiet window %#v", notes)
 	}
 }
 

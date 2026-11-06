@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  acceptRemoteCopy,
   clipboardFlags,
   createPasteChord,
   isCopyChord,
   isPasteChord,
   readPasteText,
+  releasePasteChord,
   textFromClipboardData,
   type ChordEvent,
 } from './desktopClipboard.ts'
@@ -188,4 +190,32 @@ test('clipboardData 先取 text/plain，失败再取 text', () => {
   )
   assert.equal(textFromClipboardData(null), '')
   assert.equal(textFromClipboardData({}), '')
+})
+
+test('合成的粘贴键始终是小写 v，不会因为 event.key 变成 C', () => {
+  const chord = createPasteChord()
+  chord.onKey(true, ctrlDown, true)
+  chord.onKey(true, { ...vDown, key: 'c', code: 'KeyV' }, true)
+  chord.onKey(false, ctrlUp, true)
+  const rest = chord.finish()
+  assert.deepEqual(rest[0], { down: true, key: 'v', code: 'KeyV' })
+  assert.equal(rest.some((item) => item.key === 'c' || item.code === 'KeyC'), false)
+  const vAt = rest.findIndex((item) => item.code === 'KeyV' && item.down)
+  const ctrlAt = rest.findIndex((item) => item.code === 'ControlLeft' && !item.down)
+  assert.ok(vAt >= 0 && vAt < ctrlAt)
+})
+
+test('没读到本机文本时不发 V，只松开扣下的 Ctrl', () => {
+  const chord = createPasteChord()
+  chord.onKey(true, ctrlDown, true)
+  chord.onKey(true, vDown, true)
+  chord.onKey(false, ctrlUp, true)
+  assert.deepEqual(releasePasteChord(chord, ''), [{ down: false, key: 'Control', code: 'ControlLeft' }])
+  assert.equal(chord.active, false)
+})
+
+test('粘贴窗口内不接收远端剪贴板，窗口结束后可以', () => {
+  assert.equal(acceptRemoteCopy(1_000, 0), true)
+  assert.equal(acceptRemoteCopy(1_000, 1_500), false)
+  assert.equal(acceptRemoteCopy(1_500, 1_500), true)
 })

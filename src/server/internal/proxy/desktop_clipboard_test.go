@@ -12,10 +12,11 @@ import (
 )
 
 type fakeScreen struct {
-	text     string
-	onClip   func(string)
-	pastes   []string
-	pushCopy string
+	text          string
+	onClip        func(string)
+	pastes        []string
+	pushCopy      string
+	bounceOnPaste string
 }
 
 func (f *fakeScreen) Close() error                   { return nil }
@@ -28,6 +29,9 @@ func (f *fakeScreen) setOnClipboard(fn func(string)) { f.onClip = fn }
 func (f *fakeScreen) SetClipboard(text string) error {
 	f.pastes = append(f.pastes, text)
 	f.text = text
+	if f.bounceOnPaste != "" && f.onClip != nil {
+		f.onClip(f.bounceOnPaste)
+	}
 	return nil
 }
 func (f *fakeScreen) Pump(ctx context.Context, emit func(deskRect) error) error {
@@ -144,6 +148,79 @@ func TestWebDesktopClipboardDirections(t *testing.T) {
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 	_ = fake.waitDone(t)
+}
+
+func TestPasteDoesNotCopyVNCTextToLocal(t *testing.T) {
+	screen := &fakeScreen{bounceOnPaste: "vnc-ui-text"}
+	fake := &fakeOracle{
+		cred: &managerclient.Credential{
+			AssetID: 9, AssetName: "desk", Host: "10.0.0.8", Port: 5900,
+			Protocol: "vnc", AccountName: "admin", CredentialMode: "managed",
+		},
+		grant: &managerclient.GrantCheck{
+			Allowed: true, GrantID: 3, GrantSource: "grant",
+			CanCopy: true, CanPaste: true,
+		},
+		done: make(chan struct{}),
+	}
+	_, srv := startDesktopServerDial(t, fake, func(context.Context, *managerclient.Credential, int, int) (screenConn, error) {
+		return screen, nil
+	})
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL(srv.URL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	auth, _ := json.Marshal(map[string]any{
+		"type": "auth", "token": "good-token", "asset_id": 9, "account_id": 3,
+		"protocol": "vnc", "width": 800, "height": 600,
+	})
+	if err := conn.Write(ctx, websocket.MessageText, auth); err != nil {
+		t.Fatal(err)
+	}
+	ready := readDeskTextUntil(t, ctx, conn, "ready")
+	if ready["can_copy"] != true || ready["can_paste"] != true {
+		t.Fatalf("flags %#v", ready)
+	}
+
+	body, _ := json.Marshal(map[string]any{"type": "clipboard", "direction": "paste", "text": "local-text"})
+	if err := conn.Write(ctx, websocket.MessageText, body); err != nil {
+		t.Fatal(err)
+	}
+	wait := time.After(2 * time.Second)
+	for len(screen.pastes) == 0 {
+		select {
+		case <-wait:
+			t.Fatal("paste was not applied")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if screen.pastes[0] != "local-text" {
+		t.Fatalf("pastes %#v", screen.pastes)
+	}
+
+	rctx, rcancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer rcancel()
+	for {
+		kind, data, err := conn.Read(rctx)
+		if err != nil {
+			break
+		}
+		if kind != websocket.MessageText {
+			continue
+		}
+		if stringsContains(data, "vnc-ui-text") {
+			t.Fatalf("paste echoed VNC text onto the client: %s", data)
+		}
+		var msg map[string]any
+		if json.Unmarshal(data, &msg) == nil && msg["type"] == "clipboard" {
+			t.Fatalf("paste delivered a remote copy: %#v", msg)
+		}
+	}
 }
 
 func readDeskTextUntil(t *testing.T, ctx context.Context, conn *websocket.Conn, typ string) map[string]any {

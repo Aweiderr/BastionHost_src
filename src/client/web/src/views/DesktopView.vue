@@ -17,7 +17,16 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebdesktopUrl, dictLabel, PROTOCOL_MAP } from '@/utils/constants'
 import { copyToClipboard } from '@/utils/clipboard'
-import { clipboardFlags, createPasteChord, readPasteText, textFromClipboardData, type OutgoingKey } from '@/utils/desktopClipboard'
+import {
+  acceptRemoteCopy,
+  clipboardFlags,
+  createPasteChord,
+  pasteEchoQuietMs,
+  readPasteText,
+  releasePasteChord,
+  textFromClipboardData,
+  type OutgoingKey,
+} from '@/utils/desktopClipboard'
 import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { keysymOf } from '@/utils/keysym'
@@ -52,7 +61,12 @@ const canPaste = ref(false)
 
 const pasteChord = createPasteChord()
 let pasteGeneration = 0
+let pasteQuietUntil = 0
 let pasteCapture: { finish: (text: string | null) => void } | null = null
+
+function holdRemoteCopy(): void {
+  pasteQuietUntil = Date.now() + pasteEchoQuietMs
+}
 
 let ws: WebSocket | null = null
 let ctx2d: CanvasRenderingContext2D | null = null
@@ -255,6 +269,7 @@ function handleControl(raw: string): void {
       break
     case 'clipboard':
       if (payload.direction === 'copy' && canCopy.value && payload.text) {
+        if (!acceptRemoteCopy(Date.now(), pasteQuietUntil)) break
         void copyToClipboard(payload.text).then((ok) => {
           if (!ok) app.info('浏览器拒绝写入剪贴板。请使用 HTTPS、localhost，或改用桌面客户端。')
         })
@@ -378,6 +393,7 @@ function armPasteWait(): Promise<string | null> {
 
 function endPasteGesture(): void {
   pasteGeneration += 1
+  pasteQuietUntil = 0
   pasteCapture?.finish('')
   for (const stroke of pasteChord.cancel()) sendStroke(stroke)
 }
@@ -393,9 +409,14 @@ async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<
   }
   // 读完之前修饰键的抬起被扣着。这里同步把剪贴板和按键发出去，避免中间再插入一次 keyup。
   if (gen !== pasteGeneration || !pasteChord.active) return
-  if (text) send({ type: 'clipboard', direction: 'paste', text })
-  else app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
-  for (const stroke of pasteChord.finish()) sendStroke(stroke)
+  if (text) {
+    holdRemoteCopy()
+    send({ type: 'clipboard', direction: 'paste', text })
+  } else {
+    app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
+  }
+  // 没有文本就不发 V。否则远端会粘贴它自己的剪贴板，再把那段文本推回本机。
+  for (const stroke of releasePasteChord(pasteChord, text)) sendStroke(stroke)
   canvasEl.value?.focus()
 }
 
@@ -409,6 +430,8 @@ function key(event: KeyboardEvent, down: boolean): void {
   }
   if (action === 'begin') {
     // 不能 preventDefault，否则浏览器不会派发 paste，HTTP 页面就拿不到 clipboardData。
+    // 同时按住远端回声：这次 Ctrl+V 会让 VNC 把界面里的剪贴板推回来。
+    holdRemoteCopy()
     const gen = pasteGeneration
     const pasted = armPasteWait()
     void pasteLocal(gen, pasted)

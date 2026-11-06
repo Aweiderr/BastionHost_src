@@ -4,9 +4,11 @@ import {
   browserClipboardWriter,
   clipboardFlags,
   clipboardOpenRetryDelaysMs,
+  acceptRemoteCopy,
   createLocalClipboardWriter,
   createPasteChord,
   isPasteChord,
+  releasePasteChord,
   writeLocalClipboard,
   type ChordEvent,
 } from './desktopClipboard.ts'
@@ -288,4 +290,50 @@ test('重试等待期间来了新文本，醒来后不再写旧文本', async ()
   assert.equal(await oldPromise, 'replaced')
   assert.equal(await newPromise, 'written')
   assert.deepEqual(seen, ['old', 'new'])
+})
+
+test('合成的粘贴键始终是小写 v，空文本不发 V', () => {
+  const mismatched = createPasteChord()
+  mismatched.onKey(true, { ...vDown, key: '\u0003', code: 'KeyV' }, true)
+  assert.deepEqual(mismatched.finish(), [{ down: true, key: 'v', code: 'KeyV' }])
+
+  const empty = createPasteChord()
+  empty.onKey(true, ctrlDown, true)
+  empty.onKey(true, vDown, true)
+  empty.onKey(false, ctrlUp, true)
+  assert.deepEqual(releasePasteChord(empty, ''), [{ down: false, key: 'Control', code: 'ControlLeft' }])
+  assert.equal(acceptRemoteCopy(10, 20), false)
+  assert.equal(acceptRemoteCopy(20, 20), true)
+})
+
+test('discardPending 会放弃还在重试的旧文本', async () => {
+  const writer = createLocalClipboardWriter()
+  let releaseSleep: () => void = () => {}
+  const sleepGate = new Promise<void>((resolve) => {
+    releaseSleep = resolve
+  })
+  let started: () => void = () => {}
+  const startedGate = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  let writes = 0
+  const pending = writer(
+    'stale-vnc-text',
+    {
+      setText: async () => {
+        writes += 1
+        started()
+        return false
+      },
+    },
+    {
+      retryDelaysMs: [50],
+      sleep: () => sleepGate,
+    },
+  )
+  await startedGate
+  writer.discardPending()
+  releaseSleep()
+  assert.equal(await pending, 'replaced')
+  assert.equal(writes, 1)
 })

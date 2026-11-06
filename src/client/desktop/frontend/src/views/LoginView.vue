@@ -40,9 +40,19 @@ const captchaBusy = ref(false)
 let captchaForURL = ''
 
 onMounted(() => {
+  // state.coreURL 来自 GetCoreURL。Go 启动时已按
+  // BASTION_CORE_URL、本机记住的地址、http://127.0.0.1:8080 的顺序选好。
   coreInput.value = state.coreURL || 'http://127.0.0.1:8080'
   probe()
 })
+
+/** 把输入框交给 Go。SetCoreURL 会更新后续请求的基址，并在需要时记住这个地址。 */
+async function useCoreURL() {
+  const url = await SetCoreURL(coreInput.value)
+  coreInput.value = url
+  state.coreURL = url
+  return url
+}
 
 function resetCaptcha() {
   captchaId.value = ''
@@ -101,9 +111,7 @@ async function probe() {
   probing.value = true
   probeResult.value = null
   try {
-    const url = await SetCoreURL(coreInput.value)
-    coreInput.value = url
-    state.coreURL = url
+    await useCoreURL()
     const res: any = await Ping()
     if (res && res.ok) {
       probeResult.value = { ok: true, text: '管理服务可达' }
@@ -159,7 +167,7 @@ async function submit() {
   busy.value = true
   clearLoginError()
   try {
-    await SetCoreURL(coreInput.value)
+    await useCoreURL()
     const p: any = await Login(
       username.value,
       password.value,

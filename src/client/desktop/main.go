@@ -34,14 +34,15 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 
-	// 管理服务地址：默认本机，可用环境变量指向实际部署地址
-	coreURL := os.Getenv("BASTION_CORE_URL")
-	if coreURL == "" {
-		coreURL = "http://127.0.0.1:8080"
-	}
-
+	// 管理服务地址：环境变量优先于本机记住的地址，都没有时用环回默认值。
+	// 不在这里写死机房 IP。用户在登录页检测或改地址后再写入本机配置。
+	coreURL, source := startupCoreURL(os.Getenv("BASTION_CORE_URL"))
 	app := NewApp(coreURL)
-	slog.Info("堡垒机桌面客户端启动", "version", Version, "core", coreURL)
+	app.persistCoreURL = true
+	if source == "env" {
+		app.envCoreURL = coreURL
+	}
+	slog.Info("堡垒机桌面客户端启动", "version", Version, "core", coreURL, "core_source", source)
 
 	err := wails.Run(&options.App{
 		Title:     "堡垒机运维客户端",

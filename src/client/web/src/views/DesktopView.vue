@@ -5,6 +5,8 @@
  * 像素和键鼠都走代理的 /api/v1/webdesktop，目标口令不下发到浏览器。
  * 连接和窗口变化时把视口发给代理，由 VNC SetDesktopSize 改远端分辨率。
  * 剪贴板按授权双向同步：can_copy 是远端到本机，can_paste 是本机到远端。
+ * Ctrl/Cmd+V 先把本机文本放进远端剪贴板，再在修饰键仍按住时发出 V。
+ * 局域网 HTTP 读不到 navigator.clipboard，改用 paste 事件里的 clipboardData。
  * 磁盘映射仍不做。
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
@@ -15,7 +17,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { buildWebdesktopUrl, dictLabel, PROTOCOL_MAP } from '@/utils/constants'
 import { copyToClipboard } from '@/utils/clipboard'
-import { clipboardFlags, isPasteChord } from '@/utils/desktopClipboard'
+import { clipboardFlags, createPasteChord, readPasteText, textFromClipboardData, type OutgoingKey } from '@/utils/desktopClipboard'
 import { BitmapProtocolError, fitDesktopSize, mapDesktopPoint, paintBitmap, parseBitmap, rfbButtons } from '@/utils/desktopFrame'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { keysymOf } from '@/utils/keysym'
@@ -48,8 +50,9 @@ const credentialSubmitting = ref(false)
 const canCopy = ref(false)
 const canPaste = ref(false)
 
-let pasteHold = false
-let pasteUpQueued = false
+const pasteChord = createPasteChord()
+let pasteGeneration = 0
+let pasteCapture: { finish: (text: string | null) => void } | null = null
 
 let ws: WebSocket | null = null
 let ctx2d: CanvasRenderingContext2D | null = null
@@ -129,6 +132,7 @@ function connect(): void {
     app.error('登录状态已失效，请重新登录')
     return
   }
+  endPasteGesture()
   closeSocket()
   paintChain = Promise.resolve()
   protocolErrorShown = false
@@ -137,8 +141,6 @@ function connect(): void {
   credentialVisible.value = false
   canCopy.value = false
   canPaste.value = false
-  pasteHold = false
-  pasteUpQueued = false
   status.value = 'connecting'
   statusText.value = '连接中…'
   const size = viewportSize()
@@ -205,6 +207,7 @@ function connect(): void {
   socket.onclose = () => {
     if (ws !== socket) return
     ws = null
+    endPasteGesture()
     credentialVisible.value = false
     if (status.value !== 'error') {
       status.value = 'closed'
@@ -310,6 +313,7 @@ function submitCredential(password: string): void {
 }
 
 function disconnect(): void {
+  endPasteGesture()
   credentialVisible.value = false
   closeSocket()
   status.value = 'closed'
@@ -332,46 +336,85 @@ function wheel(event: WheelEvent): void {
   send({ type: 'wheel', x: point.x, y: point.y, delta: event.deltaY > 0 ? 1 : -1 })
 }
 
-function sendKey(event: KeyboardEvent, down: boolean): void {
-  send({ type: 'key', down, keysym: keysymOf(event.key, event.code), code: event.code })
+function sendStroke(stroke: OutgoingKey): void {
+  send({ type: 'key', down: stroke.down, keysym: keysymOf(stroke.key, stroke.code), code: stroke.code })
 }
 
-async function pasteLocal(event: KeyboardEvent): Promise<void> {
+function sendKey(event: KeyboardEvent, down: boolean): void {
+  sendStroke({ down, key: event.key, code: event.code })
+}
+
+function readBrowserClipboard(): Promise<string> {
+  const clipboard = navigator.clipboard
+  if (!clipboard || typeof clipboard.readText !== 'function') {
+    return Promise.reject(new Error('no clipboard'))
+  }
+  return clipboard.readText()
+}
+
+/** 按下 Ctrl/Cmd+V 后，浏览器才会派发 paste。要在 keydown 返回前把监听挂上。 */
+function armPasteWait(): Promise<string | null> {
+  pasteCapture?.finish('')
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = 0
+    function finish(text: string | null) {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      window.removeEventListener('paste', onWindowPaste, true)
+      if (pasteCapture?.finish === finish) pasteCapture = null
+      resolve(text)
+    }
+    function onWindowPaste(event: ClipboardEvent) {
+      event.preventDefault()
+      finish(textFromClipboardData(event.clipboardData))
+    }
+    timer = window.setTimeout(() => finish(null), 100)
+    window.addEventListener('paste', onWindowPaste, true)
+    pasteCapture = { finish }
+  })
+}
+
+function endPasteGesture(): void {
+  pasteGeneration += 1
+  pasteCapture?.finish('')
+  for (const stroke of pasteChord.cancel()) sendStroke(stroke)
+}
+
+async function pasteLocal(gen: number, pasted: Promise<string | null>): Promise<void> {
   let text = ''
   try {
-    text = await navigator.clipboard.readText()
+    const fromEvent = await pasted
+    if (gen !== pasteGeneration) return
+    text = await readPasteText({ pasteEventText: fromEvent, readText: readBrowserClipboard })
   } catch {
     text = ''
   }
+  // 读完之前修饰键的抬起被扣着。这里同步把剪贴板和按键发出去，避免中间再插入一次 keyup。
+  if (gen !== pasteGeneration || !pasteChord.active) return
   if (text) send({ type: 'clipboard', direction: 'paste', text })
   else app.info('读不到本机剪贴板。请允许剪贴板权限，或使用桌面客户端。')
-  sendKey(event, true)
-  if (pasteUpQueued) {
-    pasteUpQueued = false
-    sendKey(event, false)
-  }
-  pasteHold = false
+  for (const stroke of pasteChord.finish()) sendStroke(stroke)
+  canvasEl.value?.focus()
 }
 
 function key(event: KeyboardEvent, down: boolean): void {
   if (status.value !== 'connected') return
   if (credentialVisible.value) return
-  event.preventDefault()
-  if (isPasteChord(event)) {
-    if (!canPaste.value) {
-      sendKey(event, down)
-      return
-    }
-    if (!down) {
-      if (pasteHold) pasteUpQueued = true
-      else sendKey(event, false)
-      return
-    }
-    pasteHold = true
-    pasteUpQueued = false
-    void pasteLocal(event)
+  const action = pasteChord.onKey(down, event, canPaste.value)
+  if (action === 'suppress') {
+    event.preventDefault()
     return
   }
+  if (action === 'begin') {
+    // 不能 preventDefault，否则浏览器不会派发 paste，HTTP 页面就拿不到 clipboardData。
+    const gen = pasteGeneration
+    const pasted = armPasteWait()
+    void pasteLocal(gen, pasted)
+    return
+  }
+  event.preventDefault()
   sendKey(event, down)
 }
 
@@ -435,6 +478,7 @@ watch(stageEl, (el) => {
 onBeforeUnmount(() => {
   if (resizeTimer) window.clearTimeout(resizeTimer)
   stageObserver?.disconnect()
+  endPasteGesture()
   closeSocket()
 })
 </script>

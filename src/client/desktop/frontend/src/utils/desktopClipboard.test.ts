@@ -5,8 +5,10 @@ import {
   clipboardFlags,
   clipboardOpenRetryDelaysMs,
   createLocalClipboardWriter,
+  createPasteChord,
   isPasteChord,
   writeLocalClipboard,
+  type ChordEvent,
 } from './desktopClipboard.ts'
 
 test('桌面客户端只在 Ctrl/Cmd+V 时读取本机剪贴板', () => {
@@ -15,6 +17,64 @@ test('桌面客户端只在 Ctrl/Cmd+V 时读取本机剪贴板', () => {
   assert.equal(isPasteChord({ ...base, ctrlKey: false, metaKey: true }), true)
   assert.equal(isPasteChord({ ...base, altKey: true }), false)
   assert.deepEqual(clipboardFlags({ can_copy: true }), { canCopy: true, canPaste: false })
+})
+
+const ctrlDown: ChordEvent = { key: 'Control', code: 'ControlLeft', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false }
+const vDown: ChordEvent = { key: 'v', code: 'KeyV', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false }
+const vUpBare: ChordEvent = { key: 'v', code: 'KeyV', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false }
+const ctrlUp: ChordEvent = { key: 'Control', code: 'ControlLeft', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false }
+
+test('ClipboardGetText 返回前不能先把 Ctrl 抬起发给远端', () => {
+  const chord = createPasteChord()
+  const forwarded: string[] = []
+  const feed = (down: boolean, event: ChordEvent) => {
+    const action = chord.onKey(down, event, true)
+    if (action === 'forward') forwarded.push(`${down ? 'down' : 'up'}:${event.code}`)
+    return action
+  }
+  assert.equal(feed(true, ctrlDown), 'forward')
+  assert.equal(feed(true, vDown), 'begin')
+  assert.equal(feed(false, ctrlUp), 'suppress')
+  assert.equal(feed(false, vUpBare), 'suppress')
+  assert.deepEqual(forwarded, ['down:ControlLeft'])
+  const rest = chord.finish()
+  assert.deepEqual(rest, [
+    { down: true, key: 'v', code: 'KeyV' },
+    { down: false, key: 'v', code: 'KeyV' },
+    { down: false, key: 'Control', code: 'ControlLeft' },
+  ])
+  const vAt = rest.findIndex((item) => item.code === 'KeyV' && item.down)
+  const ctrlAt = rest.findIndex((item) => item.code === 'ControlLeft' && !item.down)
+  assert.ok(vAt >= 0 && vAt < ctrlAt)
+})
+
+test('键还按着就结束时只补 V，取消时不补没发出的 V', () => {
+  const held = createPasteChord()
+  held.onKey(true, ctrlDown, true)
+  held.onKey(true, vDown, true)
+  assert.deepEqual(held.finish(), [{ down: true, key: 'v', code: 'KeyV' }])
+  assert.equal(held.onKey(false, ctrlUp, true), 'forward')
+
+  const cancelled = createPasteChord()
+  cancelled.onKey(true, ctrlDown, true)
+  cancelled.onKey(true, vDown, true)
+  cancelled.onKey(false, ctrlUp, true)
+  assert.deepEqual(cancelled.cancel(), [{ down: false, key: 'Control', code: 'ControlLeft' }])
+  assert.deepEqual(cancelled.finish(), [])
+})
+
+test('不允许粘贴或连发时不会重开一次手势', () => {
+  const chord = createPasteChord()
+  assert.equal(chord.onKey(true, vDown, false), 'forward')
+  assert.equal(chord.active, false)
+  chord.onKey(true, vDown, true)
+  assert.equal(chord.onKey(true, { ...vDown, repeat: true }, true), 'suppress')
+  chord.onKey(false, vUpBare, true)
+  assert.equal(chord.onKey(true, vDown, true), 'suppress')
+  assert.deepEqual(chord.finish(), [
+    { down: true, key: 'v', code: 'KeyV' },
+    { down: false, key: 'v', code: 'KeyV' },
+  ])
 })
 
 const noWait = async () => {}

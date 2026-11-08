@@ -2,6 +2,7 @@ package sdf
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 )
 
@@ -28,5 +29,26 @@ func TestAlgProfile(t *testing.T) {
 	}
 	if _, err := parseAlgs("nope"); err == nil {
 		t.Fatal("未知剖面应失败")
+	}
+}
+
+func TestSM2KeyGenAlgOrder(t *testing.T) {
+	g, err := parseAlgs("gmt0006")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := g.sm2KeyGenAlgs()
+	want := []uint32{0x00020100, 0x00020200, 0x00020800}
+	if !slices.Equal(got, want) {
+		t.Fatalf("gmt0006 密钥生成标识 = %v，期望 %v", got, want)
+	}
+	legacy, err := parseAlgs("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = legacy.sm2KeyGenAlgs()
+	want = []uint32{0x00020000, 0x00020100, 0x00020400}
+	if !slices.Equal(got, want) {
+		t.Fatalf("legacy 密钥生成标识 = %v，期望 %v", got, want)
 	}
 }

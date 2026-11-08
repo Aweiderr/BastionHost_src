@@ -1,6 +1,7 @@
 package sdf
 
 import (
+	"errors"
 	"fmt"
 
 	"bastion.local/shared/crypto"
@@ -8,23 +9,24 @@ import (
 
 // GM/T 0018 返回码。数值是公开标准，不是厂商私有头文件的副本。
 const (
-	sdrOK            uint32 = 0x00000000
-	sdrBase          uint32 = 0x01000000
-	sdrUnknown              = sdrBase + 0x01
-	sdrNotSupport           = sdrBase + 0x02
-	sdrCommFail             = sdrBase + 0x03
-	sdrHardFail             = sdrBase + 0x04
-	sdrOpenDevice           = sdrBase + 0x05
-	sdrOpenSession          = sdrBase + 0x06
-	sdrParDeny              = sdrBase + 0x07
-	sdrKeyNotExist          = sdrBase + 0x08
-	sdrAlgNotSupport        = sdrBase + 0x09
-	sdrVerifyErr            = sdrBase + 0x0E
-	sdrSymOpErr             = sdrBase + 0x0F
-	sdrKeyErr               = sdrBase + 0x15
-	sdrEncDataErr           = sdrBase + 0x16
-	sdrInArgErr             = sdrBase + 0x1D
-	sdrHandleInvalid        = sdrBase + 0x20
+	sdrOK               uint32 = 0x00000000
+	sdrBase             uint32 = 0x01000000
+	sdrUnknown                 = sdrBase + 0x01
+	sdrNotSupport              = sdrBase + 0x02
+	sdrCommFail                = sdrBase + 0x03
+	sdrHardFail                = sdrBase + 0x04
+	sdrOpenDevice              = sdrBase + 0x05
+	sdrOpenSession             = sdrBase + 0x06
+	sdrParDeny                 = sdrBase + 0x07
+	sdrKeyNotExist             = sdrBase + 0x08
+	sdrAlgNotSupport           = sdrBase + 0x09
+	sdrAlgModNotSupport        = sdrBase + 0x0A
+	sdrVerifyErr               = sdrBase + 0x0E
+	sdrSymOpErr                = sdrBase + 0x0F
+	sdrKeyErr                  = sdrBase + 0x15
+	sdrEncDataErr              = sdrBase + 0x16
+	sdrInArgErr                = sdrBase + 0x1D
+	sdrHandleInvalid           = sdrBase + 0x20
 )
 
 // errVerifyFailed 表示验签未通过（算法正常，签名不对）。
@@ -65,6 +67,21 @@ func callVerify(rc int32, op string) error {
 	return call(rc, op)
 }
 
+// eccAlgRejected 表示 SDF_GenerateKeyPair_ECC 拒绝了本次算法标识。
+// 通信失败、硬件错误、参数错误不在此列，调用方不应改试其他标识。
+func eccAlgRejected(err error) bool {
+	var ce *callError
+	if !errors.As(err, &ce) {
+		return false
+	}
+	switch ce.Code {
+	case sdrNotSupport, sdrAlgNotSupport, sdrAlgModNotSupport:
+		return true
+	default:
+		return false
+	}
+}
+
 func sdrText(code uint32) string {
 	switch code {
 	case sdrOK:
@@ -87,6 +104,8 @@ func sdrText(code uint32) string {
 		return "密钥不存在"
 	case sdrAlgNotSupport:
 		return "不支持的算法"
+	case sdrAlgModNotSupport:
+		return "不支持的算法模式"
 	case sdrVerifyErr:
 		return "验签失败"
 	case sdrSymOpErr:

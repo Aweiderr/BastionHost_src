@@ -44,6 +44,25 @@ var algLegacy = algSet{
 	SMS4CTR: 0x00000420,
 }
 
+// sm2KeyGenAlgs 是 SDF_GenerateKeyPair_ECC 的尝试顺序。
+//
+// 先用剖面里的通用 SM2。CCIT CCP907（libsdf_crypto.so）拒绝
+// 0x00020100 / 0x00020000（返回 0x0100000A，算法模式不支持），
+// 但接受签名或加密专用标识，因此随后尝试 SM2Sign、SM2Enc。
+// 已经接受通用标识的设备只会被调用一次。
+func (a algSet) sm2KeyGenAlgs() []uint32 {
+	out := make([]uint32, 0, 3)
+	seen := make(map[uint32]struct{}, 3)
+	for _, alg := range []uint32{a.SM2, a.SM2Sign, a.SM2Enc} {
+		if _, ok := seen[alg]; ok {
+			continue
+		}
+		seen[alg] = struct{}{}
+		out = append(out, alg)
+	}
+	return out
+}
+
 func parseAlgs(profile string) (algSet, error) {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "", "gmt0006", "gmt":

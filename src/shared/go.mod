@@ -3,6 +3,7 @@ module bastion.local/shared
 go 1.27
 
 require (
+	github.com/ebitengine/purego v0.8.4
 	github.com/emmansun/gmsm v0.44.1
 	golang.org/x/image v0.46.0
 )

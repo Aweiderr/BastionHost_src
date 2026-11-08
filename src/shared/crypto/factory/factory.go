@@ -1,7 +1,7 @@
 // Package factory 是密码服务的工厂：按配置创建具体的 Provider 实现。
 //
 // 之所以单独成包（而非放在 crypto 包内），是为了避免循环依赖：
-// crypto 定义接口，crypto/soft 与 crypto/pkcs11 实现接口，工厂依赖三者。
+// crypto 定义接口，crypto/soft、crypto/sdf 与 crypto/pkcs11 实现接口，工厂依赖它们。
 //
 // 使用方式：
 //
@@ -11,8 +11,8 @@
 //	    KeyStoreDir: "./data/keys",
 //	})
 //
-// 后续接入密码卡或密码机时，只需把 Provider 改为 "pkcs11" 并配置库路径，
-// 上层业务代码无需改动。
+// 密码机把 Provider 改为 "sdf"，并配置 BASTION_SDF_LIB / PIN / 密钥索引。
+// 未安装厂商库时不要选 sdf；默认 soft 不加载动态库。
 package factory
 
 import (
@@ -20,14 +20,15 @@ import (
 
 	"bastion.local/shared/crypto"
 	"bastion.local/shared/crypto/pkcs11"
+	"bastion.local/shared/crypto/sdf"
 	"bastion.local/shared/crypto/soft"
 )
 
 // Config 是工厂配置。
 type Config struct {
-	// Provider 实现类型：soft（软件）/ pkcs11（密码卡、密码机）
+	// Provider 实现类型：soft（软件，默认）/ sdf（密码机 GM/T 0018）/ pkcs11（骨架）
 	Provider string
-	// Backend 软件后端：go / gmssl / openssl（仅 Provider=soft 时有效）
+	// Backend 软件后端：go / gmssl / openssl（Provider=soft，以及 sdf 下仍走软件的 RSA / 旧密钥）
 	Backend string
 
 	// ---- 软件实现参数 ----
@@ -35,10 +36,19 @@ type Config struct {
 	MasterKeyFile string
 
 	// ---- 密码硬件参数（Provider=pkcs11 时使用）----
-	Pkcs11LibPath string
-	Pkcs11Pin     string
-	Pkcs11Slot    int
+	Pkcs11LibPath    string
+	Pkcs11Pin        string
+	Pkcs11Slot       int
 	Pkcs11TokenLabel string
+
+	// ---- 密码机参数（Provider=sdf 时使用）----
+	SDFLibPath     string
+	SDFPIN         string
+	SDFSM2Index    int
+	SDFKEKIndex    int
+	SDFAllowKeyGen bool
+	SDFAlgProfile  string
+	SDFSM2Hash     string
 }
 
 // New 按配置创建 Provider。
@@ -59,8 +69,22 @@ func New(cfg Config) (crypto.Provider, error) {
 			TokenLabel: cfg.Pkcs11TokenLabel,
 		})
 
+	case crypto.ProviderSDF:
+		return sdf.New(sdf.Options{
+			LibPath:       cfg.SDFLibPath,
+			PIN:           cfg.SDFPIN,
+			SM2Index:      cfg.SDFSM2Index,
+			KEKIndex:      cfg.SDFKEKIndex,
+			AllowKeyGen:   cfg.SDFAllowKeyGen,
+			AlgProfile:    cfg.SDFAlgProfile,
+			SM2Hash:       cfg.SDFSM2Hash,
+			Backend:       cfg.Backend,
+			KeyStoreDir:   cfg.KeyStoreDir,
+			MasterKeyFile: cfg.MasterKeyFile,
+		})
+
 	default:
-		return nil, fmt.Errorf("%w: 未知的密码服务实现 %q（可选 soft / pkcs11）",
+		return nil, fmt.Errorf("%w: 未知的密码服务实现 %q（可选 soft / sdf / pkcs11）",
 			crypto.ErrInvalidParam, cfg.Provider)
 	}
 }

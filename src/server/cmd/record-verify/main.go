@@ -30,6 +30,11 @@ func main() {
 	keystore := flag.String("keystore", "./data/server-keys", "密钥库目录")
 	master := flag.String("master", "./data/server-master.key", "主密钥文件")
 	backend := flag.String("backend", "go", "软件实现后端")
+	providerName := flag.String("provider", "soft", "密码服务：soft（默认，历史录像）或 sdf")
+	sdfLib := flag.String("sdf-lib", "", "SDF 动态库路径（-provider sdf 时必填）")
+	sdfPIN := flag.String("sdf-pin", "", "SDF 私钥口令")
+	sdfSM2 := flag.Int("sdf-sm2-index", 1, "SDF SM2 密钥索引")
+	sdfKEK := flag.Int("sdf-kek-index", 1, "SDF KEK 索引")
 	show := flag.Int("show", 0, "打印前 N 个分片的明文预览")
 	flag.Parse()
 
@@ -44,8 +49,10 @@ func main() {
 	}
 
 	prov, err := factory.New(factory.Config{
-		Provider: "soft", Backend: *backend,
+		Provider: *providerName, Backend: *backend,
 		KeyStoreDir: *keystore, MasterKeyFile: *master,
+		SDFLibPath: *sdfLib, SDFPIN: *sdfPIN,
+		SDFSM2Index: *sdfSM2, SDFKEKIndex: *sdfKEK,
 	})
 	if err != nil {
 		fmt.Printf("密码服务初始化失败: %v\n", err)

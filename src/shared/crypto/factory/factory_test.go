@@ -80,6 +80,21 @@ func TestFactoryPKCS11Provider(t *testing.T) {
 	}
 }
 
+// TestFactorySDFRequiresLib 验证启用密码机时必须提供库路径，且缺少 .so 不会影响 soft。
+func TestFactorySDFRequiresLib(t *testing.T) {
+	dir := t.TempDir()
+	softProv, err := New(Config{Provider: "soft", Backend: "go", KeyStoreDir: dir})
+	if err != nil || softProv.Name() != crypto.ProviderSoft {
+		t.Fatalf("soft 默认路径应可用: %v", err)
+	}
+	if _, err := New(Config{Provider: "sdf", KeyStoreDir: dir}); err == nil {
+		t.Fatal("未配置 SDF 库路径时应返回错误")
+	}
+	if _, err := New(Config{Provider: "sdf", SDFLibPath: "/no/such/libsvc.so", KeyStoreDir: dir}); err == nil {
+		t.Fatal("打不开的 SDF 库应返回错误")
+	}
+}
+
 // TestFactoryUnknownProvider 验证未知实现被拒绝。
 func TestFactoryUnknownProvider(t *testing.T) {
 	_, err := New(Config{Provider: "hsm-vendor-x", KeyStoreDir: t.TempDir()})

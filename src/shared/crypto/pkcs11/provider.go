@@ -1,7 +1,8 @@
-// Package pkcs11 是密码卡 / 密码机的实现（通过 PKCS#11 接口）。
+// Package pkcs11 是 PKCS#11 密码卡的骨架。
 //
-// 当前为骨架：接口已按 crypto.Provider 完整定义，方法返回 ErrNotImplemented。
-// 接入真实密码硬件时，在此填充 PKCS#11 调用（推荐库：github.com/miekg/pkcs11）。
+// 当前项目的密码机走 GM/T 0018（见 crypto/sdf，provider=sdf）。
+// 这里仍返回 ErrNotImplemented，留给确实提供 PKCS#11 的卡。
+// 接入时再填充调用（推荐库：github.com/miekg/pkcs11）。
 //
 // 与软件实现的差异：
 //   - 密钥在硬件内生成，私钥永不出卡；

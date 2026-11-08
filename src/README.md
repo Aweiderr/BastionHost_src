@@ -883,8 +883,13 @@ sftp -P 2222 ops01@web-01#app@bastion-host
 | `BASTION_MANAGER_ADDR` | :8080 | 管理服务监听地址 |
 | `BASTION_SERVER_ADDR` | :8081 | 服务端监听地址 |
 | `BASTION_DB_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_NAME` | 127.0.0.1 / 5432 / bastion / bastion / bastion | PostgreSQL 连接 |
-| `BASTION_CRYPTO_PROVIDER` | soft | 密码服务实现：`soft`（软件）/ `pkcs11`（密码卡、密码机） |
-| `BASTION_CRYPTO_BACKEND` | go | 软件实现的后端：`gmssl` / `openssl` / `go` |
+| `BASTION_CRYPTO_PROVIDER` | soft | 密码服务实现：`soft`（软件，默认）/ `sdf`（密码机，GM/T 0018）/ `pkcs11`（骨架，未接入） |
+| `BASTION_CRYPTO_BACKEND` | go | 软件实现的后端：`gmssl` / `openssl` / `go`。`sdf` 下仍用于 RSA 与切换前的旧密钥 |
+| `BASTION_SDF_LIB` | （空） | 厂商 SDF 动态库路径，如 `/opt/hsm/libs/libsvc.so`。只在 `provider=sdf` 时加载，不入库 |
+| `BASTION_SDF_PIN` | （空） | 密码机私钥访问控制码。`KeySign` / `KeyDecrypt` 需要它 |
+| `BASTION_SDF_SM2_INDEX` | 1 | 设备内 SM2 密钥索引 |
+| `BASTION_SDF_KEK_INDEX` | 1 | 设备内 KEK 索引，用于包装 SM4 托管密钥 |
+| `BASTION_SDF_ALLOW_KEYGEN` | false | 为 true 时在索引上生成新 SM2 密钥对，会覆盖设备内原密钥 |
 | `BASTION_JWT_SECRET` | （调试模式自动填充） | 令牌签名密钥，生产必须显式配置 |
 | `BASTION_SSH_LISTEN` | :2222 | 服务端 SSH 网关监听地址（第三方客户端接入） |
 | `BASTION_ORACLE_ENABLE` | false | Oracle 网关开关。false 时不监听 |
@@ -896,6 +901,12 @@ sftp -P 2222 ops01@web-01#app@bastion-host
 | `BASTION_ALERT_WEBHOOK_URL` | （空） | 高危命令告警 Webhook。空则只落库 |
 | `BASTION_DOWNLOAD_DIR` | ./downloads | 桌面客户端目录。登录页下载 `bastion-desktop.exe`，URL 为 `/<前缀>/downloads/bastion-desktop.exe`。生产放置路径 `/opt/bastion/downloads/bastion-desktop.exe` |
 | `BASTION_WEB_PREFIX` | bastion | Web 控制台与客户端下载的 URL 前缀，须与前端 `vite` `base` 一致 |
+
+### 密码机（SDF）
+
+默认仍是软件模块，不加载任何厂商库。接入密码机时设置 `BASTION_CRYPTO_PROVIDER=sdf`，并给出 `BASTION_SDF_LIB`、PIN 和密钥索引。管理服务与代理服务都要配置。动态库放在部署机上（`libsvc.so` 或设备自带的 `libsdf_crypto.so`），**不要提交进仓库**。
+
+已有的软件密钥和旧密文继续由 soft 解密，不迁移。新生成的 SM2 私钥留在密码机索引里，新的 SM4 密钥只保存 KEK 包装结果。安装、自检和真机注意项见 `shared/crypto/sdf/README.md`。
 
 ### 高危命令告警通知
 
@@ -926,7 +937,7 @@ export BASTION_ORACLE_LISTEN=:1521
 | --- | --- | --- |
 | 0 | 环境准备（Go 1.27、PostgreSQL 16） | **已完成** |
 | 1 | 工程骨架（三项目 + 共享模块） | **已完成** |
-| 3 | 密码服务工厂（SM2 / SM3 / SM4） | **已完成**（22 个测试通过） |
+| 3 | 密码服务工厂（SM2 / SM3 / SM4） | **已完成**。默认 soft；2026-11-08 起可选 `sdf` 密码机（运行时加载厂商库，无 `.so` 时 soft 构建不受影响） |
 | 2 | 数据库表结构与迁移 | **已完成**（55 张业务表 + `migrate` 工具） |
 | 4 | 管理服务业务 API | **已完成**：初始化、认证、TOTP、权限模型、用户角色、资产管理（含口令加密）、**命令策略（当时 19 条内置规则，现 23 条；含判定测试、优先级与白名单）**、**工单闭环（申请→审批→自动授权→撤销、紧急放行）**（44 + 52 + 112 项端到端测试通过） |
 | 5 | 服务端 SSH 代理与审计 | **已完成**：SSH 网关（第三方客户端可直连）、命令截获与策略判定（放行 / 二次确认 / 阻断）、会话与命令留痕、录像（SM4 分片加密 + SM3 摘要链）、`record-verify` 篡改校验（22 项 SSH 端到端测试通过） |

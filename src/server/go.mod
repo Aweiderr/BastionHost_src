@@ -10,6 +10,7 @@ require (
 )
 
 require (
+	github.com/ebitengine/purego v0.8.4 // indirect
 	github.com/emmansun/gmsm v0.44.1 // indirect
 	github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358 // indirect
 	github.com/icodeface/tls v0.0.0-20190904083142-17aec93c60e5 // indirect

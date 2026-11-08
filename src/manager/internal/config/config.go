@@ -85,9 +85,9 @@ func (d DBConfig) DSN() string {
 
 // CryptoConfig 是密码服务配置（工厂模式：provider 选实现，backend 选软件后端）。
 type CryptoConfig struct {
-	// Provider: soft（软件实现）/ pkcs11（密码卡、密码机，后续接入）
+	// Provider: soft（软件实现，默认）/ sdf（密码机，GM/T 0018）/ pkcs11（骨架）
 	Provider string
-	// Backend: gmssl / openssl / go —— 仅 Provider=soft 时有意义
+	// Backend: gmssl / openssl / go —— Provider=soft 时选择软件后端；sdf 下仍用于 RSA 与旧密钥
 	Backend string
 	// GmsslPath / OpensslPath：外部命令路径
 	GmsslPath   string
@@ -96,9 +96,17 @@ type CryptoConfig struct {
 	Pkcs11LibPath string
 	Pkcs11Pin     string
 	Pkcs11Slot    int
-	// KeyStoreDir 是软件实现的密钥存储目录
+	// SDF 参数（Provider=sdf 时使用）。库文件放在部署机上，不入库。
+	SDFLibPath     string
+	SDFPIN         string
+	SDFSM2Index    int
+	SDFKEKIndex    int
+	SDFAllowKeyGen bool
+	SDFAlgProfile  string
+	SDFSM2Hash     string
+	// KeyStoreDir 是密钥元数据与软件密钥的存储目录
 	KeyStoreDir string
-	// MasterKeyFile 是软件实现的根密钥文件（用于加密保护密钥库）
+	// MasterKeyFile 是软件实现的根密钥文件（用于加密保护仍留在软件侧的密钥）
 	MasterKeyFile string
 }
 
@@ -174,15 +182,22 @@ func Load() (*Config, error) {
 			MigrationsDir: configx.Str("BASTION_MIGRATIONS_DIR", ""),
 		},
 		Crypto: CryptoConfig{
-			Provider:      configx.Str("BASTION_CRYPTO_PROVIDER", "soft"),
-			Backend:       configx.Str("BASTION_CRYPTO_BACKEND", "go"),
-			GmsslPath:     configx.Str("BASTION_GMSSL_PATH", "gmssl"),
-			OpensslPath:   configx.Str("BASTION_OPENSSL_PATH", "openssl"),
-			Pkcs11LibPath: configx.Str("BASTION_PKCS11_LIB", ""),
-			Pkcs11Pin:     configx.Str("BASTION_PKCS11_PIN", ""),
-			Pkcs11Slot:    configx.Int("BASTION_PKCS11_SLOT", 0),
-			KeyStoreDir:   configx.Str("BASTION_KEYSTORE_DIR", "./data/keys"),
-			MasterKeyFile: configx.Str("BASTION_MASTER_KEY_FILE", "./data/master.key"),
+			Provider:       configx.Str("BASTION_CRYPTO_PROVIDER", "soft"),
+			Backend:        configx.Str("BASTION_CRYPTO_BACKEND", "go"),
+			GmsslPath:      configx.Str("BASTION_GMSSL_PATH", "gmssl"),
+			OpensslPath:    configx.Str("BASTION_OPENSSL_PATH", "openssl"),
+			Pkcs11LibPath:  configx.Str("BASTION_PKCS11_LIB", ""),
+			Pkcs11Pin:      configx.Str("BASTION_PKCS11_PIN", ""),
+			Pkcs11Slot:     configx.Int("BASTION_PKCS11_SLOT", 0),
+			SDFLibPath:     configx.Str("BASTION_SDF_LIB", ""),
+			SDFPIN:         configx.Str("BASTION_SDF_PIN", ""),
+			SDFSM2Index:    configx.Int("BASTION_SDF_SM2_INDEX", 1),
+			SDFKEKIndex:    configx.Int("BASTION_SDF_KEK_INDEX", 1),
+			SDFAllowKeyGen: configx.Bool("BASTION_SDF_ALLOW_KEYGEN", false),
+			SDFAlgProfile:  configx.Str("BASTION_SDF_ALG_PROFILE", "gmt0006"),
+			SDFSM2Hash:     configx.Str("BASTION_SDF_SM2_HASH", "device"),
+			KeyStoreDir:    configx.Str("BASTION_KEYSTORE_DIR", "./data/keys"),
+			MasterKeyFile:  configx.Str("BASTION_MASTER_KEY_FILE", "./data/master.key"),
 		},
 		Auth: AuthConfig{
 			JWTSecret:       configx.Str("BASTION_JWT_SECRET", ""),
@@ -219,8 +234,10 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("BASTION_JWT_SECRET 未设置（生产环境必须显式配置）")
 		}
 	}
-	if cfg.Crypto.Provider != "soft" && cfg.Crypto.Provider != "pkcs11" {
-		return nil, fmt.Errorf("BASTION_CRYPTO_PROVIDER 取值非法：%s（可选 soft / pkcs11）", cfg.Crypto.Provider)
+	switch cfg.Crypto.Provider {
+	case "soft", "pkcs11", "sdf":
+	default:
+		return nil, fmt.Errorf("BASTION_CRYPTO_PROVIDER 取值非法：%s（可选 soft / sdf / pkcs11）", cfg.Crypto.Provider)
 	}
 	return cfg, nil
 }

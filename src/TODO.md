@@ -108,7 +108,7 @@
   （仍走原有的 `KeySign`，语义未变）。实施时需按 PKCS#11 机制映射，
   例如 `CKM_RSA_PKCS`（对已摘要值签名）与 `CKM_SHA256_RSA_PKCS`（对原文），
   注意两者入参语义不同，与 `KeySignPrehashed` / `KeySignWithHash` 一一对应。
-  与本清单"SDF Provider"那条一并考虑：设备提供 SDF 还是 PKCS#11 决定走哪条路。
+  当前密码机走 SDF（见本清单已完成的「密码机接入」）。本条只留给确实提供 PKCS#11 的卡。
 
 - [ ] **命令策略：直接改库后需重启才生效**
   `PolicyService` 的引擎缓存只在**通过 API 修改策略**时失效（`invalidateEngine`）。
@@ -123,23 +123,26 @@
   真正的兜底是会话录像 + 全量审计 + 网络准入。
   可增强方向：对进入交互式解释器的会话提升审计级别并告警。
 
-- [ ] **密码卡 / 密码机接入（SDF Provider）**  ← 用户指定：暂缓，本轮不做
-  背景：阶段 7 在目标服务器上发现其**本身就是一台密码机服务器**
-  （`/opt/hsm/bin/ccit_tcp_server 9099`、厂商库 `/opt/hsm/libs/libsdf_crypto.so`、
-  Tomcat 管理台 `/usr/local/ccit/server/cipher_machine_mgr`）。
-  该设备对外提供的是 **SDF（GM/T 0018）接口**，不是 PKCS#11。
+- [x] **密码卡 / 密码机接入（SDF Provider）** —— 2026-11-08
+  背景：目标设备对外是 **SDF（GM/T 0018）**，不是 PKCS#11
+  （现场可见 `/opt/hsm/bin/ccit_tcp_server`、`/opt/hsm/libs/libsdf_crypto.so`）。
 
-  实施要点：
-  - 在 `src/shared/crypto/` 下新增 `sdf` 包实现 `Provider` 接口，
-    通过 CGO 或厂商提供的 Go 封装调用 `libsdf_crypto.so`；
-  - 保留现有 `pkcs11` 骨架（部分密码卡确实走 PKCS#11）；
-  - 工厂 `factory.New` 增加 `provider=sdf` 分支与连接参数
-    （设备地址/端口、密钥索引、PIN）；
-  - `KeyGenerate/KeySign/KeyDecrypt/KeyEncrypt` 映射到 SDF 的
-    `SDF_GenerateKeyPair_ECC` / `SDF_InternalSign_ECC` / `SDF_InternalEncrypt_ECC` 等；
-  - 现有密钥元数据表 `km_key` 已按"密钥不出安全边界"设计，**无需数据迁移**：
-    切换 Provider 后旧密文仍由 `soft` 后端解密，新数据走硬件；
-  - 需要在真机上验证 SM2/SM3/SM4 与**二级密钥管理**（KEK/DEK）路径。
+  已实现：`src/shared/crypto/sdf`，工厂 `provider=sdf`。
+  运行时 `dlopen` 厂商库（`BASTION_SDF_LIB`），编译不链接 `.so`，仓库不收录厂商树。
+  默认仍是 soft；`CGO_ENABLED=0` 与缺少 `.so` 时 soft 构建和测试保持通过。
+  Random / SM3 / SM4 / SM2 外部运算，以及托管 `KeySign` / `KeyEncrypt` / `KeyDecrypt`
+  分别对应 `SDF_GenerateRandom`、`SDF_Hash*`、`SDF_Encrypt`、`SDF_External*_ECC`、
+  `SDF_Internal*_ECC` 和 `SDF_GenerateKeyWithKEK`。
+  SM2 私钥只留索引，SM4 只落 KEK 包装包。旧 soft 密钥 ID 仍由软件模块解密，无迁移。
+  RSA / HMAC 仍走 soft。PKCS#11 骨架保留。
+  部署与自检见 `src/shared/crypto/sdf/README.md`。
+
+- [ ] **密码机真机联调**
+  代码路径已接上，但本环境没有密码机，单元测试用的是 SDF 接口的软件模拟。
+  上机后确认：`BASTION_SDF_LIB` 能打开、`SelfTest` 全绿、
+  算法标识用 `gmt0006` 还是 `legacy`、`SDF_HashInit` 是否按默认用户标识做 ZA
+  （否则设 `BASTION_SDF_SM2_HASH=soft`）、索引上的签名密钥 / 加密密钥 / KEK 已灌好。
+  厂商库若还依赖同目录其他 `.so`，需要 `LD_LIBRARY_PATH`。
 
 - [x] **桌面客户端（Windows 版）** —— 已完成（Linux 与后续能力见下三条）
   技术栈已由 Tauri 改为 **Wails v2（Go + 系统 WebView）**，文档已同步。

@@ -51,15 +51,22 @@ func (d DBConfig) DSN() string {
 
 // CryptoConfig 是密码服务配置（与 manager 保持一致，工厂模式）。
 type CryptoConfig struct {
-	Provider      string
-	Backend       string
-	GmsslPath     string
-	OpensslPath   string
-	Pkcs11LibPath string
-	Pkcs11Pin     string
-	Pkcs11Slot    int
-	KeyStoreDir   string
-	MasterKeyFile string
+	Provider       string
+	Backend        string
+	GmsslPath      string
+	OpensslPath    string
+	Pkcs11LibPath  string
+	Pkcs11Pin      string
+	Pkcs11Slot     int
+	SDFLibPath     string
+	SDFPIN         string
+	SDFSM2Index    int
+	SDFKEKIndex    int
+	SDFAllowKeyGen bool
+	SDFAlgProfile  string
+	SDFSM2Hash     string
+	KeyStoreDir    string
+	MasterKeyFile  string
 }
 
 // ProxyConfig 是协议代理配置。
@@ -165,13 +172,20 @@ func Load() (*Config, error) {
 			MaxConns: configx.Int("BASTION_DB_MAX_CONNS", 20),
 		},
 		Crypto: CryptoConfig{
-			Provider:      configx.Str("BASTION_CRYPTO_PROVIDER", "soft"),
-			Backend:       configx.Str("BASTION_CRYPTO_BACKEND", "go"),
-			GmsslPath:     configx.Str("BASTION_GMSSL_PATH", "gmssl"),
-			OpensslPath:   configx.Str("BASTION_OPENSSL_PATH", "openssl"),
-			Pkcs11LibPath: configx.Str("BASTION_PKCS11_LIB", ""),
-			Pkcs11Pin:     configx.Str("BASTION_PKCS11_PIN", ""),
-			Pkcs11Slot:    configx.Int("BASTION_PKCS11_SLOT", 0),
+			Provider:       configx.Str("BASTION_CRYPTO_PROVIDER", "soft"),
+			Backend:        configx.Str("BASTION_CRYPTO_BACKEND", "go"),
+			GmsslPath:      configx.Str("BASTION_GMSSL_PATH", "gmssl"),
+			OpensslPath:    configx.Str("BASTION_OPENSSL_PATH", "openssl"),
+			Pkcs11LibPath:  configx.Str("BASTION_PKCS11_LIB", ""),
+			Pkcs11Pin:      configx.Str("BASTION_PKCS11_PIN", ""),
+			Pkcs11Slot:     configx.Int("BASTION_PKCS11_SLOT", 0),
+			SDFLibPath:     configx.Str("BASTION_SDF_LIB", ""),
+			SDFPIN:         configx.Str("BASTION_SDF_PIN", ""),
+			SDFSM2Index:    configx.Int("BASTION_SDF_SM2_INDEX", 1),
+			SDFKEKIndex:    configx.Int("BASTION_SDF_KEK_INDEX", 1),
+			SDFAllowKeyGen: configx.Bool("BASTION_SDF_ALLOW_KEYGEN", false),
+			SDFAlgProfile:  configx.Str("BASTION_SDF_ALG_PROFILE", "gmt0006"),
+			SDFSM2Hash:     configx.Str("BASTION_SDF_SM2_HASH", "device"),
 			// 服务端的密钥库与主机上的管理服务**分开存放**：
 			// 代理节点只持有录像加密密钥，不持有资产凭据密钥。
 			KeyStoreDir:   configx.Str("BASTION_KEYSTORE_DIR", "./data/server-keys"),
@@ -220,8 +234,10 @@ func Load() (*Config, error) {
 		},
 	}
 
-	if cfg.Crypto.Provider != "soft" && cfg.Crypto.Provider != "pkcs11" {
-		return nil, fmt.Errorf("BASTION_CRYPTO_PROVIDER 取值非法：%s（可选 soft / pkcs11）", cfg.Crypto.Provider)
+	switch cfg.Crypto.Provider {
+	case "soft", "pkcs11", "sdf":
+	default:
+		return nil, fmt.Errorf("BASTION_CRYPTO_PROVIDER 取值非法：%s（可选 soft / sdf / pkcs11）", cfg.Crypto.Provider)
 	}
 	return cfg, nil
 }

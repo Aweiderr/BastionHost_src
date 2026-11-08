@@ -139,13 +139,20 @@ func main() {
 
 	// ---------- 密码服务（工厂模式）----------
 	prov, err := factory.New(factory.Config{
-		Provider:      cfg.Crypto.Provider,
-		Backend:       cfg.Crypto.Backend,
-		KeyStoreDir:   cfg.Crypto.KeyStoreDir,
-		MasterKeyFile: cfg.Crypto.MasterKeyFile,
-		Pkcs11LibPath: cfg.Crypto.Pkcs11LibPath,
-		Pkcs11Pin:     cfg.Crypto.Pkcs11Pin,
-		Pkcs11Slot:    cfg.Crypto.Pkcs11Slot,
+		Provider:       cfg.Crypto.Provider,
+		Backend:        cfg.Crypto.Backend,
+		KeyStoreDir:    cfg.Crypto.KeyStoreDir,
+		MasterKeyFile:  cfg.Crypto.MasterKeyFile,
+		Pkcs11LibPath:  cfg.Crypto.Pkcs11LibPath,
+		Pkcs11Pin:      cfg.Crypto.Pkcs11Pin,
+		Pkcs11Slot:     cfg.Crypto.Pkcs11Slot,
+		SDFLibPath:     cfg.Crypto.SDFLibPath,
+		SDFPIN:         cfg.Crypto.SDFPIN,
+		SDFSM2Index:    cfg.Crypto.SDFSM2Index,
+		SDFKEKIndex:    cfg.Crypto.SDFKEKIndex,
+		SDFAllowKeyGen: cfg.Crypto.SDFAllowKeyGen,
+		SDFAlgProfile:  cfg.Crypto.SDFAlgProfile,
+		SDFSM2Hash:     cfg.Crypto.SDFSM2Hash,
 	})
 	if err != nil {
 		slog.Error("密码服务初始化失败", "err", err,
@@ -158,36 +165,36 @@ func main() {
 	// ---------- 数据库 ----------
 	pool := connectDB(ctx, cfg)
 	var (
-		userRepo     *repo.UserRepo
-		roleRepo     *repo.RoleRepo
-		configRepo   *repo.ConfigRepo
-		initRepo     *repo.InitRepo
-		keyRepo      *repo.KeyRepo
-		assetRepo    *repo.AssetRepo
-		accountRepo  *repo.AccountRepo
-		oplogRepo    *repo.OperationLogRepo
-		policyRepo   *repo.PolicyRepo
-		ticketRepo   *repo.TicketRepo
-		grantRepo    *repo.GrantRepo
-		certRepo     *repo.CertRepo
-		sessionRepo  *repo.SessionRepo
-		setupSvc     *service.SetupService
-		authSvc      *service.AuthService
-		assetSvc     *service.AssetService
-		userSvc      *service.UserService
-		policySvc    *service.PolicyService
-		ticketSvc    *service.TicketService
-		opsSvc       *service.OpsService
-		sessionSvc   *service.SessionService
+		userRepo      *repo.UserRepo
+		roleRepo      *repo.RoleRepo
+		configRepo    *repo.ConfigRepo
+		initRepo      *repo.InitRepo
+		keyRepo       *repo.KeyRepo
+		assetRepo     *repo.AssetRepo
+		accountRepo   *repo.AccountRepo
+		oplogRepo     *repo.OperationLogRepo
+		policyRepo    *repo.PolicyRepo
+		ticketRepo    *repo.TicketRepo
+		grantRepo     *repo.GrantRepo
+		certRepo      *repo.CertRepo
+		sessionRepo   *repo.SessionRepo
+		setupSvc      *service.SetupService
+		authSvc       *service.AuthService
+		assetSvc      *service.AssetService
+		userSvc       *service.UserService
+		policySvc     *service.PolicyService
+		ticketSvc     *service.TicketService
+		opsSvc        *service.OpsService
+		sessionSvc    *service.SessionService
 		sessionKiller *service.SessionKiller
-		smsSvc       *service.SmsService
-		captchaStore *captcha.Store
-		selftestSvc  *service.SelftestService
-		networkSvc   *netcfg.NetworkService
-		nodeSvc      *service.NodeService
-		clusterSvc   *service.ClusterService
-		grantSvc     *service.GrantService
-		ukeySvc      *service.UKeyService
+		smsSvc        *service.SmsService
+		captchaStore  *captcha.Store
+		selftestSvc   *service.SelftestService
+		networkSvc    *netcfg.NetworkService
+		nodeSvc       *service.NodeService
+		clusterSvc    *service.ClusterService
+		grantSvc      *service.GrantService
+		ukeySvc       *service.UKeyService
 	)
 	if pool != nil {
 		defer pool.Close()
@@ -363,29 +370,29 @@ func main() {
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: api.NewRouter(api.Deps{
-			Config:      cfg,
-			Pool:        pool,
-			Crypto:      prov,
-			RoleRepo:    roleRepo,
-			KeyRepo:     keyRepo,
-			OplogRepo:   oplogRepo,
-			Setup:       setupSvc,
-			Auth:        authSvc,
-			Asset:       assetSvc,
-			User:        userSvc,
-			Policy:      policySvc,
-			Ticket:      ticketSvc,
-			Ops:         opsSvc,
-			Sms:         smsSvc,
-			Captcha:     captchaStore,
-			Selftest:    selftestSvc,
-			Network:     networkSvc,
-			Node:        nodeSvc,
-			Cluster:     clusterSvc,
-			Grant:       grantSvc,
-			UKey:        ukeySvc,
-			Session:     sessionSvc,
-			SessionRepo: sessionRepo,
+			Config:        cfg,
+			Pool:          pool,
+			Crypto:        prov,
+			RoleRepo:      roleRepo,
+			KeyRepo:       keyRepo,
+			OplogRepo:     oplogRepo,
+			Setup:         setupSvc,
+			Auth:          authSvc,
+			Asset:         assetSvc,
+			User:          userSvc,
+			Policy:        policySvc,
+			Ticket:        ticketSvc,
+			Ops:           opsSvc,
+			Sms:           smsSvc,
+			Captcha:       captchaStore,
+			Selftest:      selftestSvc,
+			Network:       networkSvc,
+			Node:          nodeSvc,
+			Cluster:       clusterSvc,
+			Grant:         grantSvc,
+			UKey:          ukeySvc,
+			Session:       sessionSvc,
+			SessionRepo:   sessionRepo,
 			SessionKiller: sessionKiller,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,

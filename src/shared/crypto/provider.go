@@ -4,10 +4,10 @@
 //
 //  1. **业务代码只依赖接口**：上层通过 Provider 完成 SM2 / SM3 / SM4 运算与密钥托管，
 //     不感知底层是软件实现还是密码硬件。
-//  2. **工厂模式支持多后端**：当前用软件实现（GmSSL / OpenSSL / 纯 Go），
-//     后续接入密码卡与密码机（PKCS#11）时只需新增实现并改配置，上层零改动。
+//  2. **工厂模式支持多后端**：默认软件实现（GmSSL / OpenSSL / 纯 Go）。
+//     密码机 / 密码卡走 SDF（GM/T 0018，`provider=sdf`）；PKCS#11 仍保留骨架。
 //  3. **密钥不出安全边界**：签名与解密通过密钥 ID 调用（KeySign / KeyDecrypt），
-//     调用方拿不到私钥明文——这是后续切换到密码卡的前提。
+//     调用方拿不到私钥明文——这是切换到密码机的前提。
 package crypto
 
 import (
@@ -21,9 +21,11 @@ import (
 type ProviderName string
 
 const (
-	// ProviderSoft 是软件实现（无硬件密码设备时使用）
+	// ProviderSoft 是软件实现（无硬件密码设备时使用，默认）
 	ProviderSoft ProviderName = "soft"
-	// ProviderPKCS11 是密码卡 / 密码机实现（通过 PKCS#11 接口）
+	// ProviderSDF 是密码机 / 密码卡实现（GM/T 0018 SDF，运行时加载厂商库）
+	ProviderSDF ProviderName = "sdf"
+	// ProviderPKCS11 是 PKCS#11 骨架（本项目的密码机走 SDF，此实现仍未接入）
 	ProviderPKCS11 ProviderName = "pkcs11"
 )
 
@@ -73,7 +75,7 @@ const (
 //
 // 所有方法均需并发安全。
 type Provider interface {
-	// Name 返回实现名称（soft / pkcs11）。
+	// Name 返回实现名称（soft / sdf / pkcs11）。
 	Name() ProviderName
 	// Backend 返回软件实现的后端名称；硬件实现返回空字符串。
 	Backend() BackendName

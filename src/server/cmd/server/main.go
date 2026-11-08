@@ -54,13 +54,20 @@ func main() {
 	var prov crypto.Provider
 	if cfg.Proxy.SSHListen != "" {
 		p, err := factory.New(factory.Config{
-			Provider:      cfg.Crypto.Provider,
-			Backend:       cfg.Crypto.Backend,
-			KeyStoreDir:   cfg.Crypto.KeyStoreDir,
-			MasterKeyFile: cfg.Crypto.MasterKeyFile,
-			Pkcs11LibPath: cfg.Crypto.Pkcs11LibPath,
-			Pkcs11Pin:     cfg.Crypto.Pkcs11Pin,
-			Pkcs11Slot:    cfg.Crypto.Pkcs11Slot,
+			Provider:       cfg.Crypto.Provider,
+			Backend:        cfg.Crypto.Backend,
+			KeyStoreDir:    cfg.Crypto.KeyStoreDir,
+			MasterKeyFile:  cfg.Crypto.MasterKeyFile,
+			Pkcs11LibPath:  cfg.Crypto.Pkcs11LibPath,
+			Pkcs11Pin:      cfg.Crypto.Pkcs11Pin,
+			Pkcs11Slot:     cfg.Crypto.Pkcs11Slot,
+			SDFLibPath:     cfg.Crypto.SDFLibPath,
+			SDFPIN:         cfg.Crypto.SDFPIN,
+			SDFSM2Index:    cfg.Crypto.SDFSM2Index,
+			SDFKEKIndex:    cfg.Crypto.SDFKEKIndex,
+			SDFAllowKeyGen: cfg.Crypto.SDFAllowKeyGen,
+			SDFAlgProfile:  cfg.Crypto.SDFAlgProfile,
+			SDFSM2Hash:     cfg.Crypto.SDFSM2Hash,
 		})
 		if err != nil {
 			slog.Error("密码服务初始化失败", "err", err)

@@ -6,13 +6,15 @@ import (
 	stdcrypto "crypto"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"bastion.local/shared/crypto"
 	"bastion.local/shared/crypto/soft"
 )
 
-func testProvider(t *testing.T, dev *mockDevice, opts Options) *Provider {
+func testProvider(t *testing.T, dev Device, opts Options) *Provider {
 	t.Helper()
 	if opts.KeyStoreDir == "" {
 		opts.KeyStoreDir = t.TempDir()
@@ -231,6 +233,168 @@ func TestBindExistingIndexRequiresPIN(t *testing.T) {
 	}
 	if _, err := bare.KeySign(ctx, meta.KeyID, []byte("x")); err == nil {
 		t.Fatal("未配置 PIN 时内部签名应失败")
+	}
+}
+
+// algRejectDevice 模拟拒绝部分算法标识的密码卡，其余运算交给内层设备。
+type algRejectDevice struct {
+	Device
+	reject map[uint32]uint32
+	tried  []uint32
+}
+
+func (d *algRejectDevice) GenerateECC(alg uint32, bits int) (ECPoint, []byte, error) {
+	d.tried = append(d.tried, alg)
+	if code, ok := d.reject[alg]; ok {
+		return ECPoint{}, nil, call(int32(code), "SDF_GenerateKeyPair_ECC")
+	}
+	return d.Device.GenerateECC(alg, bits)
+}
+
+func TestEccAlgRejected(t *testing.T) {
+	retry := []uint32{sdrNotSupport, sdrAlgNotSupport, sdrAlgModNotSupport}
+	for _, code := range retry {
+		if !eccAlgRejected(call(int32(code), "SDF_GenerateKeyPair_ECC")) {
+			t.Fatalf("0x%08X 应触发换标识重试", code)
+		}
+	}
+	stop := []uint32{sdrCommFail, sdrHardFail, sdrInArgErr, sdrKeyErr}
+	for _, code := range stop {
+		if eccAlgRejected(call(int32(code), "SDF_GenerateKeyPair_ECC")) {
+			t.Fatalf("0x%08X 不应触发换标识重试", code)
+		}
+	}
+	if eccAlgRejected(errInvalid) {
+		t.Fatal("非设备错误不应触发换标识重试")
+	}
+}
+
+func TestSM2GenerateKeyKeepsAcceptedGenericAlg(t *testing.T) {
+	dev := &algRejectDevice{Device: newMockDevice("")}
+	p := testProvider(t, dev, Options{})
+	if _, err := p.SM2GenerateKey(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(dev.tried, []uint32{algGMT0006.SM2}) {
+		t.Fatalf("已接受通用标识时不应再试其他标识: %v", dev.tried)
+	}
+}
+
+func TestSelfTestSM2KeyGenFallsBackToSignAlg(t *testing.T) {
+	dev := &algRejectDevice{
+		Device: newMockDevice(""),
+		reject: map[uint32]uint32{
+			algGMT0006.SM2: sdrAlgModNotSupport,
+		},
+	}
+	p := testProvider(t, dev, Options{})
+	res, err := p.SelfTest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Healthy {
+		t.Fatalf("自检未通过: %+v", res.Items)
+	}
+	var sm2 *crypto.SelfTestItem
+	for i := range res.Items {
+		if res.Items[i].Name == "SM2 签名验签" {
+			sm2 = &res.Items[i]
+			break
+		}
+	}
+	if sm2 == nil || !sm2.Passed {
+		t.Fatalf("SM2 签名验签未通过: %+v", res.Items)
+	}
+	if !slices.Equal(dev.tried, []uint32{algGMT0006.SM2, algGMT0006.SM2Sign}) {
+		t.Fatalf("自检尝试的算法标识 = %v", dev.tried)
+	}
+
+	dev.tried = nil
+	pair, err := p.SM2GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := []byte("after-fallback")
+	sig, err := p.SM2Sign(pair.Private, msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := p.SM2Verify(pair.Public, msg, sig)
+	if err != nil || !ok {
+		t.Fatalf("回退生成的密钥验签失败: ok=%v err=%v", ok, err)
+	}
+	ok, err = p.SM2Verify(pair.Public, []byte("tampered"), sig)
+	if err != nil || ok {
+		t.Fatalf("篡改消息应验签失败: ok=%v err=%v", ok, err)
+	}
+	if !slices.Equal(dev.tried, []uint32{algGMT0006.SM2, algGMT0006.SM2Sign}) {
+		t.Fatalf("GenerateKey 尝试的算法标识 = %v", dev.tried)
+	}
+}
+
+func TestSM2GenerateKeyFallsBackToEncAlg(t *testing.T) {
+	dev := &algRejectDevice{
+		Device: newMockDevice(""),
+		reject: map[uint32]uint32{
+			algLegacy.SM2:     sdrAlgModNotSupport,
+			algLegacy.SM2Sign: sdrAlgNotSupport,
+		},
+	}
+	p := testProvider(t, dev, Options{AlgProfile: "legacy"})
+	pair, err := p.SM2GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(dev.tried, []uint32{algLegacy.SM2, algLegacy.SM2Sign, algLegacy.SM2Enc}) {
+		t.Fatalf("尝试的算法标识 = %v", dev.tried)
+	}
+	msg := []byte("legacy-enc-alg")
+	sig, err := p.SM2Sign(pair.Private, msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := p.SM2Verify(pair.Public, msg, sig)
+	if err != nil || !ok {
+		t.Fatalf("legacy 回退密钥验签失败: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSM2GenerateKeyDoesNotFallbackOnHardError(t *testing.T) {
+	dev := &algRejectDevice{
+		Device: newMockDevice(""),
+		reject: map[uint32]uint32{algGMT0006.SM2: sdrHardFail},
+	}
+	p := testProvider(t, dev, Options{})
+	if _, err := p.SM2GenerateKey(); err == nil {
+		t.Fatal("硬件错误应失败")
+	}
+	if !slices.Equal(dev.tried, []uint32{algGMT0006.SM2}) {
+		t.Fatalf("硬件错误不应改试其他算法标识: %v", dev.tried)
+	}
+}
+
+func TestSM2GenerateKeyAllAlgsRejected(t *testing.T) {
+	dev := &algRejectDevice{
+		Device: newMockDevice(""),
+		reject: map[uint32]uint32{
+			algGMT0006.SM2:     sdrAlgModNotSupport,
+			algGMT0006.SM2Sign: sdrAlgModNotSupport,
+			algGMT0006.SM2Enc:  sdrAlgModNotSupport,
+		},
+	}
+	p := testProvider(t, dev, Options{})
+	_, err := p.SM2GenerateKey()
+	if err == nil {
+		t.Fatal("三种标识都被拒绝时应失败")
+	}
+	if !strings.Contains(err.Error(), "0x0100000A") {
+		t.Fatalf("错误应带上设备返回码: %v", err)
+	}
+	if !strings.Contains(err.Error(), "不支持的算法模式") {
+		t.Fatalf("错误应说明算法模式不支持: %v", err)
+	}
+	if !slices.Equal(dev.tried, []uint32{algGMT0006.SM2, algGMT0006.SM2Sign, algGMT0006.SM2Enc}) {
+		t.Fatalf("应尝试全部标识: %v", dev.tried)
 	}
 }
 

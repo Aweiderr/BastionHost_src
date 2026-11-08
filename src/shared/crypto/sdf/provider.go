@@ -271,7 +271,7 @@ func (p *Provider) sm2Digest(pub *crypto.SM2PublicKey, data []byte) ([]byte, err
 }
 
 func (p *Provider) SM2GenerateKey() (*crypto.SM2KeyPair, error) {
-	pt, d, err := p.dev.GenerateECC(p.algs.SM2, 256)
+	pt, d, err := p.generateSM2Pair()
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +280,26 @@ func (p *Provider) SM2GenerateKey() (*crypto.SM2KeyPair, error) {
 		Private: &crypto.SM2PrivateKey{D: d, Pub: pub},
 		Public:  pub,
 	}, nil
+}
+
+// generateSM2Pair 生成外部 SM2 密钥对。
+//
+// 通用标识被设备以「不支持」拒绝时，改用同一剖面的 SM2Sign，仍失败再改用 SM2Enc。
+// 其他错误原样返回，避免把通信或硬件故障掩盖成换标识重试。
+func (p *Provider) generateSM2Pair() (ECPoint, []byte, error) {
+	algs := p.algs.sm2KeyGenAlgs()
+	var last error
+	for i, alg := range algs {
+		pt, d, err := p.dev.GenerateECC(alg, 256)
+		if err == nil {
+			return pt, d, nil
+		}
+		last = err
+		if i == len(algs)-1 || !eccAlgRejected(err) {
+			return ECPoint{}, nil, err
+		}
+	}
+	return ECPoint{}, nil, last
 }
 
 func (p *Provider) publicOf(priv *crypto.SM2PrivateKey) (*crypto.SM2PublicKey, error) {

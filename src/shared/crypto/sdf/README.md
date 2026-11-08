@@ -45,6 +45,8 @@ export BASTION_SDF_ALLOW_KEYGEN=false    # 见下文，生产保持 false
 
 `SM2GenerateKey` 会把外部密钥对交回调用方，这是接口本身的约定。托管路径（`KeySign` / `KeyDecrypt`）不导出私钥。
 
+部分密码卡的 `SDF_GenerateKeyPair_ECC` 不接受通用 SM2 算法标识。CCIT CCP907（`libsdf_crypto.so`）对 `0x00020100`（gmt0006 的 `SM2`）和 `0x00020000`（legacy 的 `SM2`）返回 `0x0100000A`（算法模式不支持），但对签名、密钥交换、加密专用标识（`0x00020200`、`0x00020400`、`0x00020800`）返回成功。密钥生成先用当前剖面的 `SM2`；只有设备返回「不支持」类错误时，才再依次尝试同一剖面的 `SM2Sign`、`SM2Enc`。已经接受通用标识的设备不会改用专用标识。签名、验签和加解密仍使用剖面里的 `SM2Sign` / `SM2Enc`。
+
 ## 旧密文
 
 切换到 `sdf` 后，已经由 `soft` 写入密钥库的密钥 ID 仍由软件模块解密，**不迁移、不重加密**。新的 `KeyGenerate` 才走密码机。`km_key.provider` 记录密钥当时的实现。

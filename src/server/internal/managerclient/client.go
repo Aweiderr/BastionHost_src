@@ -410,6 +410,47 @@ func (c *Client) Heartbeat(ctx context.Context, in HeartbeatPayload) (*Heartbeat
 	return &out, nil
 }
 
+// ScheduleRequest 向管理服务询问新会话该落在哪台代理。
+type ScheduleRequest struct {
+	UserID     int64  `json:"user_id"`
+	AssetID    int64  `json:"asset_id"`
+	AccountID  int64  `json:"account_id,omitempty"`
+	Protocol   string `json:"protocol"`
+	ClientType string `json:"client_type"`
+}
+
+// Placement 是管理服务的分配结果。
+type Placement struct {
+	Direct        bool   `json:"direct"`
+	AcceptHere    bool   `json:"accept_here"`
+	SameNode      bool   `json:"same_node"`
+	Redirect      bool   `json:"redirect"`
+	NotLeader     bool   `json:"not_leader"`
+	Strategy      string `json:"strategy"`
+	NodeID        string `json:"node_id"`
+	NodeName      string `json:"node_name"`
+	Address       string `json:"address"`
+	Host          string `json:"host"`
+	HTTPPort      int    `json:"http_port"`
+	SSHAddr       string `json:"ssh_addr"`
+	WebSSHURL     string `json:"webssh_url"`
+	WebDesktopURL string `json:"webdesktop_url"`
+	Message       string `json:"message"`
+	LeaderID      string `json:"leader_id"`
+	LeaderAddress string `json:"leader_address"`
+}
+
+// Schedule 询问管理服务这次新会话该由哪台代理承接。
+//
+// 调用方节点以签名头为准，请求体里不写 caller。
+func (c *Client) Schedule(ctx context.Context, in ScheduleRequest) (*Placement, error) {
+	var out Placement
+	if err := c.do(ctx, http.MethodPost, "/internal/v1/ops/schedule", in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // StartSession 上报会话开始。
 func (c *Client) StartSession(ctx context.Context, payload map[string]any) (*SessionInfo, error) {
 	var out SessionInfo

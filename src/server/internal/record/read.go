@@ -44,6 +44,19 @@ func Read(ctx context.Context, prov crypto.Provider, keyID, path string) ([]byte
 		// IO 层错误保持原样：文件不存在/无权限与"录像内容有问题"是两回事
 		return nil, nil, fmt.Errorf("读取录像失败: %w", err)
 	}
+	return Decode(ctx, prov, &providerCipher{prov: prov, keyID: keyID}, raw)
+}
+
+// DecodeKey 用本机托管密钥解密已经读入内存的录像。
+func DecodeKey(ctx context.Context, prov crypto.Provider, keyID string, raw []byte) ([]byte, *Info, error) {
+	return Decode(ctx, prov, &providerCipher{prov: prov, keyID: keyID}, raw)
+}
+
+// Decode 校验并解密已经读入内存的录像。cipher 为 nil 时无法解密。
+func Decode(ctx context.Context, prov crypto.Provider, cipher ChunkCipher, raw []byte) ([]byte, *Info, error) {
+	if prov == nil || cipher == nil {
+		return nil, nil, fmt.Errorf("录像解密未配置")
+	}
 	if len(raw) < 10 || string(raw[:4]) != fileMagic {
 		return nil, nil, fmt.Errorf("%w：不是本系统的录像文件", ErrCorrupted)
 	}
@@ -76,7 +89,7 @@ func Read(ctx context.Context, prov crypto.Provider, keyID, path string) ([]byte
 		if !equal(prevInFile, prev) {
 			return nil, nil, fmt.Errorf("%w：第 %d 片前序摘要不匹配，录像被重排或篡改", ErrCorrupted, info.Chunks)
 		}
-		chunk, err := prov.KeyDecrypt(ctx, keyID, raw[body:body+int(cipherLen)])
+		chunk, err := cipher.Decrypt(ctx, raw[body:body+int(cipherLen)])
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w：第 %d 片解密失败: %v", ErrCorrupted, info.Chunks, err)
 		}

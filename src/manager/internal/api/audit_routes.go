@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
 	"bastion.local/manager/internal/service"
+	"bastion.local/shared/errcode"
 	"bastion.local/shared/httpx"
 )
 
@@ -31,6 +33,7 @@ func registerAuditRoutes(mux *http.ServeMux, s *Server) {
 
 	// 运维人员：我的会话（只读自己的）
 	mux.HandleFunc("GET /api/v1/ops/sessions/my", s.requireAuth(s.handleMySessions))
+	mux.HandleFunc("POST /api/v1/ops/sessions/assign", s.requirePermission("ops:session:connect", s.handleAssignSession))
 	// 安全管理员：当前进行中的运维会话（不含历史）
 	mux.HandleFunc("GET /api/v1/ops/sessions/live", s.requirePermission("ops:session:live", s.handleLiveSessions))
 	mux.HandleFunc("POST /api/v1/ops/sessions/{id}/kill", s.requirePermission("ops:session:kill", s.handleSessionKill))
@@ -111,6 +114,50 @@ func (s *Server) handleMySessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, map[string]any{"items": list, "total": total})
+}
+
+func (s *Server) handleAssignSession(w http.ResponseWriter, r *http.Request) {
+	if s.node == nil {
+		httpx.Fail(w, fmt.Errorf("集群节点服务未启用"))
+		return
+	}
+	var req service.AssignRequest
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	if req.AssetID == 0 {
+		httpx.FailCode(w, "API_4000")
+		return
+	}
+	claims := claimsFrom(r)
+	req.UserID = claims.UserID
+	req.CallerNode = ""
+	if s.ops != nil {
+		check, err := s.ops.CheckGrant(r.Context(), claims.UserID, req.AssetID, req.AccountID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		if check == nil || !check.Allowed {
+			reason := "没有可用的授权"
+			if check != nil && check.Reason != "" {
+				reason = check.Reason
+			}
+			httpx.Fail(w, errcode.New(errcode.ErrForbidden, reason))
+			return
+		}
+	}
+	a, err := s.node.Assign(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, service.ErrNoScheduleNode) {
+			httpx.Fail(w, errcode.New(errcode.ErrConflict, err.Error()))
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, a)
 }
 
 func (s *Server) handleAuditSessionDetail(w http.ResponseWriter, r *http.Request) {

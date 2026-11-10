@@ -20,11 +20,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"bastion.local/shared/crypto"
 )
+
+// ChunkCipher 加密或解密一个录像分片。密文格式与密码服务托管密钥一致：IV(16) || SM4-CBC。
+//
+// 本地驱动使用节点自己的托管密钥。共享驱动可以使用各节点相同的共享密钥，
+// 这样一台代理失效后，另一台仍能解密同一份录像。
+type ChunkCipher interface {
+	Encrypt(ctx context.Context, plain []byte) ([]byte, error)
+	Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
+}
 
 const (
 	fileMagic     = "BSR1"
@@ -44,6 +54,9 @@ type Writer struct {
 	mu         sync.Mutex
 	file       *os.File
 	path       string
+	objectKey  string
+	store      Store
+	cipher     ChunkCipher
 	buf        []byte
 	chunkSize  int
 	chunkSecs  time.Duration
@@ -66,6 +79,10 @@ type Options struct {
 	ChunkSize int
 	// ChunkSecs 分片时间上限（秒），<=0 时取 60
 	ChunkSecs int
+	// Store 非空时，封存后把文件发布到共享存储，返回值改为可跨节点引用的 URI。
+	Store Store
+	// Cipher 非空时用它加密分片，而不使用 keyID。各节点配置同一共享密钥时走这条路径。
+	Cipher ChunkCipher
 }
 
 // New 创建录像写入器并写入文件头。
@@ -76,15 +93,19 @@ func New(ctx context.Context, prov crypto.Provider, keyID string, opts Options) 
 	if prov == nil {
 		return nil, fmt.Errorf("密码服务未初始化")
 	}
-	if keyID == "" {
+	if opts.Cipher == nil && keyID == "" {
 		return nil, fmt.Errorf("录像加密密钥未配置")
 	}
-	dir := opts.Dir
-	if dir == "" {
-		dir = "./data/records"
+	if strings.ContainsAny(opts.SessionNo, `/\`) || opts.SessionNo == "" || opts.SessionNo == "." || opts.SessionNo == ".." {
+		return nil, fmt.Errorf("会话号不能作为录像文件名")
+	}
+	root := opts.Dir
+	if root == "" {
+		root = "./data/records"
 	}
 	now := time.Now()
-	dir = filepath.Join(dir, now.Format("2006"), now.Format("01"), now.Format("02"))
+	objectKey := now.Format("2006") + "/" + now.Format("01") + "/" + now.Format("02") + "/" + opts.SessionNo + ".bsr"
+	dir := filepath.Join(root, now.Format("2006"), now.Format("01"), now.Format("02"))
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("创建录像目录失败: %w", err)
 	}
@@ -96,7 +117,8 @@ func New(ctx context.Context, prov crypto.Provider, keyID string, opts Options) 
 
 	w := &Writer{
 		ctx: ctx, prov: prov, keyID: keyID, dir: dir, sessionNo: opts.SessionNo,
-		file: f, path: path, chunkSize: opts.ChunkSize, chunkSecs: time.Duration(opts.ChunkSecs) * time.Second,
+		file: f, path: path, objectKey: objectKey, store: opts.Store, cipher: opts.Cipher,
+		chunkSize: opts.ChunkSize, chunkSecs: time.Duration(opts.ChunkSecs) * time.Second,
 		lastFlush: now, prevDigest: make([]byte, digestSize), chain: make([]byte, digestSize),
 	}
 	if w.chunkSize <= 0 {
@@ -163,7 +185,7 @@ func (w *Writer) flushLocked() error {
 		return nil
 	}
 	plain := w.buf
-	cipherText, err := w.prov.KeyEncrypt(w.ctx, w.keyID, plain)
+	cipherText, err := w.encrypt(plain)
 	if err != nil {
 		return fmt.Errorf("录像分片加密失败: %w", err)
 	}
@@ -230,7 +252,21 @@ func (w *Writer) Seal() (path string, size int64, digest string, chunks int, err
 		return w.path, w.cipherSize, "", w.chunkIndex, err
 	}
 	w.sealed = true
-	return w.path, w.cipherSize, hexDigest(w.chain), w.chunkIndex, nil
+	ref := w.path
+	if w.store != nil {
+		if err := w.store.Publish(w.ctx, w.objectKey, w.path); err != nil {
+			return w.path, w.cipherSize, hexDigest(w.chain), w.chunkIndex, fmt.Errorf("发布录像到共享存储失败: %w", err)
+		}
+		ref = w.store.URI(w.objectKey)
+	}
+	return ref, w.cipherSize, hexDigest(w.chain), w.chunkIndex, nil
+}
+
+func (w *Writer) encrypt(plain []byte) ([]byte, error) {
+	if w.cipher != nil {
+		return w.cipher.Encrypt(w.ctx, plain)
+	}
+	return w.prov.KeyEncrypt(w.ctx, w.keyID, plain)
 }
 
 // Abort 放弃录像（会话异常且不保留文件时使用）。

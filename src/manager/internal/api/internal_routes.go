@@ -1,11 +1,13 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
 	"bastion.local/manager/internal/service"
+	"bastion.local/shared/errcode"
 	"bastion.local/shared/httpx"
 	"bastion.local/shared/internalauth"
 )
@@ -32,6 +34,7 @@ func registerInternalRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("POST /internal/v1/ops/hostkey-learn", h(s.handleHostKeyLearn))
 	mux.HandleFunc("GET /internal/v1/policies/commands", h(s.handleInternalPolicies))
 	mux.HandleFunc("POST /internal/v1/sessions", h(s.handleSessionStart))
+	mux.HandleFunc("POST /internal/v1/ops/schedule", h(s.handleOpsSchedule))
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/commands", h(s.handleSessionCommand))
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/files", h(s.handleSessionFile))
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/finish", h(s.handleSessionFinish))
@@ -247,12 +250,45 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
+	if nodeID := r.Header.Get(internalauth.HeaderNode); nodeID != "" && req.ProxyNode == "" {
+		req.ProxyNode = nodeID
+	}
 	sess, err := s.session.Start(r.Context(), req)
 	if err != nil {
+		var re *service.RedirectError
+		if errors.As(err, &re) {
+			httpx.Fail(w, errcode.New(errcode.ErrConflict, re.Error()))
+			return
+		}
 		writeServiceError(w, err)
 		return
 	}
 	httpx.OK(w, sess)
+}
+
+func (s *Server) handleOpsSchedule(w http.ResponseWriter, r *http.Request) {
+	if s.node == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	var req service.AssignRequest
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	if nodeID := r.Header.Get(internalauth.HeaderNode); nodeID != "" {
+		req.CallerNode = nodeID
+	}
+	a, err := s.node.Assign(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, service.ErrNoScheduleNode) {
+			httpx.Fail(w, errcode.New(errcode.ErrConflict, err.Error()))
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, a)
 }
 
 func (s *Server) handleSessionCommand(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,11 +20,24 @@ import (
 //     而那个"有人"恰恰是已经挂掉的节点；
 //   - 摘除（disabled）只是不再分配新会话，**不掐断存量会话**：
 //     正在进行的运维操作被强行打断，比慢一点更不可接受。
+//
+// nodeDirectory 是节点仓储。*repo.NodeRepo 满足它，测试用内存替身。
+type nodeDirectory interface {
+	Upsert(ctx context.Context, in repo.HeartbeatInput) (*model.Node, error)
+	List(ctx context.Context, role string) ([]*model.Node, error)
+	Get(ctx context.Context, nodeID string) (*model.Node, error)
+	SetAdminState(ctx context.Context, nodeID, state string) (*model.Node, error)
+	Update(ctx context.Context, nodeID string, up repo.NodeUpdate) (*model.Node, error)
+	Delete(ctx context.Context, nodeID string) error
+}
+
 type NodeService struct {
-	nodes    *repo.NodeRepo
+	nodes    nodeDirectory
 	clusters *repo.ClusterRepo
 	configs  *repo.ConfigRepo
 	lives    *LiveSessionRegistry
+	oplog    opLogWriter
+	leader   *Leader
 }
 
 // 配置缺失时的默认值，与迁移中的出厂配置保持一致。
@@ -49,6 +63,22 @@ func (s *NodeService) SetLiveSessions(reg *LiveSessionRegistry) {
 		return
 	}
 	s.lives = reg
+}
+
+// SetOperationLog 注入管理操作日志。停用、维护、摘除节点时写入 audit_operation_log。
+func (s *NodeService) SetOperationLog(log opLogWriter) {
+	if s == nil {
+		return
+	}
+	s.oplog = log
+}
+
+// SetLeader 注入选主器。未注入时分配不看租约。
+func (s *NodeService) SetLeader(l *Leader) {
+	if s == nil {
+		return
+	}
+	s.leader = l
 }
 
 // HeartbeatAck 是心跳的应答。
@@ -144,18 +174,40 @@ func (s *NodeService) memberOfNode(ctx context.Context, localIPs []string) *mode
 
 // HeartbeatInterval 心跳上报间隔。
 func (s *NodeService) HeartbeatInterval(ctx context.Context) time.Duration {
-	return time.Duration(s.configs.GetInt(ctx, 0,
-		"cluster.heartbeat.interval_seconds", defaultHeartbeatInterval)) * time.Second
+	return time.Duration(s.configInt(ctx, "cluster.heartbeat.interval_seconds", defaultHeartbeatInterval)) * time.Second
 }
 
 // HeartbeatTimeout 判定离线的阈值。
 func (s *NodeService) HeartbeatTimeout(ctx context.Context) time.Duration {
-	return time.Duration(s.configs.GetInt(ctx, 0,
-		"cluster.heartbeat.timeout_seconds", defaultHeartbeatTimeout)) * time.Second
+	return time.Duration(s.configInt(ctx, "cluster.heartbeat.timeout_seconds", defaultHeartbeatTimeout)) * time.Second
 }
 
 func (s *NodeService) drainMessage(ctx context.Context) string {
+	if s == nil || s.configs == nil {
+		return defaultDrainMessage
+	}
 	return s.configs.GetString(ctx, 0, "cluster.drain.reject_message", defaultDrainMessage)
+}
+
+func (s *NodeService) configInt(ctx context.Context, key string, def int) int {
+	if s == nil || s.configs == nil {
+		return def
+	}
+	return s.configs.GetInt(ctx, 0, key, def)
+}
+
+func (s *NodeService) configString(ctx context.Context, key, def string) string {
+	if s == nil || s.configs == nil {
+		return def
+	}
+	return s.configs.GetString(ctx, 0, key, def)
+}
+
+func (s *NodeService) configBool(ctx context.Context, key string, def bool) bool {
+	if s == nil || s.configs == nil {
+		return def
+	}
+	return s.configs.GetBool(ctx, 0, key, def)
 }
 
 // NodeView 是面向界面的节点视图：在注册信息之上补充健康与负载结论。
@@ -264,6 +316,14 @@ type Overview struct {
 	TimeoutSeconds  int      `json:"timeout_seconds"`
 	Targets         []Target `json:"targets"`
 	Notes           []string `json:"notes"`
+
+	// 管理服务选主。Held 为 false 表示当前没有有效租约。
+	LeaderID      string     `json:"leader_id,omitempty"`
+	LeaderAddress string     `json:"leader_address,omitempty"`
+	LeaderUntil   *time.Time `json:"leader_until,omitempty"`
+	LeaderHeld    bool       `json:"leader_held"`
+	ThisManagerID string     `json:"this_manager_id,omitempty"`
+	IsLeader      bool       `json:"is_leader"`
 }
 
 // Overview 汇总集群状态并给出部署模式判定。
@@ -330,23 +390,148 @@ func (s *NodeService) Overview(ctx context.Context) (*Overview, error) {
 	if ov.AcceptingNodes == 0 && ov.ProxyNodes > 0 {
 		ov.Notes = append(ov.Notes, "当前没有任何代理节点在接受新会话：新建运维会话将失败，请检查节点状态。")
 	}
+	if s.leader != nil {
+		view := s.leader.Current(ctx)
+		ov.ThisManagerID = s.leader.id
+		ov.LeaderID = view.ID
+		ov.LeaderAddress = view.Address
+		ov.LeaderHeld = view.Held
+		ov.IsLeader = view.IsSelf
+		if !view.Until.IsZero() {
+			until := view.Until
+			ov.LeaderUntil = &until
+		}
+		if view.Held {
+			ov.Notes = append(ov.Notes, fmt.Sprintf("管理服务选主：%s（租约有效）。会话分配默认不独占这把租约，各管理实例按同一份节点表计算。", view.ID))
+		}
+	}
 	return ov, nil
 }
 
-// SetState 设置节点运维状态。
-func (s *NodeService) SetState(ctx context.Context, nodeID, state string) (*NodeView, error) {
+// Assign 为一次新运维会话选择代理节点。
+//
+// 还没有任何代理注册时 Direct 为 true，调用方保持直连（单机兼容）。
+// 调用方自己仍合格时 AcceptHere 为 true：连接已经落在健康节点上，不再轰走。
+// 调用方不合格时 Redirect 为 true，客户端应改连返回的地址。
+func (s *NodeService) Assign(ctx context.Context, in AssignRequest) (*Assignment, error) {
+	if s.leader != nil && s.configBool(ctx, "cluster.schedule.require_leader", false) {
+		view := s.leader.Current(ctx)
+		if !view.IsSelf {
+			msg := "管理服务正在选主，请稍后重试"
+			if view.Held && view.Address != "" {
+				msg = fmt.Sprintf("会话分配由管理节点 %s（%s）受理，请稍后重试", view.ID, view.Address)
+			}
+			return &Assignment{
+				NotLeader: true, LeaderID: view.ID, LeaderAddress: view.Address, Message: msg,
+			}, nil
+		}
+	}
+
+	strategy := strings.TrimSpace(s.configString(ctx, "cluster.schedule.strategy", ScheduleLeastLoad))
+	if strategy != ScheduleConsistentHash {
+		strategy = ScheduleLeastLoad
+	}
+	sshPort := s.configInt(ctx, "cluster.schedule.ssh_port", 2222)
+	scheme := strings.TrimSpace(s.configString(ctx, "cluster.schedule.ws_scheme", "ws"))
+
+	nodes, err := s.schedNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	chosen, direct, err := SelectNode(nodes, strategy, stickyKey(in.UserID, in.AssetID, in.Protocol))
+	if err != nil {
+		return nil, err
+	}
+	if direct {
+		a := &Assignment{Direct: true, AcceptHere: true, SameNode: true, Strategy: strategy, Message: "没有已注册的代理节点，使用当前连接"}
+		s.attachLeader(ctx, a)
+		return a, nil
+	}
+	a := buildAssignment(chosen, strategy, sshPort, scheme)
+	caller := strings.TrimSpace(in.CallerNode)
+	if caller != "" && caller == chosen.NodeID {
+		a.SameNode = true
+		a.AcceptHere = true
+	} else if callerStillAccepts(nodes, caller) {
+		a.AcceptHere = true
+		a.Message = "当前节点仍可接单，新会话留在本节点；主动接入请使用分配的地址"
+	} else if caller != "" {
+		a.Redirect = true
+		a.Message = fmt.Sprintf("请改连节点 %s", a.SSHAddr)
+	}
+	s.attachLeader(ctx, a)
+	return a, nil
+}
+
+func (s *NodeService) attachLeader(ctx context.Context, a *Assignment) {
+	if s.leader == nil || a == nil {
+		return
+	}
+	view := s.leader.Current(ctx)
+	a.LeaderID = view.ID
+	a.LeaderAddress = view.Address
+}
+
+func (s *NodeService) schedNodes(ctx context.Context) ([]SchedNode, error) {
+	views, err := s.List(ctx, model.NodeRoleProxy)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SchedNode, 0, len(views))
+	for _, v := range views {
+		n := SchedNode{
+			NodeID: v.NodeID, NodeName: v.NodeName, Address: v.Address, LocalIPs: v.LocalIPs,
+			AdminState: v.AdminState, Weight: v.Weight,
+			ActiveSessions: v.ActiveSessions, MaxSessions: v.MaxSessions, Online: v.Online,
+			MemberBlocked: s.memberBlocks(ctx, v.LocalIPs),
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func (s *NodeService) memberBlocks(ctx context.Context, ips []string) bool {
+	if s.clusters == nil {
+		return false
+	}
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			continue
+		}
+		m, err := s.clusters.MemberByIP(ctx, ip)
+		if err != nil || m == nil {
+			continue
+		}
+		return memberBlocksNewSession(m)
+	}
+	return false
+}
+
+// SetState 设置节点运维状态，并把维护 / 停用 / 恢复写入操作日志。
+func (s *NodeService) SetState(ctx context.Context, nodeID, state string, op OperatorContext) (*NodeView, error) {
 	switch state {
 	case model.NodeStateActive, model.NodeStateDraining, model.NodeStateDisabled:
 	default:
 		return nil, fmt.Errorf("不支持的状态：%s（可选 active / draining / disabled）", state)
 	}
-	node, err := s.nodes.SetAdminState(ctx, strings.TrimSpace(nodeID), state)
+	nodeID = strings.TrimSpace(nodeID)
+	before, err := s.nodes.Get(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if before == nil {
+		return nil, fmt.Errorf("节点不存在：%s", nodeID)
+	}
+	node, err := s.nodes.SetAdminState(ctx, nodeID, state)
 	if err != nil {
 		return nil, err
 	}
 	if node == nil {
 		return nil, fmt.Errorf("节点不存在：%s", nodeID)
 	}
+	s.writeNodeAudit(ctx, op, nodeAuditAction(state), before.NodeID, before.NodeName,
+		nodeAuditSnapshot(before), nodeAuditSnapshot(node))
 	v := s.view(node, s.HeartbeatTimeout(ctx), time.Now())
 	return &v, nil
 }
@@ -382,7 +567,8 @@ func (s *NodeService) Update(ctx context.Context, nodeID string, up repo.NodeUpd
 // 节点仍然在线时不允许直接移除：那多半是运维想"让它下线"，
 // 而正确的做法是先置为 draining 等存量会话结束，再停止进程。
 // 记录一删，节点下次心跳又会把自己注册回来，操作等于没做。
-func (s *NodeService) Remove(ctx context.Context, nodeID string) error {
+// 摘除成功后写入 audit_operation_log。
+func (s *NodeService) Remove(ctx context.Context, nodeID string, op OperatorContext) error {
 	node, err := s.nodes.Get(ctx, nodeID)
 	if err != nil {
 		return err
@@ -394,5 +580,51 @@ func (s *NodeService) Remove(ctx context.Context, nodeID string) error {
 		return fmt.Errorf("节点 %s 仍在线（%d 秒前有心跳），请先置为「维护中」，待存量会话结束并停止进程后再摘除",
 			nodeID, v.HeartbeatAgeSeconds)
 	}
-	return s.nodes.Delete(ctx, nodeID)
+	if err := s.nodes.Delete(ctx, nodeID); err != nil {
+		return err
+	}
+	s.writeNodeAudit(ctx, op, "node_remove", node.NodeID, node.NodeName, nodeAuditSnapshot(node), "")
+	return nil
+}
+
+func nodeAuditAction(state string) string {
+	switch state {
+	case model.NodeStateDisabled:
+		return "node_disable"
+	case model.NodeStateDraining:
+		return "node_drain"
+	default:
+		return "node_enable"
+	}
+}
+
+func nodeAuditSnapshot(n *model.Node) string {
+	if n == nil {
+		return ""
+	}
+	raw, err := json.Marshal(map[string]any{
+		"admin_state": n.AdminState, "node_name": n.NodeName,
+		"weight": n.Weight, "address": n.Address,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func (s *NodeService) writeNodeAudit(ctx context.Context, op OperatorContext, action, id, name, before, after string) {
+	if s == nil || s.oplog == nil {
+		return
+	}
+	l := &model.OperationLog{
+		Module: "cluster", Action: action, TargetType: "node",
+		TargetID: id, TargetName: name,
+		BeforeValue: before, AfterValue: after,
+		Result: "success", ClientIP: op.ClientIP, OperatorNameSnap: op.Username,
+	}
+	if op.UserID != 0 {
+		uid := op.UserID
+		l.OperatorID = &uid
+	}
+	_ = s.oplog.Write(ctx, l)
 }

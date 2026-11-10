@@ -35,6 +35,15 @@ export function oracleGatewayHost(): string {
   return resolveOracleGatewayHost(window.location.hostname)
 }
 
+/**
+ * 优先使用管理面分配的 ws/wss 地址。空值或非 WebSocket 地址回退到本机入口。
+ */
+export function preferredSocketUrl(assigned: string | null | undefined, fallback: string): string {
+  const raw = (assigned ?? '').trim()
+  if (raw.startsWith('ws://') || raw.startsWith('wss://')) return raw
+  return fallback
+}
+
 /** 拼接 WebSSH 的 WebSocket 地址（同源主机名 + 固定端口） */
 export function buildWebsshUrl(): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'

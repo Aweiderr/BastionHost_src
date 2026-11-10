@@ -386,6 +386,28 @@ func (c *Client) MySessions(ctx context.Context) ([]*SessionInfo, error) {
 	return out.Items, nil
 }
 
+// SessionAssignment 是管理面分配的代理地址。Direct 为 true 时继续用本机推导的网关。
+type SessionAssignment struct {
+	Direct        bool   `json:"direct"`
+	SSHAddr       string `json:"ssh_addr"`
+	WebDesktopURL string `json:"webdesktop_url"`
+	NodeID        string `json:"node_id"`
+	Message       string `json:"message"`
+}
+
+// AssignSession 询问新会话该连哪台代理。管理面不可用时由调用方回退。
+func (c *Client) AssignSession(ctx context.Context, assetID, accountID int64, protocol, clientType string) (*SessionAssignment, error) {
+	var out SessionAssignment
+	err := c.do(ctx, http.MethodPost, "/api/v1/ops/sessions/assign", map[string]any{
+		"asset_id": assetID, "account_id": accountID,
+		"protocol": protocol, "client_type": clientType,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Healthz 探测管理服务可用性。
 func (c *Client) Healthz(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/healthz", nil)

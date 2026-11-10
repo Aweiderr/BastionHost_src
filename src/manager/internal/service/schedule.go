@@ -195,7 +195,9 @@ func dialHost(address string, localIPs []string) (string, int) {
 		host = strings.TrimSpace(address)
 	}
 	// 已经是可用的主机名或具体 IP 时保留。多网卡机器上用第一块网卡的地址
-	// 会把客户端指到管理网或内网。只在地址为空、0.0.0.0 或回环时才用本机 IP 补。
+	// 会把客户端指到管理网或内网。只在地址为空、未指定、回环，或
+	// localhost / *.localhost / *.localdomain 这类名字时，才用本机 IP 补。
+	// 浏览器会把这些名字解析到操作员自己的机器，WebSocket 到不了代理。
 	if !usableAdvertisedHost(host) {
 		if alt := firstDialIP(localIPs); alt != "" {
 			host = alt
@@ -207,9 +209,15 @@ func dialHost(address string, localIPs []string) (string, int) {
 	return host, port
 }
 
+// usableAdvertisedHost 判断这个地址能不能写进客户端要打开的跳转 URL。
+// 具体公网或内网 IP、以及真实主机名（如 bastion.example.com）保留。
+// 空、unknown-host、未指定地址、回环地址，以及 localhost 风格的名字不行。
 func usableAdvertisedHost(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" || strings.EqualFold(host, "unknown-host") {
+		return false
+	}
+	if localhostStyleName(host) {
 		return false
 	}
 	ip := net.ParseIP(host)
@@ -217,6 +225,17 @@ func usableAdvertisedHost(host string) bool {
 		return true
 	}
 	return !ip.IsUnspecified() && !ip.IsLoopback()
+}
+
+// localhostStyleName 是浏览器会解析到本机的主机名：localhost、
+// localhost.localdomain，以及以 .localhost 或 .localdomain 结尾的名字。大小写不敏感。
+func localhostStyleName(host string) bool {
+	name := strings.ToLower(strings.TrimSpace(host))
+	switch name {
+	case "localhost", "localhost.localdomain":
+		return true
+	}
+	return strings.HasSuffix(name, ".localhost") || strings.HasSuffix(name, ".localdomain")
 }
 
 func firstDialIP(ips []string) string {

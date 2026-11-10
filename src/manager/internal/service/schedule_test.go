@@ -146,18 +146,36 @@ func TestCanAcquireLease(t *testing.T) {
 	}
 }
 
-func TestBuildAssignmentUsesReachableIP(t *testing.T) {
+func TestBuildAssignmentKeepsAdvertisedHost(t *testing.T) {
 	n := proxy("node-a", 0, 100, 10, model.NodeStateActive, true)
 	n.Address = "bastion-a:8081"
-	n.LocalIPs = []string{"10.1.2.3"}
+	n.LocalIPs = []string{"10.1.2.3", "192.168.0.8"}
 	a := buildAssignment(&n, ScheduleLeastLoad, 2222, "wss")
-	if a.Host != "10.1.2.3" || a.HTTPPort != 8081 {
-		t.Fatalf("host=%s port=%d", a.Host, a.HTTPPort)
+	if a.Host != "bastion-a" || a.HTTPPort != 8081 {
+		t.Fatalf("hostname should be kept, host=%s port=%d", a.Host, a.HTTPPort)
 	}
-	if a.WebSSHURL != "wss://10.1.2.3:8081/api/v1/webssh" {
+	if a.WebSSHURL != "wss://bastion-a:8081/api/v1/webssh" {
 		t.Fatalf("webssh=%s", a.WebSSHURL)
 	}
-	if a.SSHAddr != "10.1.2.3:2222" {
+	if a.SSHAddr != "bastion-a:2222" {
 		t.Fatalf("ssh=%s", a.SSHAddr)
+	}
+
+	n.Address = "10.9.9.9:8081"
+	a = buildAssignment(&n, ScheduleLeastLoad, 2222, "ws")
+	if a.Host != "10.9.9.9" {
+		t.Fatalf("concrete IP replaced: %s", a.Host)
+	}
+
+	n.Address = "0.0.0.0:9090"
+	a = buildAssignment(&n, ScheduleLeastLoad, 2222, "ws")
+	if a.Host != "10.1.2.3" || a.HTTPPort != 9090 {
+		t.Fatalf("unspecified host=%s port=%d", a.Host, a.HTTPPort)
+	}
+
+	n.Address = "127.0.0.1:8081"
+	a = buildAssignment(&n, ScheduleLeastLoad, 2222, "ws")
+	if a.Host != "10.1.2.3" {
+		t.Fatalf("loopback host=%s", a.Host)
 	}
 }

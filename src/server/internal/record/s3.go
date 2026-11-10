@@ -70,11 +70,14 @@ func (s *S3Store) Find(ctx context.Context, sessionNo string, now time.Time) (st
 	for i := 0; i < 90; i++ {
 		d := now.AddDate(0, 0, -i)
 		key := d.Format("2006") + "/" + d.Format("01") + "/" + d.Format("02") + "/" + sessionNo + ".bsr"
-		_, err := s.get(ctx, s.objectKey(key))
-		if err == nil {
+		ok, err := s.exists(ctx, s.objectKey(key))
+		if err != nil {
+			return "", err
+		}
+		if ok {
 			return key, nil
 		}
-		last = err
+		last = fmt.Errorf("录像文件不存在")
 	}
 	if last == nil {
 		last = fmt.Errorf("录像文件不存在")
@@ -118,6 +121,33 @@ func (s *S3Store) put(ctx context.Context, key string, body []byte) error {
 		return fmt.Errorf("上传录像失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 	return nil
+}
+
+func (s *S3Store) exists(ctx context.Context, key string) (bool, error) {
+	u, err := s.objectURL(key)
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, u, nil)
+	if err != nil {
+		return false, err
+	}
+	if err := signS3(req, nil, s.cfg); err != nil {
+		return false, err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("检查录像是否存在失败: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return false, fmt.Errorf("检查录像是否存在失败: HTTP %d", resp.StatusCode)
+	}
+	return true, nil
 }
 
 func (s *S3Store) get(ctx context.Context, key string) ([]byte, error) {

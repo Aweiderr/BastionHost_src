@@ -9,7 +9,7 @@ import { assignOpsSession, listOpsAssets, type OpsAsset } from '@/api/ops'
 import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import { buildWebsshUrl, preferredSocketUrl, PROTOCOL_MAP, dictLabel } from '@/utils/constants'
+import { buildWebsshUrl, preferredSocketUrl, schedulerUnavailable, PROTOCOL_MAP, dictLabel } from '@/utils/constants'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { isOracleProtocol } from '@/utils/oracleConnect'
 
@@ -243,7 +243,15 @@ async function openTerminalSocket(key: string, preset: string): Promise<void> {
         client_type: 'web',
       })
       url = preferredSocketUrl(assigned.webssh_url, buildWebsshUrl())
-    } catch {
+    } catch (err) {
+      if (!schedulerUnavailable(err)) {
+        const message = err instanceof Error && err.message ? err.message : '没有可连接的代理节点'
+        tab.status = 'error'
+        tab.statusText = '无法分配'
+        tab.errorText = message
+        rt.term.writeln(`\r\n\x1b[31m${message}\x1b[0m`)
+        return
+      }
       url = buildWebsshUrl()
     }
     tab.socketUrl = url

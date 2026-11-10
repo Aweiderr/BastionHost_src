@@ -80,6 +80,7 @@ func TestSharedRecordingSurvivesNodeLoss(t *testing.T) {
 func TestS3RecordingRoundTrip(t *testing.T) {
 	prov := testProv(t)
 	objects := map[string][]byte{}
+	var gets, heads int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
 			http.Error(w, "unsigned", http.StatusForbidden)
@@ -91,7 +92,15 @@ func TestS3RecordingRoundTrip(t *testing.T) {
 			body, _ := io.ReadAll(r.Body)
 			objects[key] = body
 			w.WriteHeader(http.StatusOK)
+		case http.MethodHead:
+			heads++
+			if _, ok := objects[key]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
+			gets++
 			body, ok := objects[key]
 			if !ok {
 				http.NotFound(w, r)
@@ -144,6 +153,12 @@ func TestS3RecordingRoundTrip(t *testing.T) {
 	}
 	if string(plain) != "abcdef" {
 		t.Fatalf("plain=%q objects=%d", plain, len(objects))
+	}
+	if gets != 1 {
+		t.Fatalf("playback downloaded the object %d times, want 1", gets)
+	}
+	if heads < 1 {
+		t.Fatalf("playback did not HEAD the object")
 	}
 }
 

@@ -676,7 +676,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/setup/seal -H "Authorization: Bearer $
 - 节点身份以**签名头**为准而非请求体：签名覆盖了 `X-Node` 头，请求体没有，
   只信请求体的话，任一持有共享密钥的节点都能冒充别的节点上报负载；
 - 管理节点启动时也注册自己（标识为 `manager-<主机名>`），因此界面能看出管理面是单点还是多活；
-- **会话调度**：`POST /api/v1/ops/sessions/assign`（登录且具备 `ops:session:connect`）和
+- **会话调度**（迁移 `0043_session_schedule.sql`。生产库已占用 0040–0042 做 SFTP 开关和资产权限上限，本仓库从 0039 直接到 0043，不改写那三份脚本）：`POST /api/v1/ops/sessions/assign`（登录且具备 `ops:session:connect`）和
   `POST /internal/v1/ops/schedule`（代理回源）按健康节点的负载分配新会话。
   策略 `cluster.schedule.strategy`：`least_load`（默认，会话数/权重，相同则 node_id 较小者）
   或 `consistent_hash`（用户+资产+协议稳定落到同一健康节点）。

@@ -16,7 +16,7 @@ import { assignOpsSession, listOpsAssets, type OpsAsset } from '@/api/ops'
 import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import { buildWebdesktopUrl, dictLabel, preferredSocketUrl, PROTOCOL_MAP } from '@/utils/constants'
+import { buildWebdesktopUrl, dictLabel, preferredSocketUrl, schedulerUnavailable, PROTOCOL_MAP } from '@/utils/constants'
 import { copyToClipboard } from '@/utils/clipboard'
 import {
   acceptRemoteCopy,
@@ -193,7 +193,13 @@ async function connect(preset?: string | Event): Promise<void> {
         client_type: 'web',
       })
       url = preferredSocketUrl(assigned.webdesktop_url, buildWebdesktopUrl())
-    } catch {
+    } catch (err) {
+      if (!schedulerUnavailable(err)) {
+        status.value = 'error'
+        statusText.value = '无法分配'
+        errorText.value = err instanceof Error && err.message ? err.message : '没有可连接的代理节点'
+        return
+      }
       url = buildWebdesktopUrl()
     }
   }

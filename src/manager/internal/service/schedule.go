@@ -194,7 +194,9 @@ func dialHost(address string, localIPs []string) (string, int) {
 	} else {
 		host = strings.TrimSpace(address)
 	}
-	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() {
+	// 已经是可用的主机名或具体 IP 时保留。多网卡机器上用第一块网卡的地址
+	// 会把客户端指到管理网或内网。只在地址为空、0.0.0.0 或回环时才用本机 IP 补。
+	if !usableAdvertisedHost(host) {
 		if alt := firstDialIP(localIPs); alt != "" {
 			host = alt
 		}
@@ -203,6 +205,18 @@ func dialHost(address string, localIPs []string) (string, int) {
 		host = "127.0.0.1"
 	}
 	return host, port
+}
+
+func usableAdvertisedHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || strings.EqualFold(host, "unknown-host") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true
+	}
+	return !ip.IsUnspecified() && !ip.IsLoopback()
 }
 
 func firstDialIP(ips []string) string {

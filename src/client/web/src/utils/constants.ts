@@ -44,6 +44,18 @@ export function preferredSocketUrl(assigned: string | null | undefined, fallback
   return fallback
 }
 
+/**
+ * 调度接口没有给出结论：网络失败，或管理服务 5xx。
+ * 409（没有健康节点）和其它 4xx 要停在错误上，不能改连本机。
+ */
+export function schedulerUnavailable(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return true
+  const status = Number((err as { status?: unknown }).status ?? 0)
+  const code = String((err as { code?: unknown }).code ?? '')
+  if (code === 'NETWORK_ERROR' || !Number.isFinite(status) || status === 0) return true
+  return status >= 500
+}
+
 /** 拼接 WebSSH 的 WebSocket 地址（同源主机名 + 固定端口） */
 export function buildWebsshUrl(): string {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'

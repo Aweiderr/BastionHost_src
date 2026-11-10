@@ -96,7 +96,11 @@ export interface SessionAssignment {
   message?: string
 }
 
-/** 在建立 WebSocket 之前询问该连哪台代理。失败时调用方回退到本机地址。 */
+/**
+ * 在建立 WebSocket 之前询问该连哪台代理。
+ * 默认静默：没有健康节点时由会话页自己展示，避免再弹一条全局提示。
+ * 网络故障和 5xx 才由调用方回退到本机入口。
+ */
 export function assignOpsSession(body: {
   asset_id: number
   account_id?: number
@@ -106,6 +110,7 @@ export function assignOpsSession(body: {
   return request<SessionAssignment>('/ops/sessions/assign', {
     method: 'POST',
     body,
+    silent: true,
   })
 }
 

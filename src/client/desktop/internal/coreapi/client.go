@@ -81,6 +81,19 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Message }
 
+// AssignmentUnavailable 表示调度接口没能给出结论：网络失败或管理服务 5xx。
+// 409（没有健康节点）和 4xx 业务拒绝不是这种情况，调用方必须停下来。
+func AssignmentUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		return true
+	}
+	return ae.Status == 0 || ae.Status >= 500
+}
+
 // IsAuthError 判断是否为认证类错误（用于触发重新登录）。
 func IsAuthError(err error) bool {
 	var ae *APIError

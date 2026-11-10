@@ -262,6 +262,20 @@ func (g *OracleGateway) serveConn(ctx context.Context, client net.Conn) {
 		return
 	}
 
+	if placer, ok := g.Control.(sessionPlacer); ok {
+		p, perr := placer.Schedule(ctx, managerclient.ScheduleRequest{
+			UserID: id.UserID, AssetID: asset.AssetID, Protocol: "oracle", ClientType: "oracle_client",
+		})
+		proceed, redirect, ferr := decidePlacement(p, perr)
+		if ferr != nil {
+			_, _ = client.Write(tnsRefusePacket(ferr.Error()))
+			return
+		}
+		if !proceed {
+			_, _ = client.Write(tnsRefusePacket(redirectText(redirect)))
+			return
+		}
+	}
 	sess, err := g.Control.StartSession(ctx, map[string]any{
 		"user_id": id.UserID, "username": id.Username, "display_name": id.DisplayName,
 		"asset_id": asset.AssetID, "account_id": acc.AccountID,

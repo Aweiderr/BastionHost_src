@@ -163,6 +163,14 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 	}
 
 	// ---- 3. 会话与录像 ----
+	if redirect, deny := s.gateNewSession(ctx, ident.UserID, auth.AssetID, "ssh", "web"); deny != "" {
+		fail(deny)
+		return
+	} else if redirect != nil {
+		writeText(redirect)
+		_ = c.Close(websocket.StatusTryAgainLater, "redirect")
+		return
+	}
 	sess, err := s.client.StartSession(ctx, map[string]any{
 		"user_id": ident.UserID, "username": ident.Username, "display_name": ident.DisplayName,
 		"asset_id": auth.AssetID, "account_id": auth.AccountID,
@@ -188,17 +196,12 @@ func (s *Server) handleWebSSH(ctx context.Context, c *websocket.Conn, remoteIP s
 
 	var rec *record.Writer
 	recStatus := recordNone
-	if s.cfg.Record.Driver == "local" && s.recordKeyID != "" {
-		if w, err := record.New(ctx, s.prov, s.recordKeyID, record.Options{
-			Dir: s.cfg.Record.LocalDir, SessionNo: sess.SessionNo,
-			ChunkSize: s.cfg.Record.ChunkSize, ChunkSecs: s.cfg.Record.ChunkSecs,
-		}); err != nil {
-			slog.Error("录像初始化失败，会话继续但不录像", "session_no", sess.SessionNo, "err", err)
-			recStatus = recordFailed
-		} else {
-			rec = w
-			recStatus = recordRecording
-		}
+	if w, err := s.openRecorder(ctx, sess.SessionNo); err != nil {
+		slog.Error("录像初始化失败，会话继续但不录像", "session_no", sess.SessionNo, "err", err)
+		recStatus = recordFailed
+	} else if w != nil {
+		rec = w
+		recStatus = recordRecording
 	}
 
 	// ---- 4. 凭据与目标连接 ----

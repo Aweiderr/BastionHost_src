@@ -144,11 +144,27 @@ type ManagerConfig struct {
 }
 
 // RecordConfig 是录像存储配置。
+//
+// Driver:
+//   - local：只写本机目录，回放也只查本机（单机默认）；
+//   - shared / nfs：目录是每台代理都挂载的同一路径，封存后任意节点都能打开；
+//   - s3：封存后上传到对象存储，回放从对象存储读取。
+//
+// ShareSecret 在 shared/nfs/s3 下让各节点用同一把 SM4 密钥。不设置时仍用本机
+// 密钥库里的 record_encrypt，这时跨节点回放还要求密钥库本身是共享的。
 type RecordConfig struct {
-	Driver    string
-	LocalDir  string
-	ChunkSize int
-	ChunkSecs int
+	Driver      string
+	LocalDir    string
+	ChunkSize   int
+	ChunkSecs   int
+	ShareSecret string
+	S3Endpoint  string
+	S3Region    string
+	S3Bucket    string
+	S3AccessKey string
+	S3SecretKey string
+	S3Prefix    string
+	S3PathStyle bool
 }
 
 // NodeConfig 是节点标识配置。
@@ -223,10 +239,18 @@ func Load() (*Config, error) {
 			Timeout:     configx.Duration("BASTION_CREDENTIAL_TIMEOUT", 60*time.Second),
 		},
 		Record: RecordConfig{
-			Driver:    configx.Str("BASTION_RECORD_DRIVER", "local"),
-			LocalDir:  configx.Str("BASTION_RECORD_DIR", "./data/records"),
-			ChunkSize: configx.Int("BASTION_RECORD_CHUNK_SIZE", 10*1024*1024),
-			ChunkSecs: configx.Int("BASTION_RECORD_CHUNK_SECS", 60),
+			Driver:      configx.Str("BASTION_RECORD_DRIVER", "local"),
+			LocalDir:    configx.Str("BASTION_RECORD_DIR", "./data/records"),
+			ChunkSize:   configx.Int("BASTION_RECORD_CHUNK_SIZE", 10*1024*1024),
+			ChunkSecs:   configx.Int("BASTION_RECORD_CHUNK_SECS", 60),
+			ShareSecret: configx.Str("BASTION_RECORD_SHARE_SECRET", ""),
+			S3Endpoint:  configx.Str("BASTION_RECORD_S3_ENDPOINT", ""),
+			S3Region:    configx.Str("BASTION_RECORD_S3_REGION", "us-east-1"),
+			S3Bucket:    configx.Str("BASTION_RECORD_S3_BUCKET", ""),
+			S3AccessKey: configx.Str("BASTION_RECORD_S3_ACCESS_KEY", ""),
+			S3SecretKey: configx.Str("BASTION_RECORD_S3_SECRET_KEY", ""),
+			S3Prefix:    configx.Str("BASTION_RECORD_S3_PREFIX", ""),
+			S3PathStyle: configx.Bool("BASTION_RECORD_S3_PATH_STYLE", true),
 		},
 		Node: NodeConfig{
 			ID:   configx.Str("BASTION_NODE_ID", "node-1"),
@@ -238,6 +262,11 @@ func Load() (*Config, error) {
 	case "soft", "pkcs11", "sdf":
 	default:
 		return nil, fmt.Errorf("BASTION_CRYPTO_PROVIDER 取值非法：%s（可选 soft / sdf / pkcs11）", cfg.Crypto.Provider)
+	}
+	switch cfg.Record.Driver {
+	case "", "local", "shared", "nfs", "s3":
+	default:
+		return nil, fmt.Errorf("BASTION_RECORD_DRIVER 取值非法：%s（可选 local / shared / nfs / s3）", cfg.Record.Driver)
 	}
 	return cfg, nil
 }

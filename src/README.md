@@ -676,7 +676,21 @@ curl -X POST http://127.0.0.1:8080/api/v1/setup/seal -H "Authorization: Bearer $
 - 节点身份以**签名头**为准而非请求体：签名覆盖了 `X-Node` 头，请求体没有，
   只信请求体的话，任一持有共享密钥的节点都能冒充别的节点上报负载；
 - 管理节点启动时也注册自己（标识为 `manager-<主机名>`），因此界面能看出管理面是单点还是多活；
-  选主与仲裁交给部署层，这里不做第二套仲裁；
+- **会话调度**（迁移 `0043_session_schedule.sql`。生产库已占用 0040–0042 做 SFTP 开关和资产权限上限，本仓库从 0039 直接到 0043，不改写那三份脚本）：`POST /api/v1/ops/sessions/assign`（登录且具备 `ops:session:connect`）和
+  `POST /internal/v1/ops/schedule`（代理回源）按健康节点的负载分配新会话。
+  策略 `cluster.schedule.strategy`：`least_load`（默认，会话数/权重，相同则 node_id 较小者）
+  或 `consistent_hash`（用户+资产+协议稳定落到同一健康节点）。
+  离线、维护、摘除、权重 0、会话已满，以及集群成员被停用的设备不参与。
+  还没有代理注册时返回 `direct`，客户端仍连当前机器（单机兼容）。
+  已经连在一台仍合格的代理上时会话留在本机；连在不合格节点上时返回 `redirect`，
+  Web / 桌面客户端改连 `webssh_url` / `webdesktop_url` / `ssh_addr`。
+  SSH 端口用 `cluster.schedule.ssh_port`（默认 2222），WebSocket 协议用 `cluster.schedule.ws_scheme`；
+- **管理服务选主**：`sys_manager_leader` 上的租约，时长 `cluster.leader.lease_seconds`（默认 15 秒）。
+  持有者约每三分之一租约续一次，过期后其它实例接管。调度默认不独占这把租约
+  （`cluster.schedule.require_leader=false`），避免选主抖动拒绝全部新会话；
+- **录像共享**：`BASTION_RECORD_DRIVER=local`（默认，只在本机）/`shared`/`nfs`（各节点挂载同一目录）
+  /`s3`（封存后上传对象存储）。跨节点解密配置 `BASTION_RECORD_SHARE_SECRET`（不入库）。
+  未配置时仍用各节点本地 `record_encrypt` 密钥，回放要求密钥库也在共享存储上；
 - 摘除或维护**不中断存量会话**；带外强制断开是会话审计里的另一个动作。
 
 > 集群界面给出的 ≤5 秒 / ≤30 秒 / ≤60 秒是**规划文档的设计目标**，不是实测值。

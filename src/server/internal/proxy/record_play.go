@@ -51,12 +51,7 @@ func (s *Server) RecordPlayHandler() http.HandlerFunc {
 			return
 		}
 
-		path, err := s.findRecord(sessionNo)
-		if err != nil {
-			httpx.FailCode(w, "API_4040")
-			return
-		}
-		plain, info, err := record.Read(r.Context(), s.prov, s.recordKeyID, path)
+		path, plain, info, err := s.readRecording(r.Context(), sessionNo)
 		if err != nil {
 			// "没录完"与"不可信"必须分开告诉调用方：
 			// 前者是运维事件（会话被强制停止），后者是安全事件（篡改）。
@@ -72,6 +67,10 @@ func (s *Server) RecordPlayHandler() http.HandlerFunc {
 				httpx.Fail(w, errcode.Newf(errcode.ErrRecordCorrupted,
 					"录像完整性校验未通过，内容不可信：%v", err))
 			default:
+				if os.IsNotExist(err) || strings.Contains(err.Error(), "不存在") {
+					httpx.FailCode(w, "API_4040")
+					return
+				}
 				slog.Error("录像读取失败", "session_no", sessionNo, "path", path, "err", err)
 				httpx.Fail(w, fmt.Errorf("录像读取失败：%v", err))
 			}
@@ -90,6 +89,32 @@ func (s *Server) RecordPlayHandler() http.HandlerFunc {
 		w.Header().Set("X-Record-Chunks", fmt.Sprint(info.Chunks))
 		_, _ = w.Write(plain)
 	}
+}
+
+// readRecording 读取并校验录像。共享存储优先：对象不在本机时仍能打开。
+func (s *Server) readRecording(ctx context.Context, sessionNo string) (string, []byte, *record.Info, error) {
+	if s.recordStore != nil {
+		key, raw, err := record.ReadSession(ctx, s.recordStore, sessionNo, time.Now())
+		if err != nil {
+			return "", nil, nil, err
+		}
+		var (
+			plain []byte
+			info  *record.Info
+		)
+		if s.recordCipher != nil {
+			plain, info, err = record.Decode(ctx, s.prov, s.recordCipher, raw)
+		} else {
+			plain, info, err = record.DecodeKey(ctx, s.prov, s.recordKeyID, raw)
+		}
+		return key, plain, info, err
+	}
+	path, err := s.findRecord(sessionNo)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	plain, info, err := record.Read(ctx, s.prov, s.recordKeyID, path)
+	return path, plain, info, err
 }
 
 // findRecord 在录像根目录下按会话号查找文件。

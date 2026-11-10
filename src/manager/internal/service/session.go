@@ -24,6 +24,8 @@ type SessionService struct {
 	notifier    alertDispatcher
 	// alertNotifyAsync 为 true 时通知在后台执行，避免 Webhook 耗时拖住命令入库。
 	alertNotifyAsync bool
+	// place 在落库前确认代理节点还能接这单。返回 *RedirectError 时不创建会话。
+	place func(ctx context.Context, req StartSessionRequest) error
 }
 
 // highRiskAlerter 是高危命令告警需要的仓储能力。*repo.AlertRepo 满足它。
@@ -56,6 +58,14 @@ func (s *SessionService) SetAlertRepo(a *repo.AlertRepo) {
 	s.alertRepo = a
 }
 
+// SetPlacement 注入会话落点检查。代理报上来的节点若已不能接单，这里拒绝创建记录。
+func (s *SessionService) SetPlacement(fn func(ctx context.Context, req StartSessionRequest) error) {
+	if s == nil {
+		return
+	}
+	s.place = fn
+}
+
 // SetAlertNotifier 注入外部通知。未注入且规则要求 webhook 时，通知状态记为 skipped。
 func (s *SessionService) SetAlertNotifier(n *AlertNotifier) {
 	if n == nil {
@@ -86,6 +96,11 @@ type StartSessionRequest struct {
 func (s *SessionService) Start(ctx context.Context, req StartSessionRequest) (*model.Session, error) {
 	if req.UserID == 0 || req.AssetID == 0 {
 		return nil, fmt.Errorf("会话必须包含用户与资产")
+	}
+	if s.place != nil {
+		if err := s.place(ctx, req); err != nil {
+			return nil, err
+		}
 	}
 	asset, err := s.assetRepo.Get(ctx, req.AssetID)
 	if err != nil {

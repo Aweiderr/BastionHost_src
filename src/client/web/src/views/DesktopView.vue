@@ -12,11 +12,11 @@
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { listOpsAssets, type OpsAsset } from '@/api/ops'
+import { assignOpsSession, listOpsAssets, type OpsAsset } from '@/api/ops'
 import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import { buildWebdesktopUrl, dictLabel, PROTOCOL_MAP } from '@/utils/constants'
+import { buildWebdesktopUrl, dictLabel, preferredSocketUrl, schedulerUnavailable, PROTOCOL_MAP } from '@/utils/constants'
 import { copyToClipboard } from '@/utils/clipboard'
 import {
   acceptRemoteCopy,
@@ -138,7 +138,9 @@ function scheduleResize(): void {
   }, 200)
 }
 
-function connect(): void {
+const desktopRedirects = ref(0)
+
+async function connect(preset?: string | Event): Promise<void> {
   const current = asset.value
   if (!current) {
     app.error('请从「我的资源」选择 RDP 或 VNC 资产')
@@ -178,10 +180,32 @@ function connect(): void {
   lastPanelPaste = ''
   status.value = 'connecting'
   statusText.value = '连接中…'
+  const follow = typeof preset === 'string' ? preset : ''
   const size = viewportSize()
+  if (!follow) desktopRedirects.value = 0
+  let url = follow
+  if (!url) {
+    try {
+      const assigned = await assignOpsSession({
+        asset_id: current.asset_id,
+        account_id: accountId.value || undefined,
+        protocol: current.protocol,
+        client_type: 'web',
+      })
+      url = preferredSocketUrl(assigned.webdesktop_url, buildWebdesktopUrl())
+    } catch (err) {
+      if (!schedulerUnavailable(err)) {
+        status.value = 'error'
+        statusText.value = '无法分配'
+        errorText.value = err instanceof Error && err.message ? err.message : '没有可连接的代理节点'
+        return
+      }
+      url = buildWebdesktopUrl()
+    }
+  }
   let socket: WebSocket
   try {
-    socket = new WebSocket(buildWebdesktopUrl())
+    socket = new WebSocket(url)
   } catch {
     status.value = 'error'
     statusText.value = '连接失败'
@@ -267,6 +291,7 @@ function handleControl(raw: string): void {
     can_paste?: boolean
     direction?: string
     text?: string
+    webdesktop_url?: string
   }
   try {
     payload = JSON.parse(raw)
@@ -274,6 +299,19 @@ function handleControl(raw: string): void {
     return
   }
   switch (payload.type) {
+    case 'redirect': {
+      const next = preferredSocketUrl(payload.webdesktop_url, '')
+      if (next && desktopRedirects.value < 2) {
+        desktopRedirects.value += 1
+        closeSocket()
+        void connect(next)
+        return
+      }
+      status.value = 'error'
+      statusText.value = '连接失败'
+      errorText.value = payload.message || '没有可连接的代理节点'
+      break
+    }
     case 'ready':
       sessionNo.value = payload.session_no || ''
       remoteW.value = Number(payload.width) > 0 ? Number(payload.width) : 1280

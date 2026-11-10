@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -82,8 +83,7 @@ func managerAddress(listen string) string {
 // runManagerHeartbeat 让管理节点在集群中保持可见。
 //
 // 只上报"我还在"，管理节点不承载运维会话，因此负载字段留空。
-// 选主与仲裁交给部署层（数据库主备、容器编排）—— 这里不做第二套仲裁：
-// 两套心跳只会让人搞不清到底谁说了算。
+// 多活选主是另一条数据库租约（service.Leader），不把心跳应答当成仲裁结果。
 func runManagerHeartbeat(ctx context.Context, svc *service.NodeService, cfg *config.Config) {
 	id := managerNodeID()
 	failStreak := 0
@@ -314,11 +314,32 @@ func main() {
 		// 否则一台设备没装/没启动服务时，界面上只会静静地什么都不显示。
 		clusterRepo := repo.NewClusterRepo(pool)
 		clusterSvc = service.NewClusterService(clusterRepo, configRepo)
+		clusterSvc.SetOperationLog(oplogRepo)
 		clusterSvc.StartProbe(ctx)
 
 		// 节点自注册仍保留：它负责上报进程负载，并按设备 IP 取回
 		// "是否允许接收新会话"（集群页把某台置为维护后，由这里生效）
 		nodeSvc = service.NewNodeService(repo.NewNodeRepo(pool), clusterRepo, configRepo)
+		nodeSvc.SetOperationLog(oplogRepo)
+		leaderSvc := service.NewLeader(repo.NewLeaderRepo(pool), configRepo, managerNodeID(), managerAddress(cfg.HTTPAddr))
+		nodeSvc.SetLeader(leaderSvc)
+		leaderSvc.Start(ctx)
+		sessionSvc.SetPlacement(func(ctx context.Context, req service.StartSessionRequest) error {
+			a, err := nodeSvc.Assign(ctx, service.AssignRequest{
+				UserID: req.UserID, AssetID: req.AssetID, Protocol: req.Protocol,
+				ClientType: req.ClientType, CallerNode: req.ProxyNode,
+			})
+			if err != nil {
+				return err
+			}
+			if a != nil && a.MustRedirect() {
+				return &service.RedirectError{Assignment: a}
+			}
+			if a != nil && a.NotLeader {
+				return fmt.Errorf("%s", a.Message)
+			}
+			return nil
+		})
 		// 在途会话清单只活在内存里：它是节点这一拍心跳的运行事实，
 		// 落库会在管理服务重启后变成过期结论。巡检启动前会先等心跳重新报上来。
 		liveSessions := service.NewLiveSessionRegistry()

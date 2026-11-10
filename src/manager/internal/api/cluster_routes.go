@@ -176,7 +176,7 @@ func (s *Server) handleRemoveClusterMember(w http.ResponseWriter, r *http.Reques
 		httpx.Fail(w, err)
 		return
 	}
-	if err := s.cluster.RemoveMember(r.Context(), clusterID, memberID); err != nil {
+	if err := s.cluster.RemoveMember(r.Context(), clusterID, memberID, operatorFrom(r)); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -227,7 +227,7 @@ func (s *Server) handleSetClusterMemberState(w http.ResponseWriter, r *http.Requ
 		httpx.Fail(w, err)
 		return
 	}
-	if err := s.cluster.SetMemberState(r.Context(), clusterID, memberID, req.State); err != nil {
+	if err := s.cluster.SetMemberState(r.Context(), clusterID, memberID, req.State, operatorFrom(r)); err != nil {
 		writeServiceError(w, err)
 		return
 	}

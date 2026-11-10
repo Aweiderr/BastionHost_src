@@ -60,6 +60,13 @@ func (s *Server) runSFTP(ctx context.Context, ident *identity, ch ssh.Channel, r
 		return
 	}
 
+	if redirect, deny := s.gateNewSession(ctx, ident.UserID, asset.AssetID, "sftp", "ssh_client"); deny != "" {
+		fail(deny)
+		return
+	} else if redirect != nil {
+		fail(redirectTextFromMap(redirect))
+		return
+	}
 	sess, err := s.client.StartSession(ctx, map[string]any{
 		"user_id": ident.UserID, "username": ident.Username, "display_name": ident.DisplayName,
 		"asset_id": asset.AssetID, "account_id": acc.AccountID,

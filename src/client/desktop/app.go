@@ -439,7 +439,10 @@ func (a *App) OpenSession(key, assetName, accountName string, assetID, accountID
 		key = fmt.Sprintf("s%d", time.Now().UnixNano())
 	}
 
-	gateway := a.gatewayAddr()
+	gateway, err := a.assignedSSHGateway(assetID, accountID)
+	if err != nil {
+		return nil, err
+	}
 	login := user.Username + "@" + assetName
 
 	// 回调里用 key 区分多标签会话
@@ -458,7 +461,22 @@ func (a *App) OpenSession(key, assetName, accountName string, assetID, accountID
 		Cols: cols, Rows: rows, OnData: onData, OnClose: onClose,
 	})
 	if err != nil {
-		return nil, err
+		// 分配到的节点在拨号时已经不可用：再问一次管理面，改连另一台。
+		// 管理面明确拒绝（没有健康节点）时不再改连本机。
+		alt, aerr := a.assignedSSHGateway(assetID, accountID)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if alt != "" && alt != gateway {
+			sess, err = term.Dial(a.ctx, term.Options{
+				Gateway: alt, Login: login, Password: password,
+				Cols: cols, Rows: rows, OnData: onData, OnClose: onClose,
+			})
+			gateway = alt
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	brief := &SessionBrief{
@@ -539,10 +557,13 @@ func (a *App) OpenDesktopSession(key, protocol string, assetID, accountID int64,
 	onClose := func(reason string) {
 		a.emit("desk:closed", map[string]any{"key": key, "reason": reason})
 	}
+	desktopURL, err := a.assignedDesktopURL(assetID, accountID, protocol)
+	if err != nil {
+		return nil, err
+	}
 	var sess *desk.Session
-	var err error
 	sess, err = desk.Dial(a.ctx, desk.Options{
-		URL: a.desktopSocketURL(), Token: token,
+		URL: desktopURL, Token: token,
 		AssetID: assetID, AccountID: accountID, Protocol: protocol,
 		Width: width, Height: height,
 		OnControl: onControl, OnFrame: onFrame, OnClose: func(reason string) {
@@ -555,7 +576,29 @@ func (a *App) OpenDesktopSession(key, protocol string, assetID, accountID int64,
 		},
 	})
 	if err != nil {
-		return nil, err
+		alt, aerr := a.assignedDesktopURL(assetID, accountID, protocol)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if alt != "" && alt != desktopURL {
+			desktopURL = alt
+			sess, err = desk.Dial(a.ctx, desk.Options{
+				URL: desktopURL, Token: token,
+				AssetID: assetID, AccountID: accountID, Protocol: protocol,
+				Width: width, Height: height,
+				OnControl: onControl, OnFrame: onFrame, OnClose: func(reason string) {
+					a.mu.Lock()
+					if a.desktops[key] == sess {
+						delete(a.desktops, key)
+					}
+					a.mu.Unlock()
+					onClose(reason)
+				},
+			})
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	a.mu.Lock()
 	if old := a.desktops[key]; old != nil {
@@ -565,7 +608,7 @@ func (a *App) OpenDesktopSession(key, protocol string, assetID, accountID int64,
 	a.mu.Unlock()
 	sess.Start()
 	return &SessionBrief{
-		Key: key, AssetID: assetID, Gateway: a.desktopSocketURL(),
+		Key: key, AssetID: assetID, Gateway: desktopURL,
 		OpenedAt: time.Now().Format(time.RFC3339),
 	}, nil
 }
@@ -657,6 +700,54 @@ func (a *App) session(key string) (*term.Session, error) {
 		return nil, fmt.Errorf("会话不存在或已结束")
 	}
 	return sess, nil
+}
+
+// assignedSSHGateway 先问管理面该连哪台代理。
+// 调度接口不可用（网络或 5xx）时回退到本机推导的地址。
+// 管理面明确拒绝（没有健康节点、未授权）时返回错误，不再改连本机。
+func (a *App) assignedSSHGateway(assetID, accountID int64) (string, error) {
+	fallback := a.gatewayAddr()
+	if a.api == nil || assetID == 0 {
+		return fallback, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	asg, err := a.api.AssignSession(ctx, assetID, accountID, "ssh", "desktop")
+	if err != nil {
+		if coreapi.AssignmentUnavailable(err) {
+			return fallback, nil
+		}
+		return "", err
+	}
+	if asg == nil || asg.Direct || strings.TrimSpace(asg.SSHAddr) == "" {
+		return fallback, nil
+	}
+	return asg.SSHAddr, nil
+}
+
+// assignedDesktopURL 为图形会话选择代理的 WebSocket 地址。
+func (a *App) assignedDesktopURL(assetID, accountID int64, protocol string) (string, error) {
+	fallback := a.desktopSocketURL()
+	if a.api == nil || assetID == 0 {
+		return fallback, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	asg, err := a.api.AssignSession(ctx, assetID, accountID, protocol, "desktop")
+	if err != nil {
+		if coreapi.AssignmentUnavailable(err) {
+			return fallback, nil
+		}
+		return "", err
+	}
+	if asg == nil || asg.Direct {
+		return fallback, nil
+	}
+	raw := strings.TrimSpace(asg.WebDesktopURL)
+	if strings.HasPrefix(raw, "ws://") || strings.HasPrefix(raw, "wss://") {
+		return raw, nil
+	}
+	return fallback, nil
 }
 
 // gatewayAddr 推导 SSH 网关地址：管理服务主机 + 网关端口（默认 2222）。

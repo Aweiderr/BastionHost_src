@@ -65,11 +65,13 @@ const (
 
 // Server 是 SSH 网关。
 type Server struct {
-	cfg         *config.Config
-	client      *managerclient.Client
-	policies    *policycache.Cache
-	prov        crypto.Provider
-	recordKeyID string
+	cfg          *config.Config
+	client       *managerclient.Client
+	policies     *policycache.Cache
+	prov         crypto.Provider
+	recordKeyID  string
+	recordStore  record.Store
+	recordCipher record.ChunkCipher
 
 	mu       sync.Mutex
 	active   int
@@ -136,6 +138,57 @@ func (s *Server) ActiveSessions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.lives)
+}
+
+// SetRecordBackend 注入跨节点录像存储。local 驱动不需要调用。
+func (s *Server) SetRecordBackend(store record.Store, cipher record.ChunkCipher) {
+	if s == nil {
+		return
+	}
+	s.recordStore = store
+	s.recordCipher = cipher
+}
+
+// openRecorder 按驱动打开录像。
+//
+// local 只在本机密钥库下写文件。shared / nfs / s3 在封存后把文件交给共享存储；
+// 配了共享密钥时，另一台节点不需要这份本地密钥库也能解密。
+// 返回 (nil, nil) 表示这次会话不录像（未配置密钥或仍是 local 且没有密钥）。
+func (s *Server) openRecorder(ctx context.Context, sessionNo string) (*record.Writer, error) {
+	if s == nil || s.cfg == nil {
+		return nil, nil
+	}
+	opts := record.Options{
+		Dir: s.cfg.Record.LocalDir, SessionNo: sessionNo,
+		ChunkSize: s.cfg.Record.ChunkSize, ChunkSecs: s.cfg.Record.ChunkSecs,
+	}
+	driver := s.cfg.Record.Driver
+	if driver == "" {
+		driver = "local"
+	}
+	switch driver {
+	case "local":
+		if s.recordKeyID == "" {
+			return nil, nil
+		}
+		return record.New(ctx, s.prov, s.recordKeyID, opts)
+	case "shared", "nfs", "s3":
+		if s.recordStore == nil {
+			return nil, fmt.Errorf("录像驱动 %s 未配置存储", driver)
+		}
+		opts.Store = s.recordStore
+		opts.Cipher = s.recordCipher
+		keyID := s.recordKeyID
+		if opts.Cipher != nil {
+			keyID = ""
+		}
+		if opts.Cipher == nil && keyID == "" {
+			return nil, fmt.Errorf("录像加密密钥未配置")
+		}
+		return record.New(ctx, s.prov, keyID, opts)
+	default:
+		return nil, fmt.Errorf("未知录像驱动 %s", driver)
+	}
 }
 
 // SetAdmissionCheck 注入新会话准入检查。
@@ -618,6 +671,13 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 	}
 
 	// ---- 4. 建立会话记录 ----
+	if redirect, deny := s.gateNewSession(ctx, ident.UserID, asset.AssetID, asset.Protocol, "ssh_client"); deny != "" {
+		write("\r\n%s\r\n", deny)
+		return
+	} else if redirect != nil {
+		write("\r\n%s\r\n", redirectTextFromMap(redirect))
+		return
+	}
 	sess, err := s.client.StartSession(ctx, map[string]any{
 		"user_id": ident.UserID, "username": ident.Username, "display_name": ident.DisplayName,
 		"asset_id": asset.AssetID, "account_id": acc.AccountID,
@@ -645,18 +705,12 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 	// ---- 5. 开始录像 ----
 	var rec *record.Writer
 	recStatus := recordNone
-	if s.cfg.Record.Driver == "local" && s.recordKeyID != "" {
-		w, err := record.New(ctx, s.prov, s.recordKeyID, record.Options{
-			Dir: s.cfg.Record.LocalDir, SessionNo: sess.SessionNo,
-			ChunkSize: s.cfg.Record.ChunkSize, ChunkSecs: s.cfg.Record.ChunkSecs,
-		})
-		if err != nil {
-			slog.Error("录像初始化失败，会话继续但不录像", "session_no", sess.SessionNo, "err", err)
-			recStatus = recordFailed
-		} else {
-			rec = w
-			recStatus = recordRecording
-		}
+	if w, err := s.openRecorder(ctx, sess.SessionNo); err != nil {
+		slog.Error("录像初始化失败，会话继续但不录像", "session_no", sess.SessionNo, "err", err)
+		recStatus = recordFailed
+	} else if w != nil {
+		rec = w
+		recStatus = recordRecording
 	}
 
 	// ---- 6. 获取凭据并连接目标 ----

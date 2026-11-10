@@ -29,6 +29,7 @@ import (
 	"bastion.local/server/internal/nodebeat"
 	"bastion.local/server/internal/policycache"
 	"bastion.local/server/internal/proxy"
+	"bastion.local/server/internal/record"
 	"bastion.local/shared/crypto"
 	"bastion.local/shared/crypto/factory"
 )
@@ -130,6 +131,7 @@ func main() {
 	if prov != nil {
 		recordKeyID = ensureRecordKey(ctx, prov)
 	}
+	recStore, recCipher := openRecordBackend(cfg, prov)
 
 	// ---------- 5. SSH 网关 ----------
 	//
@@ -140,6 +142,7 @@ func main() {
 	var beater *nodebeat.Beater
 	if prov != nil {
 		sshSrv = proxy.NewServer(cfg, mc, policies, prov, recordKeyID)
+		sshSrv.SetRecordBackend(recStore, recCipher)
 
 		// 心跳：向管理服务上报负载，并取回"是否允许接收新会话"。
 		// 先于监听启动，让节点一上线就在集群界面可见。
@@ -254,6 +257,52 @@ func main() {
 		slog.Error("HTTP 优雅关闭失败", "err", err)
 	}
 	slog.Info("服务端已停止")
+}
+
+// openRecordBackend 按驱动准备跨节点录像存储。local 返回空，行为与原先一致。
+func openRecordBackend(cfg *config.Config, prov crypto.Provider) (record.Store, record.ChunkCipher) {
+	if cfg == nil {
+		return nil, nil
+	}
+	driver := cfg.Record.Driver
+	if driver == "" || driver == "local" {
+		return nil, nil
+	}
+	var cipher record.ChunkCipher
+	if cfg.Record.ShareSecret != "" && prov != nil {
+		c, err := record.NewSharedCipher(prov, cfg.Record.ShareSecret)
+		if err != nil {
+			slog.Error("录像共享密钥不可用，回放将依赖本机密钥库", "err", err)
+		} else {
+			cipher = c
+		}
+	} else if driver != "local" {
+		slog.Warn("未配置 BASTION_RECORD_SHARE_SECRET，跨节点回放要求各代理共享同一密钥库")
+	}
+	switch driver {
+	case "shared", "nfs":
+		scheme := "shared"
+		if driver == "nfs" {
+			scheme = "nfs"
+		}
+		slog.Info("录像使用共享目录", "driver", driver, "dir", cfg.Record.LocalDir)
+		return &record.FSStore{Root: cfg.Record.LocalDir, Scheme: scheme}, cipher
+	case "s3":
+		store, err := record.NewS3Store(record.S3Config{
+			Endpoint: cfg.Record.S3Endpoint, Region: cfg.Record.S3Region,
+			Bucket: cfg.Record.S3Bucket, AccessKey: cfg.Record.S3AccessKey,
+			SecretKey: cfg.Record.S3SecretKey, Prefix: cfg.Record.S3Prefix,
+			PathStyle: cfg.Record.S3PathStyle,
+		})
+		if err != nil {
+			slog.Error("对象存储录像不可用，本会话将无法跨节点回放", "err", err)
+			return nil, cipher
+		}
+		slog.Info("录像使用对象存储", "bucket", cfg.Record.S3Bucket, "endpoint", cfg.Record.S3Endpoint)
+		return store, cipher
+	default:
+		return nil, nil
+	}
 }
 
 // ensureRecordKey 确保存在录像加密密钥并返回其 ID。

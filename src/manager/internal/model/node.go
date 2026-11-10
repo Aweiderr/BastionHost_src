@@ -6,7 +6,8 @@ import "time"
 const (
 	// NodeRoleProxy 代理节点（服务端）：承载协议代理与会话采集
 	NodeRoleProxy = "proxy"
-	// NodeRoleManager 管理节点：无状态接口 + 选主
+	// NodeRoleManager 管理节点：无状态接口。多活时用数据库租约选主，
+	// 不另做一套与数据库主备平行的仲裁。
 	NodeRoleManager = "manager"
 )
 
@@ -46,6 +47,9 @@ type Node struct {
 	MemPercent      float64    `json:"mem_percent"`
 	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
 	LastError       string     `json:"last_error,omitempty"`
+	// LocalIPs 是心跳上报的本机 IPv4。调度用它对照集群成员的停用/摘除，
+	// 不把它当作运维意图：下一次心跳会整表覆盖。
+	LocalIPs []string `json:"local_ips,omitempty"`
 
 	RegisteredAt time.Time `json:"registered_at"`
 	UpdateTime   time.Time `json:"update_time"`

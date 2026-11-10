@@ -209,6 +209,14 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		return
 	}
 	width, height := clampDesktopSize(auth.Width, auth.Height)
+	if redirect, deny := s.gateNewSession(ctx, ident.UserID, auth.AssetID, protoHint, clientType); deny != "" {
+		fail(deny)
+		return
+	} else if redirect != nil {
+		writeJSON(ctx, redirect)
+		_ = c.Close(websocket.StatusTryAgainLater, "redirect")
+		return
+	}
 	sess, err := ops.StartSession(ctx, map[string]any{
 		"user_id": ident.UserID, "username": ident.Username, "display_name": ident.DisplayName,
 		"asset_id": auth.AssetID, "account_id": auth.AccountID,
@@ -291,17 +299,14 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		fail("连接协议与资产台账不一致")
 		return
 	}
-	if s != nil && s.cfg != nil && s.cfg.Record.Driver == "local" && s.recordKeyID != "" && s.prov != nil {
+	if s != nil && s.cfg != nil && s.prov != nil {
 		// 录像加密不能绑在会话 ctx 上：画面循环结束时会先 cancel，
 		// 封存和最后一帧如果还用那个 ctx，加密会被取消，文件里只剩开头的 meta。
-		w, err := record.New(context.Background(), s.prov, s.recordKeyID, record.Options{
-			Dir: s.cfg.Record.LocalDir, SessionNo: sess.SessionNo,
-			ChunkSize: s.cfg.Record.ChunkSize, ChunkSecs: s.cfg.Record.ChunkSecs,
-		})
+		w, err := s.openRecorder(context.Background(), sess.SessionNo)
 		if err != nil {
 			slog.Error("图形录像初始化失败，会话继续但不录像", "session_no", sess.SessionNo, "err", err)
 			recStatus = recordFailed
-		} else {
+		} else if w != nil {
 			rec = w
 			recStatus = recordRecording
 			glog = newGraphicalLog(rec, proto)

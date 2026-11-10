@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,7 +15,7 @@ import (
 // nodeColumns 是节点查询的固定列顺序，scanNode 依赖它。
 const nodeColumns = `node_id, node_name, node_role, address, version, admin_state,
 	weight, max_sessions, active_sessions, cpu_percent, mem_percent,
-	last_heartbeat_at, COALESCE(last_error, ''), registered_at, update_time`
+	last_heartbeat_at, COALESCE(last_error, ''), COALESCE(local_ips, ''), registered_at, update_time`
 
 // HeartbeatInput 是一次节点心跳上报。
 //
@@ -75,8 +76,8 @@ func NewNodeRepo(pool *pgxpool.Pool) *NodeRepo { return &NodeRepo{pool: pool} }
 func (r *NodeRepo) Upsert(ctx context.Context, in HeartbeatInput) (*model.Node, error) {
 	const q = `
 	INSERT INTO sys_node (node_id, node_name, node_role, address, version,
-		active_sessions, max_sessions, cpu_percent, mem_percent, last_heartbeat_at, last_error)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now(), $10)
+		active_sessions, max_sessions, cpu_percent, mem_percent, last_heartbeat_at, last_error, local_ips)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now(), $10, $11)
 	ON CONFLICT (node_id) DO UPDATE SET
 		node_name         = EXCLUDED.node_name,
 		address           = EXCLUDED.address,
@@ -87,13 +88,16 @@ func (r *NodeRepo) Upsert(ctx context.Context, in HeartbeatInput) (*model.Node, 
 		mem_percent       = EXCLUDED.mem_percent,
 		last_heartbeat_at = now(),
 		last_error        = EXCLUDED.last_error,
+		-- 旧版代理不报 local_ips（字段缺失，切片为 nil）。
+		-- 这时不能把已经记下的地址清掉，否则调度会暂时对不上集群成员。
+		local_ips         = CASE WHEN $12 THEN EXCLUDED.local_ips ELSE sys_node.local_ips END,
 		update_time       = now()
 	RETURNING ` + nodeColumns
 
 	node, err := scanNode(r.pool.QueryRow(ctx, q,
 		in.NodeID, in.NodeName, in.NodeRole, in.Address, in.Version,
 		in.ActiveSessions, in.MaxSessions, in.CPUPercent, in.MemPercent,
-		nullIfEmpty(in.LastError)))
+		nullIfEmpty(in.LastError), joinIPs(in.LocalIPs), in.LocalIPs != nil))
 	if err != nil {
 		return nil, fmt.Errorf("写入节点心跳失败: %w", err)
 	}
@@ -208,13 +212,45 @@ func (r *NodeRepo) CountByRole(ctx context.Context) (map[string]int, error) {
 func scanNode(row pgx.Row) (*model.Node, error) {
 	var n model.Node
 	var heartbeat *time.Time
+	var localIPs string
 	err := row.Scan(&n.NodeID, &n.NodeName, &n.NodeRole, &n.Address, &n.Version,
 		&n.AdminState, &n.Weight, &n.MaxSessions, &n.ActiveSessions,
-		&n.CPUPercent, &n.MemPercent, &heartbeat, &n.LastError,
+		&n.CPUPercent, &n.MemPercent, &heartbeat, &n.LastError, &localIPs,
 		&n.RegisteredAt, &n.UpdateTime)
 	if err != nil {
 		return nil, err
 	}
 	n.LastHeartbeatAt = heartbeat
+	n.LocalIPs = splitIPs(localIPs)
 	return &n, nil
+}
+
+func joinIPs(ips []string) string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			out = append(out, ip)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+func splitIPs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

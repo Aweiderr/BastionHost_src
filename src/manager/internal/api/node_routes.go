@@ -67,7 +67,7 @@ func (s *Server) handleSetNodeState(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	view, err := s.node.SetState(r.Context(), r.PathValue("id"), req.State)
+	view, err := s.node.SetState(r.Context(), r.PathValue("id"), req.State, operatorFrom(r))
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -109,7 +109,7 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.node.Remove(r.Context(), id); err != nil {
+	if err := s.node.Remove(r.Context(), id, operatorFrom(r)); err != nil {
 		writeServiceError(w, err)
 		return
 	}

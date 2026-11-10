@@ -5,11 +5,11 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
-import { listOpsAssets, type OpsAsset } from '@/api/ops'
+import { assignOpsSession, listOpsAssets, type OpsAsset } from '@/api/ops'
 import CredentialDialog from '@/components/CredentialDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import { buildWebsshUrl, PROTOCOL_MAP, dictLabel } from '@/utils/constants'
+import { buildWebsshUrl, preferredSocketUrl, schedulerUnavailable, PROTOCOL_MAP, dictLabel } from '@/utils/constants'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { isOracleProtocol } from '@/utils/oracleConnect'
 
@@ -37,6 +37,8 @@ interface TermTab {
   credentialMaxAttempts: number
   credentialReason: string
   credentialSubmitting: boolean
+  socketUrl?: string
+  redirects?: number
 }
 
 interface TabRuntime {
@@ -174,7 +176,7 @@ function bindHost(key: string, el: Element | null): void {
   }
 }
 
-function connectTab(key: string): void {
+function connectTab(key: string, followRedirect = false): void {
   const tab = tabByKey(key)
   const rt = runtimes.get(key)
   if (!tab || !rt) return
@@ -220,9 +222,43 @@ function connectTab(key: string): void {
     /* 忽略 */
   }
 
+  if (!followRedirect) {
+    tab.socketUrl = ''
+    tab.redirects = 0
+  }
+  void openTerminalSocket(key, tab.socketUrl || '')
+}
+
+async function openTerminalSocket(key: string, preset: string): Promise<void> {
+  const tab = tabByKey(key)
+  const rt = runtimes.get(key)
+  if (!tab || !rt) return
+  let url = preset
+  if (!url) {
+    try {
+      const assigned = await assignOpsSession({
+        asset_id: tab.assetId,
+        account_id: tab.accountId || undefined,
+        protocol: tab.protocol || 'ssh',
+        client_type: 'web',
+      })
+      url = preferredSocketUrl(assigned.webssh_url, buildWebsshUrl())
+    } catch (err) {
+      if (!schedulerUnavailable(err)) {
+        const message = err instanceof Error && err.message ? err.message : '没有可连接的代理节点'
+        tab.status = 'error'
+        tab.statusText = '无法分配'
+        tab.errorText = message
+        rt.term.writeln(`\r\n\x1b[31m${message}\x1b[0m`)
+        return
+      }
+      url = buildWebsshUrl()
+    }
+    tab.socketUrl = url
+  }
   let ws: WebSocket
   try {
-    ws = new WebSocket(buildWebsshUrl())
+    ws = new WebSocket(url)
   } catch {
     tab.status = 'error'
     tab.statusText = '连接失败'
@@ -293,6 +329,8 @@ function handleControlMessage(key: string, raw: string): void {
     account_name?: string
     attempt?: number
     max_attempts?: number
+    webssh_url?: string
+    webdesktop_url?: string
   }
   try {
     payload = JSON.parse(raw)
@@ -326,6 +364,28 @@ function handleControlMessage(key: string, raw: string): void {
       tab.statusText = '等待输入口令'
       activeKey.value = key
       break
+    case 'redirect': {
+      const next = preferredSocketUrl(payload.webssh_url, '')
+      const hops = tab.redirects ?? 0
+      if (next && hops < 2) {
+        tab.redirects = hops + 1
+        tab.socketUrl = next
+        rt.term.writeln('\r\n\x1b[38;5;244m正在改连分配的代理节点…\x1b[0m')
+        if (rt.ws) {
+          const current = rt.ws
+          rt.ws = null
+          current.close()
+        }
+        void openTerminalSocket(key, next)
+        return
+      }
+      closeCredential(tab)
+      tab.errorText = payload.message || '没有可连接的代理节点'
+      tab.status = 'error'
+      tab.statusText = '连接失败'
+      rt.term.writeln(`\r\n\x1b[31m${tab.errorText}\x1b[0m`)
+      break
+    }
     case 'error':
       closeCredential(tab)
       tab.errorText = payload.message || '会话建立失败'

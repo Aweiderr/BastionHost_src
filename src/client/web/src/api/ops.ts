@@ -81,6 +81,39 @@ export interface SessionKillResult {
   message: string
 }
 
+/** 管理面按节点健康和负载分配的新会话落点。direct 为 true 时仍用当前页面所在主机。 */
+export interface SessionAssignment {
+  direct: boolean
+  accept_here?: boolean
+  same_node?: boolean
+  redirect?: boolean
+  node_id?: string
+  address?: string
+  host?: string
+  ssh_addr?: string
+  webssh_url?: string
+  webdesktop_url?: string
+  message?: string
+}
+
+/**
+ * 在建立 WebSocket 之前询问该连哪台代理。
+ * 默认静默：没有健康节点时由会话页自己展示，避免再弹一条全局提示。
+ * 网络故障和 5xx 才由调用方回退到本机入口。
+ */
+export function assignOpsSession(body: {
+  asset_id: number
+  account_id?: number
+  protocol: string
+  client_type?: string
+}) {
+  return request<SessionAssignment>('/ops/sessions/assign', {
+    method: 'POST',
+    body,
+    silent: true,
+  })
+}
+
 /** 在线会话列表。服务端忽略 status，只返回进行中的会话。 */
 export function listLiveSessions(query: LiveSessionQuery = {}, silent = false) {
   return request<PageResult<LiveSession>>('/ops/sessions/live', {

@@ -253,6 +253,19 @@ func (r *ClusterRepo) UpdateMember(ctx context.Context, clusterID, memberID int6
 	return nil
 }
 
+// MemberByID 按集群与成员主键查询。不存在时返回 (nil, nil)。
+func (r *ClusterRepo) MemberByID(ctx context.Context, clusterID, memberID int64) (*model.ClusterMember, error) {
+	q := `SELECT ` + memberColumns + ` FROM sys_cluster_member WHERE cluster_id = $1 AND member_id = $2`
+	m, err := scanMember(r.pool.QueryRow(ctx, q, clusterID, memberID))
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询集群成员失败: %w", err)
+	}
+	return m, nil
+}
+
 // MemberByIP 按设备 IP 查成员（心跳按 IP 关联集群归属）。
 func (r *ClusterRepo) MemberByIP(ctx context.Context, ip string) (*model.ClusterMember, error) {
 	q := `SELECT ` + memberColumns + ` FROM sys_cluster_member WHERE device_ip = $1`

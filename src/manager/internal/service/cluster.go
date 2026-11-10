@@ -28,12 +28,33 @@ import (
 // 集群成员只能由运维录入：自注册说明不了"谁应该在一起"，
 // 同一个管理服务下面往往还挂着测试机、备用机，自动成团等于替运维做判断。
 type ClusterService struct {
-	clusters *repo.ClusterRepo
+	clusters clusterStore
 	configs  *repo.ConfigRepo
+	oplog    opLogWriter
 	http     *http.Client
 	// mu 串行化探测：周期探测与"立即探测"叠加时，
 	// 同一台设备会被并发打两次，日志与状态更新都会互相打架
 	mu sync.Mutex
+}
+
+// clusterStore 是集群仓储。*repo.ClusterRepo 满足它。
+type clusterStore interface {
+	Create(ctx context.Context, c *model.Cluster, members []repo.MemberInput) error
+	List(ctx context.Context) ([]*model.Cluster, error)
+	Get(ctx context.Context, clusterID int64) (*model.Cluster, error)
+	Update(ctx context.Context, clusterID int64, name, description, vipAddr string) error
+	Delete(ctx context.Context, clusterID int64) error
+	Members(ctx context.Context, clusterID int64) ([]*model.ClusterMember, error)
+	AddMembers(ctx context.Context, clusterID int64, members []repo.MemberInput) error
+	RemoveMember(ctx context.Context, clusterID, memberID int64) error
+	SetMemberState(ctx context.Context, clusterID, memberID int64, state string) error
+	UpdateMember(ctx context.Context, clusterID, memberID int64, name *string, weight, maxSessions *int) error
+	MemberByIP(ctx context.Context, ip string) (*model.ClusterMember, error)
+	MemberByID(ctx context.Context, clusterID, memberID int64) (*model.ClusterMember, error)
+	SaveProbe(ctx context.Context, memberID int64, res repo.ProbeResult) error
+	RecordFailover(ctx context.Context, ev *model.ClusterFailover) error
+	ListFailovers(ctx context.Context, clusterID int64, limit int) ([]*model.ClusterFailover, error)
+	LastFailovers(ctx context.Context) (map[int64]*model.ClusterFailover, error)
 }
 
 // NewClusterService 创建集群服务。
@@ -45,6 +66,14 @@ func NewClusterService(clusters *repo.ClusterRepo, configs *repo.ConfigRepo) *Cl
 		// 一个 client 要服务多台设备，固定超时会在慢设备上误判
 		http: &http.Client{},
 	}
+}
+
+// SetOperationLog 注入操作日志。成员停用、维护与摘除会写入 audit_operation_log。
+func (s *ClusterService) SetOperationLog(log opLogWriter) {
+	if s == nil {
+		return
+	}
+	s.oplog = log
 }
 
 // 默认值，与迁移中的出厂配置保持一致。
@@ -68,10 +97,10 @@ type CreateClusterInput struct {
 // ClusterView 是面向界面的集群视图。
 type ClusterView struct {
 	model.Cluster
-	MemberCount    int    `json:"member_count"`
-	OnlineCount    int    `json:"online_count"`
-	AcceptingCount int    `json:"accepting_count"`
-	ActiveSessions int    `json:"active_sessions"`
+	MemberCount    int `json:"member_count"`
+	OnlineCount    int `json:"online_count"`
+	AcceptingCount int `json:"accepting_count"`
+	ActiveSessions int `json:"active_sessions"`
 	// Mode 由成员数量推定：empty / standalone / ha-pair / cluster
 	Mode     string `json:"mode"`
 	ModeText string `json:"mode_text"`
@@ -318,22 +347,90 @@ func (s *ClusterService) AddMembers(ctx context.Context, clusterID int64,
 	return s.Get(ctx, clusterID)
 }
 
-// RemoveMember 移除成员设备。
-func (s *ClusterService) RemoveMember(ctx context.Context, clusterID, memberID int64) error {
-	return s.clusters.RemoveMember(ctx, clusterID, memberID)
+// RemoveMember 移除成员设备，并写入操作日志。
+func (s *ClusterService) RemoveMember(ctx context.Context, clusterID, memberID int64, op OperatorContext) error {
+	before, err := s.clusters.MemberByID(ctx, clusterID, memberID)
+	if err != nil {
+		return err
+	}
+	if before == nil {
+		return fmt.Errorf("成员不存在")
+	}
+	if err := s.clusters.RemoveMember(ctx, clusterID, memberID); err != nil {
+		return err
+	}
+	s.writeMemberAudit(ctx, op, "member_remove", before, "")
+	return nil
 }
 
 // SetMemberState 设置成员运维状态。
 //
 // 维护状态会被该设备上的服务端在下一次心跳时取走（按设备 IP 关联），
 // 因此"置为维护"是真正生效的，而不只是界面上的一个标签。
-func (s *ClusterService) SetMemberState(ctx context.Context, clusterID, memberID int64, state string) error {
+// 停用、维护与恢复都写入 audit_operation_log。
+func (s *ClusterService) SetMemberState(ctx context.Context, clusterID, memberID int64, state string, op OperatorContext) error {
 	switch state {
 	case model.MemberStateActive, model.MemberStateDraining, model.MemberStateDisabled:
 	default:
 		return fmt.Errorf("不支持的状态：%s（可选 active / draining / disabled）", state)
 	}
-	return s.clusters.SetMemberState(ctx, clusterID, memberID, state)
+	before, err := s.clusters.MemberByID(ctx, clusterID, memberID)
+	if err != nil {
+		return err
+	}
+	if before == nil {
+		return fmt.Errorf("成员不存在")
+	}
+	if err := s.clusters.SetMemberState(ctx, clusterID, memberID, state); err != nil {
+		return err
+	}
+	s.writeMemberAudit(ctx, op, memberAuditAction(state), before, state)
+	return nil
+}
+
+func memberAuditAction(state string) string {
+	switch state {
+	case model.MemberStateDisabled:
+		return "member_disable"
+	case model.MemberStateDraining:
+		return "member_drain"
+	default:
+		return "member_enable"
+	}
+}
+
+func (s *ClusterService) writeMemberAudit(ctx context.Context, op OperatorContext, action string, m *model.ClusterMember, afterState string) {
+	if s == nil || s.oplog == nil || m == nil {
+		return
+	}
+	before, _ := json.Marshal(map[string]any{
+		"admin_state": m.AdminState, "device_ip": m.DeviceIP, "device_name": m.DeviceName,
+	})
+	after := ""
+	if afterState != "" {
+		raw, _ := json.Marshal(map[string]any{
+			"admin_state": afterState, "device_ip": m.DeviceIP, "device_name": m.DeviceName,
+		})
+		after = string(raw)
+	}
+	l := &model.OperationLog{
+		Module: "cluster", Action: action, TargetType: "cluster_member",
+		TargetID: fmt.Sprintf("%d", m.MemberID), TargetName: memberAuditName(m),
+		BeforeValue: string(before), AfterValue: after,
+		Result: "success", ClientIP: op.ClientIP, OperatorNameSnap: op.Username,
+	}
+	if op.UserID != 0 {
+		uid := op.UserID
+		l.OperatorID = &uid
+	}
+	_ = s.oplog.Write(ctx, l)
+}
+
+func memberAuditName(m *model.ClusterMember) string {
+	if m.DeviceName != "" {
+		return m.DeviceName
+	}
+	return m.DeviceIP
 }
 
 // UpdateMember 修改成员别名 / 权重 / 会话上限。

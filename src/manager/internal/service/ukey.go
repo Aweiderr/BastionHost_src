@@ -58,6 +58,10 @@ const (
 	cfgKeyChallengeMaxAttempt = "mfa.challenge.max_attempts"
 	cfgKeyRequireInternalCA   = "ukey.require_internal_ca"
 	cfgKeyCheckRevocation     = "ukey.check_revocation"
+	cfgKeyRevocationCRLURL    = "ukey.revocation.crl_url"
+	cfgKeyRevocationOCSPURL   = "ukey.revocation.ocsp_url"
+	cfgKeyRevocationTimeout   = "ukey.revocation.timeout_seconds"
+	cfgKeyRevocationCacheTTL  = "ukey.revocation.cache_ttl_seconds"
 	cfgKeyCARootValidityDays  = "ukey.ca.root_validity_days"
 	cfgKeyCAIssueValidityDays = "ukey.ca.issue_validity_days"
 	cfgKeyCertValidityDays    = "ukey.cert.validity_days"
@@ -109,6 +113,9 @@ var (
 	ErrUKeyCertNotRegistered = errors.New("ukey: 证书未注册")
 	// ErrUKeyCertRevoked 证书已被吊销
 	ErrUKeyCertRevoked = errors.New("ukey: 证书已被吊销")
+	// ErrUKeyRevocationUnconfirmed 外部 CA 的吊销状态无法确认
+	// （端点超时、响应签名或 nonce 无效、CRL 过期等）。开启吊销检查时登录失败。
+	ErrUKeyRevocationUnconfirmed = errors.New("ukey: 无法确认证书吊销状态")
 	// ErrUKeyCertInactive 证书状态非 active（停用等）
 	ErrUKeyCertInactive = errors.New("ukey: 证书状态不可用")
 	// ErrUKeyCertOwnerMismatch 证书绑定的用户与登录用户不一致
@@ -445,8 +452,16 @@ type UKeyAssertion struct {
 	Intermediates []*smx509.Certificate
 	// RevokedSerials 已吊销序列号 → 原因
 	RevokedSerials map[string]string
-	// CheckRevocation 是否执行吊销检查（对应 ukey.check_revocation）
+	// CheckRevocation 是否执行吊销检查（对应 ukey.check_revocation）。
+	// 为 true 时，本地吊销表和外部 CA 的 CRL/OCSP 都要查；为 false 时两者都不拦截。
 	CheckRevocation bool
+	// CertSource 证书来源（internal / external）。只有 external 才查询 CRL/OCSP。
+	CertSource string
+	// Ctx 取消外部吊销查询。为空时用 context.Background，仍受单次超时限制。
+	Ctx context.Context
+	// ExternalRevocation 外部 CA 吊销检查。CertSource=external 且 CheckRevocation 时调用。
+	// checked 为 false 表示证书和配置都没有吊销地址，调用方不得因此拒绝。
+	ExternalRevocation func(ctx context.Context, leaf *smx509.Certificate, chain, extraIssuers []*smx509.Certificate) (checked bool, err error)
 	// CurrentTime 判定时刻；零值取当前时间
 	CurrentTime time.Time
 	// ChallengeUserID 挑战所属的用户（来自挑战记录，不是客户端输入）
@@ -476,6 +491,9 @@ type UKeyAssertionResult struct {
 	CertID int64
 	// Chain 校验通过的链（叶 → 中间 CA → 根）
 	Chain []*smx509.Certificate
+	// ExternalRevocationChecked 为 true 表示本次对外部 CA 做了 CRL 或 OCSP 查询且结论为未吊销。
+	// 为 false 且证书来源是 external，表示没有可查询的吊销地址。
+	ExternalRevocationChecked bool
 }
 
 // VerifyUKeyAssertion 执行 UKey 登录断言的全部校验。
@@ -491,7 +509,9 @@ type UKeyAssertionResult struct {
 //  5. **归属与状态** —— 必须放在链校验之前：若先验链，一张没注册过的
 //     外部自签证书会得到"证书链不受信任"，而真正的原因是"没注册"，
 //     排查方向会被彻底带偏；
-//  6. 链校验 —— 确认证书确实由受信任的 CA 签发（内部 CA 或已导入的外部根）。
+//  6. 链校验 —— 确认证书确实由受信任的 CA 签发（内部 CA 或已导入的外部根）；
+//  7. 外部吊销 —— 仅 cert_source=external 且开启了吊销检查时查询 CRL/OCSP。
+//     内部证书不走这一步，避免用外部源覆盖 km_cert。
 //
 // 注意每一步都只返回"分类错误"，不直接面向客户端输出文案。
 func VerifyUKeyAssertion(in UKeyAssertion) (*UKeyAssertionResult, error) {
@@ -561,7 +581,45 @@ func VerifyUKeyAssertion(in UKeyAssertion) (*UKeyAssertionResult, error) {
 		chain = res.Chain
 	}
 
-	return &UKeyAssertionResult{Identity: identity, CertID: in.BoundCertID, Chain: chain}, nil
+	checked, rerr := in.checkExternalRevocation(leaf, chain)
+	if rerr != nil {
+		if errors.Is(rerr, cert.ErrRevoked) {
+			return nil, fmt.Errorf("%w: %v", ErrUKeyCertRevoked, rerr)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrUKeyRevocationUnconfirmed, rerr)
+	}
+
+	return &UKeyAssertionResult{
+		Identity: identity, CertID: in.BoundCertID, Chain: chain,
+		ExternalRevocationChecked: checked,
+	}, nil
+}
+
+// checkExternalRevocation 对外部 CA 证书做 CRL/OCSP。
+//
+// 内部证书直接返回。检查器为空但证书自带吊销地址时失败关闭：
+// 有地址却没人去查，等于把吊销检查悄悄关掉。
+func (in UKeyAssertion) checkExternalRevocation(leaf *smx509.Certificate, chain []*smx509.Certificate) (bool, error) {
+	if !in.CheckRevocation || in.CertSource != repo.CertSourceExternal {
+		return false, nil
+	}
+	if in.ExternalRevocation == nil {
+		if cert.HasRevocationEndpoint(leaf) {
+			return false, fmt.Errorf("%w: 证书带有 CRL/OCSP 地址，但外部吊销检查未启用", cert.ErrRevocationUnconfirmed)
+		}
+		return false, nil
+	}
+	ctx := in.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var extra []*smx509.Certificate
+	if len(chain) == 0 {
+		extra = make([]*smx509.Certificate, 0, len(in.Intermediates)+len(in.Roots))
+		extra = append(extra, in.Intermediates...)
+		extra = append(extra, in.Roots...)
+	}
+	return in.ExternalRevocation(ctx, leaf, chain, extra)
 }
 
 // isSM2Curve 判断曲线是否为 SM2 推荐曲线。
@@ -589,6 +647,8 @@ type UKeyService struct {
 	keyRepo    *repo.KeyRepo
 	oplog      *repo.OperationLogRepo
 	loginLog   *repo.LoginLogRepo
+	// revocation 进程内 CRL/OCSP 缓存。只服务外部 CA 证书。
+	revocation *revocationChecker
 }
 
 // NewUKeyService 创建 UKey 服务。
@@ -597,6 +657,7 @@ func NewUKeyService(certs *repo.CertRepo, challenges *repo.ChallengeRepo, users 
 	return &UKeyService{
 		certs: certs, challenges: challenges, users: users,
 		configs: configs, prov: prov, oplog: oplog,
+		revocation: newRevocationChecker(),
 	}
 }
 
@@ -828,8 +889,10 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 		RevokedSerials:  revoked,
 		CheckRevocation: s.cfgBool(ctx, cfgKeyCheckRevocation, true),
 		ChallengeUserID: c.UserID,
+		Ctx:             ctx,
 	}
 	if bound != nil {
+		assertion.CertSource = bound.CertSource
 		assertion.BoundCertID = bound.CertID
 		assertion.BoundStatus = bound.Status
 		if bound.OwnerID != nil {
@@ -848,6 +911,9 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 				"cert_id", bound.CertID, "serial", bound.SerialNumber, "username", c.Username)
 		}
 	}
+	if assertion.CheckRevocation && assertion.CertSource == repo.CertSourceExternal {
+		assertion.ExternalRevocation = s.externalRevocation(ctx)
+	}
 	if !assertion.SkipChainCheck && !s.cfgBool(ctx, cfgKeyRequireInternalCA, true) && len(roots) == 0 {
 		// 兜底：配置明确不要求内部 CA 且一个信任锚都没有时，同样跳过链校验
 		assertion.SkipChainCheck = true
@@ -857,6 +923,10 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 	if verr != nil {
 		s.onUKeyLoginFail(ctx, c, verr)
 		return nil, nil, ErrUKeyLoginRejected
+	}
+	if assertion.CertSource == repo.CertSourceExternal && assertion.CheckRevocation && !res.ExternalRevocationChecked {
+		slog.Warn("外部 CA 证书没有 CRL/OCSP 地址，且未配置 ukey.revocation.crl_url / ocsp_url，本次登录未向外部 CA 查询吊销状态",
+			"username", c.Username, "serial", res.Identity.SerialNumber, "cert_id", res.CertID)
 	}
 
 	// 用户状态与二次认证类型必须在**消费挑战之前**再核一遍：
@@ -2160,6 +2230,13 @@ func (s *UKeyService) cfgBool(ctx context.Context, key string, def bool) bool {
 		return def
 	}
 	return s.configs.GetBool(ctx, 0, key, def)
+}
+
+func (s *UKeyService) cfgString(ctx context.Context, key, def string) string {
+	if s == nil || s.configs == nil {
+		return def
+	}
+	return s.configs.GetString(ctx, 0, key, def)
 }
 
 // writeOpLog 写管理操作日志（失败不阻断业务）。

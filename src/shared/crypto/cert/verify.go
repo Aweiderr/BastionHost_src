@@ -20,11 +20,10 @@ type VerifyOptions struct {
 	KeyUsages []smx509.ExtKeyUsage
 	// RevokedSerials 已吊销证书的序列号（归一化十六进制）到吊销原因的映射。
 	//
-	// 为什么不在这里做 CRL/OCSP：内部 CA 自签自发时，本系统的 km_cert 状态
-	// 就是权威源，引入 CRL 等于把权威源复制一份并承担同步失败的风险。
-	// 将来对接外部 CA 时，把 CRL/OCSP 的结果汇总进这个 map 即可，
-	// 但那时必须验 CRL 签发者与 nextUpdate、验 OCSP 响应签名与 nonce
-	// ——参考实现的 OCSP 路径恰恰把响应签名校验整段注释掉了。
+	// 这里只认调用方给出的本地吊销表。内部 CA 自签自发时，km_cert 就是权威源，
+	// 不在校验函数里再拉一份 CRL。外部 CA 的 CRL/OCSP 也不能塞进这个 map：
+	// map 里没有的序列号会被当成未吊销，而"端点不可达 / 响应验不过"必须失败关闭。
+	// 登录路径在链校验通过之后单独调用 VerifyCRL / VerifyOCSPResponse。
 	RevokedSerials map[string]string
 	// CheckRevocation 是否执行吊销检查
 	CheckRevocation bool

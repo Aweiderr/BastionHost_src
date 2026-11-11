@@ -12,9 +12,11 @@
 //     Provider.KeySign。参考实现把 CA 私钥经 SM4 主密钥双重加密后直接存库，
 //     脱库即等于 CA 沦陷，可伪造任意用户证书。
 //
-//  3. **本包不做吊销判定**：内部 CA 自签自发，km_cert 的状态就是权威源，
-//     调用方把已吊销的序列号传进来即可。这避免了在此再维护一份 CRL 缓存——
-//     参考实现的 OCSP 路径把响应签名校验整段注释掉了，等于只解析状态码不验签。
+//  3. **本地吊销表由调用方传入**：内部 CA 自签自发，km_cert 的状态就是权威源，
+//     调用方把已吊销的序列号传进来即可。外部 CA 的 CRL/OCSP 在 revocation.go
+//     与 ocsp.go：必须验 CRL 签发者与 nextUpdate、验 OCSP 响应签名与 nonce。
+//     参考实现把 OCSP 响应签名校验整段注释掉了，等于只解析状态码不验签，
+//     这里不沿用。拉不到或验不过由调用方失败关闭，不能当成"未吊销"。
 package cert
 
 import (
@@ -47,6 +49,14 @@ var (
 	ErrChainInvalid = errors.New("cert: 证书链校验失败")
 	// ErrRevoked 证书已被吊销
 	ErrRevoked = errors.New("cert: 证书已被吊销")
+	// ErrRevocationUnconfirmed 吊销源存在，但本次无法确认状态
+	// （过期/签名无效/状态 unknown，或端点不可用且没有其它可用源）。
+	// 调用方在开启吊销检查时应拒绝登录，不要把这个错误当成"未吊销"。
+	ErrRevocationUnconfirmed = errors.New("cert: 无法确认吊销状态")
+	// ErrRevocationUnavailable 吊销端点没有给出可解析的响应
+	// （网络失败、HTTP 非成功、响应不是 CRL/OCSP）。
+	// 调用方可以改试下一个地址；全部不可用时再失败关闭。
+	ErrRevocationUnavailable = errors.New("cert: 吊销端点不可用")
 )
 
 // 证书公钥算法标识（CAOptions.Algorithm 与 Identity.KeyAlgorithm 的取值）。

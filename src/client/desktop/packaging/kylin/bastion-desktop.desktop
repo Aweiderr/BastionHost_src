@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=堡垒机运维客户端
+GenericName=运维客户端
+Comment=连接堡垒机管理服务，在本机进行运维
+Exec=/opt/bastion-desktop/bastion-desktop
+Icon=computer
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=true

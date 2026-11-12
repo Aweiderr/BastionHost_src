@@ -164,9 +164,9 @@
   `shared/internalauth`（HMAC-SM3 签名）、`manager/internal/managerclient`（接口客户端）。
 
 - [ ] **桌面客户端：Linux（麒麟）构件与打包**
-  Windows 版已完成并实测通过（见下方"已完成"）。Linux 版需在 Linux 上编译
-  （CGO 链接 webkit2gtk），麒麟源里已有 `webkit2gtk3-devel`；
-  还需产出 deb/rpm 安装包与国密签名（文档要求"安装包国密签名"）。
+  可重复的构建和打包脚本已放在 `client/desktop/packaging/kylin/`（amd64 / arm64 的 tar.gz，
+  机器上有 rpmbuild 或 dpkg-deb 时再打 rpm/deb）。必须在麒麟或装有 webkit2gtk 4.0
+  开发包的 Linux 上编译，仓库不提交二进制。安装包国密签名仍未做。
 
 - [ ] **桌面客户端：准入许可闭环**
   当前客户端已具备**设备指纹采集与展示**（`internal/device`，SM3 归一化，
@@ -186,9 +186,11 @@
   生产发布前需确认：保留（受控/展台场景）还是仅在调试构建中编译进去。
 
 - [ ] **桌面客户端：本地能力补全**
-  文档规划但尚未实现：调用本地 RDP/SFTP 工具、本地端口转发、
-  托盘常驻与最小化、多标签会话（当前 Go 侧已按 key 支持多会话，界面为单标签）、
-  断线自动重连。
+  已在桌面客户端做完：系统托盘（关闭窗口留在托盘，可打开主窗口或退出）、
+  终端和图形会话意外断开后自动重连一次并可再手动重连、
+  本机 SFTP（需 can_file，连分配到的 SSH 网关）以及本机 RDP/VNC 客户端
+  （只填堡垒机地址，不直连资产，不做磁盘映射）。
+  仍未做：本地端口转发。多标签会话界面已经按标签打开。
 
 - [x] **文件传输（SFTP）** —— 2026-11-05：SSH `subsystem=sftp` 代理到目标；`can_file` 为假时直接拒绝。节点可用 `BASTION_SFTP_UPLOAD` / `BASTION_SFTP_DOWNLOAD`（allow|deny）、`BASTION_SFTP_MAX_BYTES`、`BASTION_SFTP_DENY_EXT` 再限制方向、大小和扩展名。允许和拒绝都写入 `ops_session_file`，会话详情可看。登录名 `用户名@资产#账号`。不做 Web 文件树，也不做磁盘映射。
 

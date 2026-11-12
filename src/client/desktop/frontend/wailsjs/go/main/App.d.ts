@@ -49,3 +49,15 @@ export function VerifyMFA(arg1:string,arg2:string):Promise<coreapi.LoginResult>;
 export function ResendMFA(arg1:string):Promise<void>;
 
 export function ChangePassword(arg1:string,arg2:string):Promise<void>;
+
+export function LaunchLocalTool(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:string,arg7:number):Promise<main.LocalLaunchResult>;
+
+export function ReconnectSession(arg1:string):Promise<void>;
+
+export function ReconnectDesktopSession(arg1:string):Promise<void>;
+
+export function ReconnectManager():Promise<string>;
+
+export function TrayReady():Promise<boolean>;
+
+export function HideToTray():Promise<void>;

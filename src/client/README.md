@@ -8,7 +8,7 @@ macOS 客户端与移动端不纳入范围。
 | 目录 | 内容 | 技术栈 | 状态 |
 | --- | --- | --- | --- |
 | `web/` | Web 客户端与管理界面 | Vue 3 + TypeScript + Vite + xterm.js | **已完成**（15 条路由，含网络配置与集群管理；构建产物由管理服务托管） |
-| `desktop/` | Windows / Linux 桌面客户端 | **Wails v2（Go + 系统 WebView）** | **Windows 版已完成**（登录、设备指纹、资产、SSH 终端、会话回看；Linux 版待编译验证） |
+| `desktop/` | Windows / Linux 桌面客户端 | **Wails v2（Go + 系统 WebView）** | **Windows 版已完成**。麒麟/Linux 的构建脚本在 `desktop/packaging/kylin/`，安装包需在对应系统上编译 |
 
 ## 桌面客户端技术选型（Wails v2）
 

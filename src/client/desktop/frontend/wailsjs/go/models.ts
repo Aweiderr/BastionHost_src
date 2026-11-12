@@ -180,6 +180,30 @@ export namespace device {
 
 export namespace main {
 	
+	export class LocalLaunchResult {
+	    protocol: string;
+	    tool: string;
+	    command: string;
+	    target: string;
+	    login: string;
+	    message: string;
+	    started: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new LocalLaunchResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.protocol = source["protocol"];
+	        this.tool = source["tool"];
+	        this.command = source["command"];
+	        this.target = source["target"];
+	        this.login = source["login"];
+	        this.message = source["message"];
+	        this.started = source["started"];
+	    }
+	}
 	export class SessionBrief {
 	    key: string;
 	    asset_id: number;

@@ -6,11 +6,15 @@ import LoginView from './views/LoginView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
 import SessionsView from './views/SessionsView.vue'
 import DeviceView from './views/DeviceView.vue'
-import { GetCoreURL, GetDeviceInfo, GetProfile, Logout, TryAutoLogin } from '../wailsjs/go/main/App'
+import { GetCoreURL, GetDeviceInfo, GetProfile, HideToTray, Logout, ReconnectManager, TrayReady, TryAutoLogin } from '../wailsjs/go/main/App'
 import { EventsOff, EventsOn } from '../wailsjs/runtime/runtime'
 
 const ready = ref(false)
 const toastVisible = ref(false)
+const trayReady = ref(false)
+const coreDown = ref(false)
+const coreText = ref('')
+const coreBusy = ref(false)
 
 const navItems = [
   { key: 'workbench', label: '运维工作台', icon: '▶' },
@@ -40,6 +44,29 @@ function onKicked(payload: unknown) {
 
 onMounted(async () => {
   EventsOn('auth:kicked', onKicked)
+  EventsOn('tray:ready', (payload: any) => {
+    trayReady.value = payload?.ok === true
+    if (payload?.ok === false && payload?.message) notify(String(payload.message), 'info')
+  })
+  EventsOn('core:unreachable', (payload: any) => {
+    coreDown.value = true
+    coreText.value = String(payload?.message || '与管理服务的连接已中断')
+  })
+  EventsOn('core:reconnect-failed', (payload: any) => {
+    coreDown.value = true
+    coreText.value = String(payload?.message || '重新连接管理服务失败')
+    notify(coreText.value, 'err')
+  })
+  EventsOn('core:restored', (payload: any) => {
+    coreDown.value = false
+    const text = String(payload?.message || '已重新连上管理服务')
+    notify(text, 'ok')
+  })
+  try {
+    trayReady.value = await TrayReady()
+  } catch {
+    trayReady.value = false
+  }
   try {
     state.coreURL = await GetCoreURL()
     state.device = (await GetDeviceInfo()) as unknown as DeviceInfo
@@ -67,7 +94,35 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   EventsOff('auth:kicked')
+  EventsOff('tray:ready')
+  EventsOff('core:unreachable')
+  EventsOff('core:reconnect-failed')
+  EventsOff('core:restored')
 })
+
+async function hideToTray() {
+  try {
+    await HideToTray()
+  } catch (e: any) {
+    notify(String(e?.message || e), 'err')
+  }
+}
+
+async function reconnectCore() {
+  if (coreBusy.value) return
+  coreBusy.value = true
+  try {
+    const text = await ReconnectManager()
+    coreDown.value = false
+    notify(String(text || '已重新连上管理服务'), 'ok')
+  } catch (e: any) {
+    coreDown.value = true
+    coreText.value = String(e?.message || e)
+    notify(coreText.value, 'err')
+  } finally {
+    coreBusy.value = false
+  }
+}
 
 async function doLogout() {
   try {
@@ -140,10 +195,15 @@ watch(
             {{ state.profile?.mfa_enabled ? '已启用动态令牌' : '未启用动态令牌' }}
           </span>
         </div>
+        <div v-if="trayReady" style="margin-top: 8px">关闭窗口会留在托盘，退出请用托盘菜单。</div>
       </div>
     </aside>
 
     <div class="main">
+      <div v-if="coreDown" class="core-banner">
+        <span>{{ coreText }}</span>
+        <button class="primary sm" :disabled="coreBusy" @click="reconnectCore">重新连接</button>
+      </div>
       <header class="topbar">
         <div class="title">
           {{ navItems.find((n) => n.key === state.view)?.label }}
@@ -151,6 +211,7 @@ watch(
         <div class="user">
           <span>{{ state.profile?.display_name || state.profile?.username }}</span>
           <span class="tag brand">{{ (state.profile?.roles || []).join(' / ') }}</span>
+          <button class="ghost sm" :disabled="!trayReady" @click="hideToTray">最小化到托盘</button>
           <button class="ghost sm" @click="doLogout">退出登录</button>
         </div>
       </header>

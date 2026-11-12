@@ -24,22 +24,24 @@ To build a redistributable, production mode package, use `wails build`.
 （文件名来自 `wails.json` 的 `outputfilename`）。云端构建环境不编译这个 Windows 程序，
 需要在 Windows 机器上编好再拷到管理服务。
 
-管理服务只按固定路径提供这一份文件，不做自动更新。登录页「下载客户端」的地址是：
+管理服务按固定文件名提供安装包，不做自动更新。登录页同时列出 Windows、麒麟 RPM 和麒麟 tar.gz，未登录也可以下载。Windows 这一条的地址仍是：
 
 `http://<管理服务主机>:<端口>/<BASTION_WEB_PREFIX>/downloads/bastion-desktop.exe`
 
-前缀默认 `bastion`，即 `/bastion/downloads/bastion-desktop.exe`。未登录也可以下载。
+前缀默认 `bastion`，即 `/bastion/downloads/bastion-desktop.exe`。
 
 | 环境 | 把 `bastion-desktop.exe` 放到 |
 | --- | --- |
 | 生产（systemd，`WorkingDirectory=/opt/bastion`） | `/opt/bastion/downloads/bastion-desktop.exe` |
 | 本地（在 `src/` 启动 manager，且未改 `BASTION_DOWNLOAD_DIR`） | `src/downloads/bastion-desktop.exe` |
 
+麒麟包使用同样的目录，公开文件名是 `bastion-desktop-kylin-x86_64.rpm` 和 `bastion-desktop-linux-x86_64.tar.gz`（不含版本号）。打包脚本生成的带版本文件要拷贝或在该目录内符号链接成这两个名字，见 `packaging/kylin/README.md`。
+
 目录由 `BASTION_DOWNLOAD_DIR` 指定，默认 `./downloads`（相对管理服务的工作目录）。
-文件名必须是 `bastion-desktop.exe`。放好之后不必重启管理服务；目录里没有该文件时，
+Windows 文件名必须是 `bastion-desktop.exe`。放好之后不必重启管理服务；目录里没有该文件时，
 这个地址返回 JSON 404，而不是登录页 HTML。
 
-`wails build -nsis` 生成的安装包不是当前按钮的默认文件。若要改发安装包，
+`wails build -nsis` 生成的安装包不是当前 Windows 按钮的默认文件。若要改发安装包，
 仍将安装程序命名为 `bastion-desktop.exe` 后放到上表路径。
 
 ## 管理服务地址

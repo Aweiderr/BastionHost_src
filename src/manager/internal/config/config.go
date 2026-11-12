@@ -38,10 +38,14 @@ type Config struct {
 	WebPrefix string
 	// DownloadDir 客户端安装包目录，经 <前缀>/downloads/ 对外提供下载（登录页无需登录）。
 	//
-	// 登录页「下载客户端」固定请求 <前缀>/downloads/bastion-desktop.exe。
-	// 在 Windows 上于 client/desktop 执行 wails build 后，把
-	// build/bin/bastion-desktop.exe 拷到本目录，文件名必须保持 bastion-desktop.exe。
-	// 生产环境工作目录是 /opt/bastion 时，放置路径为 /opt/bastion/downloads/bastion-desktop.exe。
+	// 登录页按稳定文件名取包，目录里放什么就提供什么，服务不解析版本号：
+	//   <前缀>/downloads/bastion-desktop.exe
+	//   <前缀>/downloads/bastion-desktop-kylin-x86_64.rpm
+	//   <前缀>/downloads/bastion-desktop-linux-x86_64.tar.gz
+	// Windows 在 client/desktop 执行 wails build 后，把 build/bin/bastion-desktop.exe
+	// 拷到本目录，文件名必须保持 bastion-desktop.exe。
+	// 麒麟打包产物带版本，需在本目录内拷贝或符号链接成上面两个稳定名字。
+	// 生产环境工作目录是 /opt/bastion 时，放置路径为 /opt/bastion/downloads/。
 	// 文件可在服务启动之后再放入，无需重启。本服务只做静态分发，不做自动更新。
 	DownloadDir string
 	// Alert 高危命令告警的外部通知。地址只来自环境变量，不入库。

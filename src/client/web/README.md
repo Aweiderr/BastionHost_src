@@ -15,21 +15,33 @@ npm run preview  # 预览构建产物
 - WebSSH 直连：`ws://<当前页面主机名>:8081/api/v1/webssh`，不走代理（见 `src/utils/constants.ts` 的 `buildWebsshUrl`）
 - RDP/VNC 画面：同一主机的 `8081`，路径 `/api/v1/webdesktop`（`buildWebdesktopUrl`）
 
-## 下载 Windows 桌面客户端
+## 下载桌面客户端
 
-登录页「下载客户端」是一个链接，地址为：
+登录页按操作系统和格式分别给出链接（前缀与 `vite.config.ts` 的 `base`、管理服务的 `BASTION_WEB_PREFIX` 一致）：
 
-`/bastion/downloads/bastion-desktop.exe`
+| 按钮 | 稳定地址 |
+| --- | --- |
+| Windows 客户端（.exe） | `/bastion/downloads/bastion-desktop.exe` |
+| 麒麟客户端（RPM · x86_64） | `/bastion/downloads/bastion-desktop-kylin-x86_64.rpm` |
+| 麒麟客户端（tar.gz · x86_64） | `/bastion/downloads/bastion-desktop-linux-x86_64.tar.gz` |
 
-（前缀与 `vite.config.ts` 的 `base`、管理服务的 `BASTION_WEB_PREFIX` 一致。）
+三份链接都显示。浏览器看起来像 Windows 时，Windows 按钮标「推荐」；像麒麟或其它 Linux 桌面时，RPM 标「推荐」。tar.gz 是麒麟的备选。手机和不认识的系统不标推荐。
 
-管理服务从 `BASTION_DOWNLOAD_DIR` 读这个文件，默认是进程工作目录下的 `downloads/`。
-生产环境工作目录为 `/opt/bastion` 时，放置路径是：
+管理服务从 `BASTION_DOWNLOAD_DIR` 读这些文件，默认是进程工作目录下的 `downloads/`。
+生产环境工作目录为 `/opt/bastion` 时，放置路径是 `/opt/bastion/downloads/` 下的上述三个稳定文件名。
 
-`/opt/bastion/downloads/bastion-desktop.exe`
+公开文件名不含版本号。打包产物是带版本的，例如已经放在下载目录里的
+`bastion-desktop-0.1.0-1.ky10.x86_64.rpm` 和 `bastion-desktop-0.1.0-linux-x86_64.tar.gz`。
+在同一目录里拷贝或做相对符号链接（目标不能跳出该目录）：
 
-在 Windows 上进入 `client/desktop` 执行 `wails build`，把 `build/bin/bastion-desktop.exe`
-拷到该目录，文件名不要改。放好后无需重启。未放置时该地址返回 JSON 404。
+```bash
+cd /opt/bastion/downloads
+ln -sfn bastion-desktop-0.1.0-1.ky10.x86_64.rpm bastion-desktop-kylin-x86_64.rpm
+ln -sfn bastion-desktop-0.1.0-linux-x86_64.tar.gz bastion-desktop-linux-x86_64.tar.gz
+```
+
+Windows 仍把 `wails build` 得到的 `build/bin/bastion-desktop.exe` 按原名拷入。
+原来的 `/bastion/downloads/bastion-desktop.exe` 保持不变。放好后无需重启。未放置时该地址返回 JSON 404。
 登录前即可下载。这里没有自动更新。
 
 开发服务器把 `/bastion/downloads` 代理到 `http://127.0.0.1:8080`，

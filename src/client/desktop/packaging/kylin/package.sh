@@ -7,7 +7,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 BIN="${ROOT}/build/bin/bastion-desktop"
 OUT="${ROOT}/build/dist"
-VERSION="${BASTION_DESKTOP_VERSION:-0.1.0}"
+# 不能叫 VERSION。后面会 source /etc/os-release，麒麟上 VERSION="V10 (Lance)"，
+# 会把软件版本盖掉，rpm 的 Version 只能是一个词。
+PKG_VERSION="${BASTION_DESKTOP_VERSION:-0.1.0}"
 
 if [[ ! -x "$BIN" ]]; then
   echo "没有可执行文件 ${BIN}。" >&2
@@ -34,7 +36,7 @@ install -m 0644 "${HERE}/bastion-desktop.desktop" "${stage}/usr/share/applicatio
 install -m 0755 "${HERE}/install.sh" "${stage}/install.sh"
 cp "${HERE}/bastion-desktop.desktop" "${stage}/bastion-desktop.desktop"
 
-tarname="bastion-desktop-${VERSION}-linux-${arch}.tar.gz"
+tarname="bastion-desktop-${PKG_VERSION}-linux-${arch}.tar.gz"
 tar -C "$stage" -czf "${OUT}/${tarname}" \
   opt/bastion-desktop/bastion-desktop \
   usr/share/applications/bastion-desktop.desktop \
@@ -60,15 +62,15 @@ if command -v dpkg-deb >/dev/null 2>&1 && [[ -n "$debarch" ]]; then
   else
     cat > "${debroot}/DEBIAN/control" <<EOF
 Package: bastion-desktop
-Version: ${VERSION}
+Version: ${PKG_VERSION}
 Architecture: ${debarch}
 Depends: ${depends}
 Maintainer: bastion <bastion@localhost>
 Description: 堡垒机运维桌面客户端
  连接管理服务进行运维。需要系统 WebKitGTK 4.0。
 EOF
-    dpkg-deb --build "$debroot" "${OUT}/bastion-desktop_${VERSION}_${debarch}.deb"
-    echo "已生成 ${OUT}/bastion-desktop_${VERSION}_${debarch}.deb"
+    dpkg-deb --build "$debroot" "${OUT}/bastion-desktop_${PKG_VERSION}_${debarch}.deb"
+    echo "已生成 ${OUT}/bastion-desktop_${PKG_VERSION}_${debarch}.deb"
   fi
 else
   echo "未使用 dpkg-deb（未安装，或架构不在约定内）。tar.gz 仍可安装。" >&2
@@ -81,7 +83,7 @@ if command -v rpmbuild >/dev/null 2>&1 && [[ -n "$rpmarch" ]]; then
   cp "${HERE}/bastion-desktop.desktop" "${rpmtop}/SOURCES/bastion-desktop.desktop"
   cat > "${rpmtop}/SPECS/bastion-desktop.spec" <<EOF
 Name: bastion-desktop
-Version: ${VERSION}
+Version: ${PKG_VERSION}
 Release: 1
 Summary: 堡垒机运维桌面客户端
 License: Proprietary

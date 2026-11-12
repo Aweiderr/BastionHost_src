@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test src/sessionRoute.test.ts src/utils/frame.test.ts src/utils/oracleGateway.test.ts src/utils/oracleConnect.test.ts src/utils/desktopClipboard.test.ts"
+    "test": "node --experimental-strip-types --test src/sessionRoute.test.ts src/localEntry.test.ts src/reconnectGate.test.ts src/utils/frame.test.ts src/utils/oracleGateway.test.ts src/utils/oracleConnect.test.ts src/utils/desktopClipboard.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

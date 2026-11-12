@@ -93,3 +93,27 @@ export function ResendMFA(arg1) {
 export function ChangePassword(arg1, arg2) {
   return window['go']['main']['App']['ChangePassword'](arg1, arg2);
 }
+
+export function LaunchLocalTool(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['App']['LaunchLocalTool'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+}
+
+export function ReconnectSession(arg1) {
+  return window['go']['main']['App']['ReconnectSession'](arg1);
+}
+
+export function ReconnectDesktopSession(arg1) {
+  return window['go']['main']['App']['ReconnectDesktopSession'](arg1);
+}
+
+export function ReconnectManager() {
+  return window['go']['main']['App']['ReconnectManager']();
+}
+
+export function TrayReady() {
+  return window['go']['main']['App']['TrayReady']();
+}
+
+export function HideToTray() {
+  return window['go']['main']['App']['HideToTray']();
+}

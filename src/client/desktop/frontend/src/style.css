@@ -119,6 +119,19 @@ input::placeholder { color: #64748b; }
 .topbar .title { font-size: 15px; font-weight: 600; }
 .topbar .user { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
 
+.core-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 18px;
+  background: #451a03;
+  color: #fdba74;
+  border-bottom: 1px solid #9a3412;
+  font-size: 13px;
+}
+.core-banner span { flex: 1; }
+
 .content { flex: 1; overflow: auto; padding: 18px; min-height: 0; }
 .content.flush { padding: 0; overflow: hidden; }
 

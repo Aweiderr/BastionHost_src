@@ -15,7 +15,10 @@ import (
 	"bastion.local/desktop/internal/coreapi"
 	"bastion.local/desktop/internal/desk"
 	"bastion.local/desktop/internal/device"
+	"bastion.local/desktop/internal/launch"
+	"bastion.local/desktop/internal/reconnect"
 	"bastion.local/desktop/internal/term"
+	"bastion.local/desktop/internal/tray"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -39,7 +42,19 @@ type App struct {
 	password string
 	sessions map[string]*term.Session
 	desktops map[string]*desk.Session
-	seq      int
+	sshGen   map[string]int
+	deskGen  map[string]int
+	sshMeta  map[string]sshSlot
+	deskMeta map[string]deskSlot
+	deadGen  map[string]int
+	epoch    int
+	attempts map[string]*reconnect.Attempt
+	// managerLink 管的是和管理服务之间的探测，不是某一条终端。
+	managerLink reconnect.Link
+	trayCtl     *tray.Controller
+	launchEnv   *launch.Env
+	launchStart func(launch.Plan) error
+	seq         int
 	// watchCancel 停止“是否被另一端踢下线”的轮询。
 	watchCancel context.CancelFunc
 
@@ -59,6 +74,13 @@ func NewApp(coreURL string) *App {
 		api:      coreapi.New(coreURL),
 		sessions: make(map[string]*term.Session),
 		desktops: make(map[string]*desk.Session),
+		sshGen:   map[string]int{},
+		deskGen:  map[string]int{},
+		sshMeta:  map[string]sshSlot{},
+		deskMeta: map[string]deskSlot{},
+		deadGen:  map[string]int{},
+		attempts: map[string]*reconnect.Attempt{},
+		trayCtl:  &tray.Controller{},
 	}
 	a.api.SetOnSessionEnded(a.onSessionEnded)
 	return a
@@ -72,6 +94,7 @@ func (a *App) startup(ctx context.Context) {
 		"hostname", dev.Hostname, "device_id", dev.DeviceID,
 		"board", mask(dev.BoardSerial), "disk", mask(dev.DiskSerial),
 		"warnings", len(dev.Warnings))
+	go a.runTray()
 }
 
 // deviceInfo 返回设备指纹，必要时惰性采集。
@@ -90,16 +113,7 @@ func (a *App) deviceInfo() *device.Info {
 
 func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
-	sessions := make([]*term.Session, 0, len(a.sessions))
-	for _, s := range a.sessions {
-		sessions = append(sessions, s)
-	}
-	desktops := make([]*desk.Session, 0, len(a.desktops))
-	for _, s := range a.desktops {
-		desktops = append(desktops, s)
-	}
-	a.sessions = map[string]*term.Session{}
-	a.desktops = map[string]*desk.Session{}
+	sessions, desktops := a.invalidateLiveLocked()
 	a.password = ""
 	a.mu.Unlock()
 	for _, s := range sessions {
@@ -268,16 +282,7 @@ func (a *App) Logout() error {
 // dropLocalSession 关掉本机终端并清掉内存中的用户与口令，不请求服务端。
 func (a *App) dropLocalSession() {
 	a.mu.Lock()
-	sessions := make([]*term.Session, 0, len(a.sessions))
-	for _, s := range a.sessions {
-		sessions = append(sessions, s)
-	}
-	desktops := make([]*desk.Session, 0, len(a.desktops))
-	for _, s := range a.desktops {
-		desktops = append(desktops, s)
-	}
-	a.sessions = map[string]*term.Session{}
-	a.desktops = map[string]*desk.Session{}
+	sessions, desktops := a.invalidateLiveLocked()
 	a.user = nil
 	a.password = ""
 	a.mu.Unlock()
@@ -348,6 +353,13 @@ func (a *App) watchSession(ctx context.Context) {
 			if err != nil && a.api.Token() == "" {
 				return
 			}
+			if err != nil {
+				a.noteManagerError(err)
+				continue
+			}
+			if a.managerLink.NoteHealthy() {
+				a.emit("core:restored", map[string]any{"message": "已重新连上管理服务，当前登录仍然有效"})
+			}
 		}
 	}
 }
@@ -414,83 +426,6 @@ type SessionBrief struct {
 	OpenedAt string `json:"opened_at"`
 }
 
-// OpenSession 建立到指定资产的运维会话。
-//
-// key 由前端生成并先于本调用设置好：会话一旦建立，网关会立刻推送欢迎信息，
-// 若等本方法返回后前端才拿到 key，这段首屏输出会因为 key 不匹配而被丢弃。
-//
-// assetName 用资产名（网关按名称/ID/主机地址匹配）；accountID 为 0 表示由
-// 网关自动选择可用账号。口令复用登录时保存的凭据 —— 桌面端与网关使用同一套
-// 账号体系，因此不需要二次输入（口令仅存内存）。
-func (a *App) OpenSession(key, assetName, accountName string, assetID, accountID int64, cols, rows int) (*SessionBrief, error) {
-	a.mu.Lock()
-	user, password := a.user, a.password
-	a.mu.Unlock()
-	if user == nil {
-		return nil, fmt.Errorf("尚未登录")
-	}
-	if password == "" {
-		return nil, fmt.Errorf("登录凭据已失效，请重新登录")
-	}
-	if strings.TrimSpace(assetName) == "" {
-		return nil, fmt.Errorf("未指定资产")
-	}
-	if key == "" {
-		key = fmt.Sprintf("s%d", time.Now().UnixNano())
-	}
-
-	gateway, err := a.assignedSSHGateway(assetID, accountID)
-	if err != nil {
-		return nil, err
-	}
-	login := user.Username + "@" + assetName
-
-	// 回调里用 key 区分多标签会话
-	onData := func(b []byte) {
-		runtime.EventsEmit(a.ctx, "term:data", map[string]any{
-			"key":  key,
-			"data": base64.StdEncoding.EncodeToString(b),
-		})
-	}
-	onClose := func(reason string) {
-		runtime.EventsEmit(a.ctx, "term:closed", map[string]any{"key": key, "reason": reason})
-	}
-
-	sess, err := term.Dial(a.ctx, term.Options{
-		Gateway: gateway, Login: login, Password: password,
-		Cols: cols, Rows: rows, OnData: onData, OnClose: onClose,
-	})
-	if err != nil {
-		// 分配到的节点在拨号时已经不可用：再问一次管理面，改连另一台。
-		// 管理面明确拒绝（没有健康节点）时不再改连本机。
-		alt, aerr := a.assignedSSHGateway(assetID, accountID)
-		if aerr != nil {
-			return nil, aerr
-		}
-		if alt != "" && alt != gateway {
-			sess, err = term.Dial(a.ctx, term.Options{
-				Gateway: alt, Login: login, Password: password,
-				Cols: cols, Rows: rows, OnData: onData, OnClose: onClose,
-			})
-			gateway = alt
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	brief := &SessionBrief{
-		Key: key, AssetID: assetID, Asset: assetName, Account: accountName,
-		Gateway: gateway, Login: login, OpenedAt: time.Now().Format(time.RFC3339),
-	}
-	a.mu.Lock()
-	a.sessions[key] = sess
-	a.seq++
-	a.mu.Unlock()
-	slog.Info("会话已建立", "key", key, "asset", assetName, "gateway", gateway)
-	return brief, nil
-}
-
 // WriteSession 向会话写入终端输入（base64 编码的原始字节）。
 func (a *App) WriteSession(key, dataB64 string) error {
 	sess, err := a.session(key)
@@ -506,6 +441,16 @@ func (a *App) WriteSession(key, dataB64 string) error {
 
 // ResizeSession 调整终端尺寸。
 func (a *App) ResizeSession(key string, cols, rows int) error {
+	if cols > 0 && rows > 0 {
+		a.mu.Lock()
+		a.ensureLiveLocked()
+		if slot, ok := a.sshMeta[key]; ok {
+			slot.cols = cols
+			slot.rows = rows
+			a.sshMeta[key] = slot
+		}
+		a.mu.Unlock()
+	}
 	sess, err := a.session(key)
 	if err != nil {
 		return err
@@ -513,108 +458,9 @@ func (a *App) ResizeSession(key string, cols, rows int) error {
 	return sess.Resize(cols, rows)
 }
 
-// OpenDesktopSession 经代理的画面通道打开 RDP 或 VNC。
-//
-// 与 SSH 不同：不把目标口令交给界面，认证发生在代理进程里。
-// 像素和状态通过 desk:frame / desk:control / desk:closed 事件推到前端。
-func (a *App) OpenDesktopSession(key, protocol string, assetID, accountID int64, width, height int) (*SessionBrief, error) {
-	a.mu.Lock()
-	user := a.user
-	token := ""
-	if a.api != nil {
-		token = a.api.Token()
-	}
-	a.mu.Unlock()
-	if user == nil || token == "" {
-		return nil, fmt.Errorf("尚未登录")
-	}
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	if protocol != "rdp" && protocol != "vnc" {
-		return nil, fmt.Errorf("图形会话只用于 RDP 和 VNC")
-	}
-	if assetID == 0 {
-		return nil, fmt.Errorf("未指定资产")
-	}
-	if key == "" {
-		key = fmt.Sprintf("d%d", time.Now().UnixNano())
-	}
-	if width <= 0 {
-		width = 1280
-	}
-	if height <= 0 {
-		height = 720
-	}
-
-	onControl := func(b []byte) {
-		a.emit("desk:control", map[string]any{"key": key, "data": string(b)})
-	}
-	onFrame := func(b []byte) {
-		a.emit("desk:frame", map[string]any{
-			"key":  key,
-			"data": base64.StdEncoding.EncodeToString(b),
-		})
-	}
-	onClose := func(reason string) {
-		a.emit("desk:closed", map[string]any{"key": key, "reason": reason})
-	}
-	desktopURL, err := a.assignedDesktopURL(assetID, accountID, protocol)
-	if err != nil {
-		return nil, err
-	}
-	var sess *desk.Session
-	sess, err = desk.Dial(a.ctx, desk.Options{
-		URL: desktopURL, Token: token,
-		AssetID: assetID, AccountID: accountID, Protocol: protocol,
-		Width: width, Height: height,
-		OnControl: onControl, OnFrame: onFrame, OnClose: func(reason string) {
-			a.mu.Lock()
-			if a.desktops[key] == sess {
-				delete(a.desktops, key)
-			}
-			a.mu.Unlock()
-			onClose(reason)
-		},
-	})
-	if err != nil {
-		alt, aerr := a.assignedDesktopURL(assetID, accountID, protocol)
-		if aerr != nil {
-			return nil, aerr
-		}
-		if alt != "" && alt != desktopURL {
-			desktopURL = alt
-			sess, err = desk.Dial(a.ctx, desk.Options{
-				URL: desktopURL, Token: token,
-				AssetID: assetID, AccountID: accountID, Protocol: protocol,
-				Width: width, Height: height,
-				OnControl: onControl, OnFrame: onFrame, OnClose: func(reason string) {
-					a.mu.Lock()
-					if a.desktops[key] == sess {
-						delete(a.desktops, key)
-					}
-					a.mu.Unlock()
-					onClose(reason)
-				},
-			})
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	a.mu.Lock()
-	if old := a.desktops[key]; old != nil {
-		_ = old.Close()
-	}
-	a.desktops[key] = sess
-	a.mu.Unlock()
-	sess.Start()
-	return &SessionBrief{
-		Key: key, AssetID: assetID, Gateway: desktopURL,
-		OpenedAt: time.Now().Format(time.RFC3339),
-	}, nil
-}
-
 // WriteDesktopInput 把键鼠或手动口令 JSON 写回图形会话。
 func (a *App) WriteDesktopInput(key, text string) error {
+	a.noteDesktopResize(key, text)
 	a.mu.Lock()
 	sess := a.desktops[key]
 	a.mu.Unlock()
@@ -627,8 +473,11 @@ func (a *App) WriteDesktopInput(key, text string) error {
 // CloseDesktopSession 结束图形会话。
 func (a *App) CloseDesktopSession(key string) error {
 	a.mu.Lock()
+	a.ensureLiveLocked()
+	a.deskGen[key]++
 	sess := a.desktops[key]
 	delete(a.desktops, key)
+	delete(a.deskMeta, key)
 	a.mu.Unlock()
 	if sess == nil {
 		return nil
@@ -672,13 +521,34 @@ func (a *App) desktopSocketURL() string {
 // CloseSession 关闭指定会话。
 func (a *App) CloseSession(key string) error {
 	a.mu.Lock()
+	a.ensureLiveLocked()
+	a.sshGen[key]++
 	sess := a.sessions[key]
 	delete(a.sessions, key)
+	delete(a.sshMeta, key)
 	a.mu.Unlock()
 	if sess == nil {
 		return nil
 	}
 	return sess.Close()
+}
+
+func (a *App) invalidateLiveLocked() (terms []*term.Session, desks []*desk.Session) {
+	a.ensureLiveLocked()
+	a.epoch++
+	for _, s := range a.sessions {
+		terms = append(terms, s)
+	}
+	for _, s := range a.desktops {
+		desks = append(desks, s)
+	}
+	a.sessions = map[string]*term.Session{}
+	a.desktops = map[string]*desk.Session{}
+	a.sshMeta = map[string]sshSlot{}
+	a.deskMeta = map[string]deskSlot{}
+	a.deadGen = map[string]int{}
+	a.attempts = map[string]*reconnect.Attempt{}
+	return terms, desks
 }
 
 // ListSessions 列出当前活动会话。

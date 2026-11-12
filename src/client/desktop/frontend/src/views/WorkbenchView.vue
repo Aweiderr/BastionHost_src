@@ -38,12 +38,17 @@ import {
   unsupportedExplanation,
   type SessionKind,
 } from '../sessionRoute'
+import { localLaunchLabel, localLaunchProtocol, wantsLocalLaunch } from '../localEntry'
+import { leave, offerManualReconnect, tryEnter, type ClickGate } from '../reconnectGate'
 import {
   CloseDesktopSession,
   CloseSession,
   GetAssets,
+  LaunchLocalTool,
   OpenDesktopSession,
   OpenSession,
+  ReconnectDesktopSession,
+  ReconnectSession,
   ResizeSession,
   WriteDesktopInput,
   WriteSession,
@@ -131,6 +136,9 @@ const pasteChords = new Map<string, ReturnType<typeof createPasteChord>>()
 const deskSendChain = new Map<string, Promise<void>>()
 
 const activeTab = computed(() => tabs.value.find((t) => t.key === activeKey.value) || null)
+const localNote = ref('')
+const reconnectGate: ClickGate = { busy: false }
+const launchGate: ClickGate = { busy: false }
 
 onMounted(async () => {
   EventsOn('term:data', (payload: any) => {
@@ -148,7 +156,29 @@ onMounted(async () => {
     const tab = tabs.value.find((t) => t.key === payload.key)
     if (!tab || tab.kind !== 'ssh' || tab.status === 'closed') return
     tab.status = 'closed'
-    notify(`${tab.assetName} 的会话已结束（${payload.reason || '未知原因'}）`, 'info')
+    if (payload.reason) tab.message = String(payload.reason)
+    if (!payload.quiet) notify(`${tab.assetName} 的会话已结束（${payload.reason || '未知原因'}）`, 'info')
+  })
+  EventsOn('term:reconnecting', (payload: any) => {
+    const tab = tabs.value.find((t) => t.key === payload?.key)
+    if (!tab || tab.kind !== 'ssh') return
+    tab.status = 'connecting'
+    tab.message = String(payload?.message || '正在重连一次')
+    runtimes.get(tab.key)?.term.write(`\r\n${tab.message}\r\n`)
+  })
+  EventsOn('term:reconnected', (payload: any) => {
+    const tab = tabs.value.find((t) => t.key === payload?.key)
+    if (!tab || tab.kind !== 'ssh') return
+    tab.status = 'connected'
+    tab.message = ''
+    notify(String(payload?.message || `${tab.assetName} 已重连`), 'ok')
+  })
+  EventsOn('term:reconnect-failed', (payload: any) => {
+    const tab = tabs.value.find((t) => t.key === payload?.key)
+    if (!tab) return
+    tab.status = 'closed'
+    tab.message = String(payload?.message || '终端重连失败')
+    notify(tab.message, 'err')
   })
   EventsOn('desk:frame', (payload: any) => {
     if (!payload?.key) return
@@ -169,7 +199,29 @@ onMounted(async () => {
     tab.credOpen = false
     tab.credPassword = ''
     tab.status = 'closed'
-    if (!tab.message) notify(`${tab.assetName} 的图形会话已结束`, 'info')
+    if (payload.reason) tab.message = String(payload.reason)
+    if (!payload.quiet && !tab.message) notify(`${tab.assetName} 的图形会话已结束`, 'info')
+    else if (!payload.quiet) notify(`${tab.assetName} 的图形会话已结束`, 'info')
+  })
+  EventsOn('desk:reconnecting', (payload: any) => {
+    const tab = tabs.value.find((t) => t.key === payload?.key)
+    if (!tab || tab.kind !== 'desktop') return
+    tab.status = 'connecting'
+    tab.message = String(payload?.message || '正在重连一次')
+  })
+  EventsOn('desk:reconnected', (payload: any) => {
+    const tab = tabs.value.find((t) => t.key === payload?.key)
+    if (!tab || tab.kind !== 'desktop') return
+    tab.status = 'connected'
+    tab.message = ''
+    notify(String(payload?.message || `${tab.assetName} 的图形会话已重连`), 'ok')
+  })
+  EventsOn('desk:reconnect-failed', (payload: any) => {
+    const tab = tabs.value.find((t) => t.key === payload?.key)
+    if (!tab) return
+    tab.status = 'closed'
+    tab.message = String(payload?.message || '图形会话重连失败')
+    notify(tab.message, 'err')
   })
   await loadAssets()
 })
@@ -177,9 +229,15 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   EventsOff('term:data')
   EventsOff('term:closed')
+  EventsOff('term:reconnecting')
+  EventsOff('term:reconnected')
+  EventsOff('term:reconnect-failed')
   EventsOff('desk:frame')
   EventsOff('desk:control')
   EventsOff('desk:closed')
+  EventsOff('desk:reconnecting')
+  EventsOff('desk:reconnected')
+  EventsOff('desk:reconnect-failed')
   const current = tabs.value.slice()
   tabs.value = []
   activeKey.value = ''
@@ -889,6 +947,65 @@ function protocolTagClass(protocol: string) {
 function connectLabel(protocol: string) {
   return sessionKind(protocol) === 'oracle' ? '查看说明' : '连接'
 }
+
+async function reconnectTab(key: string) {
+  const tab = tabs.value.find((t) => t.key === key)
+  if (!tab || !offerManualReconnect(tab.kind, tab.status)) return
+  if (!tryEnter(reconnectGate)) return
+  tab.status = 'connecting'
+  try {
+    if (tab.kind === 'ssh') await ReconnectSession(key)
+    else await ReconnectDesktopSession(key)
+    const current = tabs.value.find((t) => t.key === key)
+    if (current && current.status === 'connecting') {
+      current.status = 'connected'
+      current.message = ''
+    }
+  } catch (e: any) {
+    const current = tabs.value.find((t) => t.key === key)
+    const message = String(e?.message || e)
+    if (current) {
+      current.status = 'closed'
+      current.message = message
+    }
+    notify(message, 'err')
+  } finally {
+    leave(reconnectGate)
+  }
+}
+
+async function launchLocal(asset: Asset, account: Account) {
+  const protocol = localLaunchProtocol(asset.protocol)
+  if (!protocol || !tryEnter(launchGate)) return
+  try {
+    const res: any = await LaunchLocalTool(
+      protocol,
+      asset.asset_name,
+      account.account_name,
+      asset.asset_id,
+      account.account_id,
+      asset.host,
+      asset.port,
+    )
+    localNote.value = String(res?.message || res?.command || '已打开本机工具')
+    notify(localNote.value, 'ok')
+  } catch (e: any) {
+    localNote.value = String(e?.message || e)
+    notify(localNote.value, 'err')
+  } finally {
+    leave(launchGate)
+  }
+}
+
+function launchFromTab(tab: SessionTab) {
+  const asset = assets.value.find((item) => item.asset_id === tab.assetId)
+  const account = asset?.accounts?.find((item) => item.account_name === tab.accountName) || asset?.accounts?.[0]
+  if (!asset || !account) {
+    notify('没有这台资产的授权', 'err')
+    return
+  }
+  void launchLocal(asset, account)
+}
 </script>
 
 <template>
@@ -925,16 +1042,27 @@ function connectLabel(protocol: string) {
             <p v-if="assetConnectHint(a.protocol)" class="hint" style="margin: 0 0 8px">
               {{ assetConnectHint(a.protocol) }}
             </p>
-            <button
-              v-for="acc in a.accounts"
-              :key="acc.account_id"
-              class="primary sm"
-              style="margin-right: 6px; margin-bottom: 4px"
-              :disabled="connecting"
-              @click.stop="connect(acc)"
-            >
-              {{ connectLabel(a.protocol) }} {{ acc.account_name }}
-            </button>
+            <template v-for="acc in a.accounts" :key="acc.account_id">
+              <button
+                class="primary sm"
+                style="margin-right: 6px; margin-bottom: 4px"
+                :disabled="connecting"
+                @click.stop="connect(acc)"
+              >
+                {{ connectLabel(a.protocol) }} {{ acc.account_name }}
+              </button>
+              <button
+                v-if="wantsLocalLaunch(a.protocol, a.can_file === true)"
+                class="ghost sm"
+                style="margin-right: 6px; margin-bottom: 4px"
+                @click.stop="launchLocal(a, acc)"
+              >
+                {{ localLaunchLabel(a.protocol) }} {{ acc.account_name }}
+              </button>
+            </template>
+            <p v-if="localNote && selected?.asset_id === a.asset_id" class="hint" style="margin: 6px 0 0">
+              {{ localNote }}
+            </p>
           </div>
         </div>
       </div>
@@ -972,6 +1100,13 @@ function connectLabel(protocol: string) {
           <span>选择资产后点击「连接」。SSH 打开终端，RDP / VNC 打开远端桌面，Oracle 打开客户端连接说明。</span>
         </template>
         <span class="spacer"></span>
+        <button
+          v-if="activeTab && offerManualReconnect(activeTab.kind, activeTab.status)"
+          class="primary sm"
+          @click="reconnectTab(activeTab.key)"
+        >
+          重连一次
+        </button>
         <button v-if="activeTab" class="danger sm" @click="closeTab(activeTab.key)">关闭标签</button>
       </div>
 
@@ -1107,6 +1242,15 @@ function connectLabel(protocol: string) {
               <h3>{{ (t.protocol || '').toLowerCase() === 'sftp' ? '请使用 SFTP 客户端' : '该协议尚未接入' }}</h3>
               <p>{{ t.message }}</p>
               <p class="unsupported-target">{{ t.assetName }} · {{ t.accountName }} · {{ t.host }}:{{ t.port }}</p>
+              <button
+                v-if="(t.protocol || '').toLowerCase() === 'sftp'"
+                class="primary sm"
+                style="margin-top: 12px"
+                type="button"
+                @click="launchFromTab(t)"
+              >
+                打开本机 SFTP
+              </button>
             </div>
           </div>
           <div v-else-if="t.kind === 'desktop'" class="desk-host">
@@ -1125,6 +1269,14 @@ function connectLabel(protocol: string) {
             />
             <div v-if="t.status !== 'connected' && !t.credOpen" class="desk-wait">
               <p class="desk-wait-msg">{{ desktopWaitText(t) }}</p>
+              <button
+                v-if="offerManualReconnect(t.kind, t.status)"
+                class="primary sm"
+                type="button"
+                @click="reconnectTab(t.key)"
+              >
+                重连一次
+              </button>
             </div>
             <aside v-if="t.clipOpen" class="desk-clip" @keydown.stop>
               <div class="desk-clip-head">

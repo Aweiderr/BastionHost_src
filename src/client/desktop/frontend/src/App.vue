@@ -4,6 +4,7 @@ import { state, notify, rejectLogin, clearLoginError, type DeviceInfo, type Prof
 import { isOpsUser, opsDeniedMessage } from './opsRole'
 import LoginView from './views/LoginView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
+import OracleWorkbenchView from './views/OracleWorkbenchView.vue'
 import SessionsView from './views/SessionsView.vue'
 import DeviceView from './views/DeviceView.vue'
 import { GetCoreURL, GetDeviceInfo, GetProfile, HideToTray, Logout, ReconnectManager, TrayReady, TryAutoLogin } from '../wailsjs/go/main/App'
@@ -18,6 +19,7 @@ const coreBusy = ref(false)
 
 const navItems = [
   { key: 'workbench', label: '运维工作台', icon: '▶' },
+  { key: 'oracle', label: 'SQL 工作台', icon: '▤' },
   { key: 'sessions', label: '我的会话', icon: '☰' },
   { key: 'device', label: '设备与准入', icon: '⌘' },
 ] as const
@@ -216,9 +218,10 @@ watch(
         </div>
       </header>
 
-      <div class="content" :class="{ flush: state.view === 'workbench' }">
-        <!-- 工作台保持挂载，切到其他页再回来时标签和画面还在。 -->
+      <div class="content" :class="{ flush: state.view === 'workbench' || state.view === 'oracle' }">
+        <!-- 工作台和 SQL 工作台都保持挂载，切到其他页再回来时会话还在。 -->
         <WorkbenchView v-show="state.view === 'workbench'" :visible="state.view === 'workbench'" />
+        <OracleWorkbenchView v-show="state.view === 'oracle'" :visible="state.view === 'oracle'" />
         <SessionsView v-if="state.view === 'sessions'" />
         <DeviceView v-if="state.view === 'device'" />
       </div>

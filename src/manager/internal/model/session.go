@@ -75,7 +75,7 @@ type SessionCommand struct {
 	CommandText   string `json:"command_text"`
 	CommandDigest string `json:"command_digest,omitempty"`
 	CommandType   string `json:"command_type"`
-	// CommandOrigin 是语句来源：user（用户输入）/ client_auto（客户端自动）。
+	// CommandOrigin 是语句来源：user（用户输入）/ client_auto（客户端自动）/ system（堡垒机代发的只读元数据）。
 	// 历史行和未上报的记录按 user 返回。策略动作不看这个字段。
 	CommandOrigin  string    `json:"command_origin"`
 	RiskLevel      string    `json:"risk_level"`

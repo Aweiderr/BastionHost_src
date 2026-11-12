@@ -114,6 +114,18 @@ export function CloseOracleConsole(arg1) {
   return window['go']['main']['App']['CloseOracleConsole'](arg1);
 }
 
+export function ListOracleSchemas(arg1) {
+  return window['go']['main']['App']['ListOracleSchemas'](arg1);
+}
+
+export function ListOracleObjects(arg1, arg2) {
+  return window['go']['main']['App']['ListOracleObjects'](arg1, arg2);
+}
+
+export function ListOracleColumns(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ListOracleColumns'](arg1, arg2, arg3);
+}
+
 export function ReconnectSession(arg1) {
   return window['go']['main']['App']['ReconnectSession'](arg1);
 }

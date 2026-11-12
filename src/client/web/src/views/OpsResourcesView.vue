@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 我的资源：仅展示绑定给当前用户的资产（/ops/assets）。
- * SSH 等协议跳 Web 终端；Oracle 弹出连接方式（本机 CMD / DBeaver 或堡垒机 SQL 会话）；需审批的引导去工单申请。
+ * SSH 等协议跳 Web 终端；Oracle 先选本机 CMD / DBeaver，或进入 SQL 工作台；需审批的引导去工单申请。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -13,6 +13,7 @@ import { PROTOCOL_MAP, dictLabel } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
 import { isGraphicalProtocol } from '@/utils/graphical'
 import { isOracleProtocol } from '@/utils/oracleConnect'
+import { oracleWorkbenchLocation } from '@/utils/oracleWorkbench'
 
 defineOptions({ name: 'OpsResourcesView' })
 
@@ -75,7 +76,7 @@ function connect(row: OpsAsset): void {
     void router.push({ path: '/tickets' })
     return
   }
-  // Oracle 走本地 SQL 客户端。Web 终端会按 SSH 握手，连数据库必然失败。
+  // Oracle 先选连接方式。本机工具留在弹窗里，堡垒机 SQL 会话进入独立工作台。
   if (isOracleProtocol(row.protocol)) {
     oracleAsset.value = row
     oracleOpen.value = true
@@ -94,6 +95,13 @@ function connect(row: OpsAsset): void {
   })
 }
 
+function openOracleWorkbench(accountId: number): void {
+  const asset = oracleAsset.value
+  if (!asset || !accountId) return
+  oracleOpen.value = false
+  void router.push(oracleWorkbenchLocation(asset.asset_id, accountId))
+}
+
 onMounted(load)
 </script>
 
@@ -103,7 +111,7 @@ onMounted(load)
       <div>
         <div class="page-title">我的资源</div>
         <div class="page-subtitle">
-          仅列出已授权给您的资产。SSH 点「连接」打开 Web 终端；RDP / VNC 打开图形会话；Oracle 选择本机 CMD / DBeaver 或堡垒机 SQL 会话。需审批的请先提交工单。
+          仅列出已授权给您的资产。SSH 点「连接」打开 Web 终端；RDP / VNC 打开图形会话；Oracle 选择本机 CMD / DBeaver，或进入 SQL 工作台。需审批的请先提交工单。
         </div>
       </div>
       <button class="btn" type="button" :disabled="loading" @click="load">
@@ -182,7 +190,7 @@ onMounted(load)
       </tr>
     </DataTable>
 
-    <OracleConnectDialog v-model="oracleOpen" :asset="oracleAsset" />
+    <OracleConnectDialog v-model="oracleOpen" :asset="oracleAsset" @open-workbench="openOracleWorkbench" />
   </div>
 </template>
 

@@ -119,6 +119,37 @@ export interface OracleSQLResult {
   message?: string
   blocked?: boolean
   policy_action?: string
+  /** 服务端计时，毫秒。旧响应可能没有这个字段。 */
+  elapsed_ms?: number
+}
+
+export interface OracleSchemaList {
+  schemas: string[]
+  truncated?: boolean
+}
+
+export interface OracleObjectInfo {
+  name: string
+  kind: 'table' | 'view' | string
+}
+
+export interface OracleObjectList {
+  schema: string
+  objects: OracleObjectInfo[]
+  truncated?: boolean
+}
+
+export interface OracleColumnInfo {
+  name: string
+  type: string
+  nullable?: boolean
+}
+
+export interface OracleColumnList {
+  schema: string
+  name: string
+  columns: OracleColumnInfo[]
+  truncated?: boolean
 }
 
 export function openOracleConsole(assetId: number, accountId: number) {
@@ -141,6 +172,31 @@ export function closeOracleConsole(sessionId: number) {
   return request<{ session_id: number; status: string }>(`/ops/oracle/sessions/${sessionId}/close`, {
     method: 'POST',
     body: {},
+    silent: true,
+  })
+}
+
+/** 对象树。请求里只有 schema / 对象名，不带 SQL、地址或口令。 */
+export function listOracleSchemas(sessionId: number) {
+  return request<OracleSchemaList>(`/ops/oracle/sessions/${sessionId}/schemas`, {
+    method: 'POST',
+    body: {},
+    silent: true,
+  })
+}
+
+export function listOracleObjects(sessionId: number, schema: string) {
+  return request<OracleObjectList>(`/ops/oracle/sessions/${sessionId}/objects`, {
+    method: 'POST',
+    body: { schema },
+    silent: true,
+  })
+}
+
+export function listOracleColumns(sessionId: number, schema: string, name: string) {
+  return request<OracleColumnList>(`/ops/oracle/sessions/${sessionId}/columns`, {
+    method: 'POST',
+    body: { schema, name },
     silent: true,
   })
 }

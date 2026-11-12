@@ -168,6 +168,7 @@ export namespace coreapi {
 	    message?: string;
 	    blocked?: boolean;
 	    policy_action?: string;
+	    elapsed_ms?: number;
 
 	    static createFrom(source: any = {}) {
 	        return new OracleSQLResult(source);
@@ -184,6 +185,55 @@ export namespace coreapi {
 	        this.message = source["message"];
 	        this.blocked = source["blocked"];
 	        this.policy_action = source["policy_action"];
+	        this.elapsed_ms = source["elapsed_ms"];
+	    }
+	}
+	export class OracleSchemaList {
+	    schemas: string[];
+	    truncated?: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new OracleSchemaList(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.schemas = source["schemas"];
+	        this.truncated = source["truncated"];
+	    }
+	}
+	export class OracleObjectList {
+	    schema: string;
+	    objects: any[];
+	    truncated?: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new OracleObjectList(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.schema = source["schema"];
+	        this.objects = source["objects"];
+	        this.truncated = source["truncated"];
+	    }
+	}
+	export class OracleColumnList {
+	    schema: string;
+	    name: string;
+	    columns: any[];
+	    truncated?: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new OracleColumnList(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.schema = source["schema"];
+	        this.name = source["name"];
+	        this.columns = source["columns"];
+	        this.truncated = source["truncated"];
 	    }
 	}
 

@@ -519,7 +519,7 @@ type CommandFilter struct {
 	AssetID      int64
 	RiskLevel    string
 	PolicyAction string
-	// CommandOrigin 只接受 user / client_auto。空值表示不过滤，默认仍返回全部语句。
+	// CommandOrigin 只接受 user / client_auto / system。空值表示不过滤，默认仍返回全部语句。
 	CommandOrigin string
 	Keyword       string
 	StartTime     string

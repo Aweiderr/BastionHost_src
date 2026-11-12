@@ -84,7 +84,7 @@ const routes: RouteRecordRaw[] = [
       },
       {
         // 运维视角的「已授权资源」列表。Web 终端本身只承载会话标签。
-        // SSH 等协议从本页点「连接」带 asset/connect 打开；Oracle 只弹出客户端说明。
+        // SSH 等协议从本页点「连接」带 asset/connect 打开；Oracle 先选本机工具或进入 SQL 工作台。
         // operator 看不到资产管理台账。
         path: 'resources',
         name: 'resources',
@@ -102,6 +102,12 @@ const routes: RouteRecordRaw[] = [
         name: 'desktop',
         component: () => import('@/views/DesktopView.vue'),
         meta: { title: '图形会话', permission: ['ops:session:connect'] },
+      },
+      {
+        path: 'oracle',
+        name: 'oracle',
+        component: () => import('@/views/OracleWorkbenchView.vue'),
+        meta: { title: 'SQL 工作台', permission: ['ops:session:connect'] },
       },
       {
         path: 'my-sessions',
@@ -238,6 +244,7 @@ export const ICONS = {
   asset: 'M4 4h16v6H4zM4 14h16v6H4zM7.5 7h.01M7.5 17h.01',
   terminal: 'M4 5h16v14H4zM8 10l2 2-2 2M13 14h4',
   screen: 'M3 4h18v12H3zM8 20h8M12 16v4',
+  sql: 'M4 4h16v16H4zM8 9h8M8 13h8M8 17h5',
   clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7.5V12l3 2',
   list: 'M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01',
   command: 'M4 5h16v14H4zM8 9.5l2.5 2.5L8 14.5M12.5 15H16',
@@ -307,6 +314,12 @@ export const MENU_GROUPS: MenuGroup[] = [
         title: '图形会话',
         path: '/desktop',
         icon: ICONS.screen,
+        permission: ['ops:session:connect'],
+      },
+      {
+        title: 'SQL 工作台',
+        path: '/oracle',
+        icon: ICONS.sql,
         permission: ['ops:session:connect'],
       },
       {

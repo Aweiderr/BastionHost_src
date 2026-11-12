@@ -250,6 +250,220 @@ func TestOracleConsoleRefusesWithoutGrant(t *testing.T) {
 	}
 }
 
+func TestSkipPlacementStaysOutOfJSON(t *testing.T) {
+	raw, err := json.Marshal(StartSessionRequest{Protocol: "oracle", SkipPlacement: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "SkipPlacement") || strings.Contains(strings.ToLower(string(raw)), "skip_placement") {
+		t.Fatalf("进程内字段进了 JSON: %s", raw)
+	}
+}
+
+func TestOracleConsoleSQLResultCarriesGridFields(t *testing.T) {
+	dir := &fakeOracleDir{
+		grant: &OpsGrantCheck{Allowed: true, GrantID: 1, GrantSource: "manual"},
+		cred:  managedOracleCred(),
+	}
+	audit := newFakeOracleAudit()
+	db := &fakeOracleDB{query: OracleTable{Columns: []string{"ID", "NAME"}, Rows: [][]*string{{strPtr("1"), nil}}}}
+	console := NewOracleConsole(dir, audit, allowOraclePolicy(), func(context.Context, oracleprov.Target, string, string) (OracleConn, error) {
+		return db, nil
+	})
+	info, err := console.Open(context.Background(), OracleActor{UserID: 7, Username: "ops"}, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := console.Exec(context.Background(), OracleActor{UserID: 7}, info.SessionID, OracleSQLInput{SQL: "SELECT ID, NAME FROM APP.T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Kind != "query" || len(res.Columns) != 2 || res.RowCount != 1 || res.Rows[0][1] != nil || res.ElapsedMS < 0 {
+		t.Fatalf("%+v", res)
+	}
+	if len(db.maxRows) != 1 || db.maxRows[0] != maxOracleRows {
+		t.Fatalf("user SQL row cap = %v", db.maxRows)
+	}
+	raw, _ := json.Marshal(res)
+	for _, field := range []string{`"columns"`, `"rows"`, `"row_count"`, `"elapsed_ms"`} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("missing %s in %s", field, raw)
+		}
+	}
+	execRes, err := console.Exec(context.Background(), OracleActor{UserID: 7}, info.SessionID, OracleSQLInput{SQL: "UPDATE APP.T SET NAME = 'a'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execRes.Kind != "exec" || execRes.RowsAffected != 1 || execRes.ElapsedMS < 0 {
+		t.Fatalf("%+v", execRes)
+	}
+	_, err = console.Exec(context.Background(), OracleActor{UserID: 7}, info.SessionID, OracleSQLInput{SQL: "SELECT 1 FROM DUAL", Password: "from-browser"})
+	if err == nil || !strings.Contains(err.Error(), "不接受口令") {
+		t.Fatal(err)
+	}
+}
+
+func TestOracleConsoleRejectsAddressAndUnmanagedAccount(t *testing.T) {
+	dir := &fakeOracleDir{grant: &OpsGrantCheck{Allowed: true, GrantID: 1, GrantSource: "manual"}}
+	audit := newFakeOracleAudit()
+	opened := 0
+	console := NewOracleConsole(dir, audit, allowOraclePolicy(), func(context.Context, oracleprov.Target, string, string) (OracleConn, error) {
+		opened++
+		return &fakeOracleDB{}, nil
+	})
+	actor := OracleActor{UserID: 7, Username: "ops"}
+	for _, in := range []OracleOpenInput{
+		{AssetID: 1, AccountID: 2, Host: "10.9.9.9"},
+		{AssetID: 1, AccountID: 2, Port: 1521},
+		{AssetID: 1, AccountID: 2, DSN: "oracle://x"},
+		{AssetID: 1, AccountID: 2, ServiceName: "ORCL"},
+		{AssetID: 1, AccountID: 2, Password: "pw"},
+		{AssetID: 1, AccountID: 2, BastionPassword: "pw"},
+		{AssetID: 1, AccountID: 2, DBPassword: "pw"},
+		{AssetID: 1, AccountID: 2, PrivateKey: "key"},
+	} {
+		if _, err := console.Open(context.Background(), actor, in); err == nil || opened != 0 || audit.starts != 0 {
+			t.Fatalf("input %+v err %v opened %d", in, err, opened)
+		}
+	}
+	dir.cred = &OpsCredential{
+		AssetID: 1, Protocol: "oracle", AccountID: 2, AccountName: "app",
+		CredentialMode: model.CredentialManual, RequiresUserInput: true, Password: "",
+		Host: "10.1.1.9", Port: 1521, OracleServiceName: "ORCL",
+	}
+	_, err := console.Open(context.Background(), actor, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err == nil || !strings.Contains(err.Error(), "没有托管口令") || !strings.Contains(err.Error(), "本机 CMD") || opened != 0 {
+		t.Fatal(err)
+	}
+}
+
+func TestOracleConsoleMetadataUsesFixedDictionarySQL(t *testing.T) {
+	dir := &fakeOracleDir{
+		grant: &OpsGrantCheck{Allowed: true, GrantID: 1, GrantSource: "manual"},
+		cred:  managedOracleCred(),
+	}
+	audit := newFakeOracleAudit()
+	db := &fakeOracleDB{queryFn: func(statement string, args []any) (OracleTable, error) {
+		switch {
+		case strings.Contains(statement, "ALL_USERS"):
+			return OracleTable{Columns: []string{"USERNAME"}, Rows: [][]*string{{strPtr("APP")}}}, nil
+		case strings.Contains(statement, "ALL_TABLES"):
+			if len(args) != 1 || args[0] != "APP" {
+				t.Fatalf("table args %#v", args)
+			}
+			return OracleTable{Columns: []string{"TABLE_NAME"}, Rows: [][]*string{{strPtr("ORDERS")}}}, nil
+		case strings.Contains(statement, "ALL_VIEWS"):
+			return OracleTable{Columns: []string{"VIEW_NAME"}, Rows: [][]*string{{strPtr("ORDER_V")}}}, nil
+		case strings.Contains(statement, "ALL_TAB_COLUMNS"):
+			if len(args) != 2 || args[0] != "APP" || args[1] != "ORDERS" {
+				t.Fatalf("column args %#v", args)
+			}
+			return OracleTable{
+				Columns: []string{"COLUMN_NAME", "DATA_TYPE", "DATA_LENGTH", "DATA_PRECISION", "DATA_SCALE", "NULLABLE"},
+				Rows: [][]*string{{
+					strPtr("ID"), strPtr("NUMBER"), nil, strPtr("10"), strPtr("0"), strPtr("N"),
+				}},
+			}, nil
+		default:
+			t.Fatalf("unexpected SQL %s", statement)
+			return OracleTable{}, nil
+		}
+	}}
+	console := NewOracleConsole(dir, audit, allowOraclePolicy(), func(context.Context, oracleprov.Target, string, string) (OracleConn, error) {
+		return db, nil
+	})
+	actor := OracleActor{UserID: 7, Username: "ops"}
+	info, err := console.Open(context.Background(), actor, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := console.Schemas(context.Background(), actor, info.SessionID, OracleMetaInput{SQL: "SELECT * FROM ALL_USERS"}); err == nil || !strings.Contains(err.Error(), "不接受") {
+		t.Fatal(err)
+	}
+	if _, err := console.Objects(context.Background(), actor, info.SessionID, OracleMetaInput{Schema: "APP", Password: "x"}); err == nil || !strings.Contains(err.Error(), "不接受口令") {
+		t.Fatal(err)
+	}
+	if _, err := console.Objects(context.Background(), actor, info.SessionID, OracleMetaInput{Schema: "APP'; DROP TABLE T"}); err == nil || len(db.queries) != 0 {
+		t.Fatalf("err %v queries %v", err, db.queries)
+	}
+	schemas, err := console.Schemas(context.Background(), actor, info.SessionID, OracleMetaInput{})
+	if err != nil || len(schemas.Schemas) != 1 || schemas.Schemas[0] != "APP" {
+		t.Fatalf("%v %+v", err, schemas)
+	}
+	objects, err := console.Objects(context.Background(), actor, info.SessionID, OracleMetaInput{Schema: "app"})
+	if err != nil || objects.Schema != "APP" || len(objects.Objects) != 2 || objects.Objects[0].Kind != "table" || objects.Objects[1].Kind != "view" {
+		t.Fatalf("%v %+v", err, objects)
+	}
+	cols, err := console.Columns(context.Background(), actor, info.SessionID, OracleMetaInput{Schema: "app", Name: "orders"})
+	if err != nil || len(cols.Columns) != 1 || cols.Columns[0].Name != "ID" || cols.Columns[0].Type != "NUMBER(10)" || cols.Columns[0].Nullable {
+		t.Fatalf("%v %+v", err, cols)
+	}
+	for _, sql := range db.queries {
+		if strings.Contains(sql, "DROP") || strings.Contains(sql, "'APP'") {
+			t.Fatalf("executed text was not the bound dictionary SQL: %s", sql)
+		}
+	}
+	if db.maxRows[len(db.maxRows)-1] != maxOracleMetaRows {
+		t.Fatalf("meta cap %v", db.maxRows)
+	}
+	var system, user int
+	for _, cmd := range audit.commands {
+		switch cmd.CommandOrigin {
+		case "system":
+			system++
+			if cmd.CommandType != "sql" || !strings.Contains(cmd.CommandText, "ALL_") {
+				t.Fatalf("audit %+v", cmd)
+			}
+		case "user":
+			user++
+		default:
+			t.Fatalf("origin %s", cmd.CommandOrigin)
+		}
+	}
+	if system != 4 || user != 0 {
+		t.Fatalf("system %d user %d cmds %+v", system, user, audit.commands)
+	}
+	if _, err := console.Schemas(context.Background(), OracleActor{UserID: 8}, info.SessionID, OracleMetaInput{}); err == nil {
+		t.Fatal("other user read the dictionary")
+	}
+}
+
+func TestOracleConsoleMetadataObeysCommandPolicy(t *testing.T) {
+	dir := &fakeOracleDir{
+		grant: &OpsGrantCheck{Allowed: true, GrantID: 1, GrantSource: "manual"},
+		cred:  managedOracleCred(),
+	}
+	audit := newFakeOracleAudit()
+	db := &fakeOracleDB{}
+	rule := &policy.Rule{PolicyID: 3, Name: "no-dict", MatchType: policy.MatchKeyword, Pattern: "ALL_USERS", Action: policy.ActionDeny, RiskLevel: policy.RiskCritical, Priority: 1}
+	engine, err := policy.NewEngine([]*policy.Rule{rule}, policy.ActionAllow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	console := NewOracleConsole(dir, audit, staticOraclePolicy{engine: engine}, func(context.Context, oracleprov.Target, string, string) (OracleConn, error) {
+		return db, nil
+	})
+	info, err := console.Open(context.Background(), OracleActor{UserID: 7, Username: "ops"}, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = console.Schemas(context.Background(), OracleActor{UserID: 7}, info.SessionID, OracleMetaInput{})
+	if err == nil || !strings.Contains(err.Error(), "阻断") || len(db.queries) != 0 {
+		t.Fatal(err)
+	}
+	if len(audit.commands) != 1 || audit.commands[0].CommandOrigin != "system" || audit.commands[0].ExecResult != "blocked" {
+		t.Fatalf("%+v", audit.commands)
+	}
+}
+
+func managedOracleCred() *OpsCredential {
+	return &OpsCredential{
+		AssetID: 1, AssetName: "fin", Protocol: "oracle", AccountID: 2, AccountName: "app",
+		CredentialMode: model.CredentialManaged, Password: "pw",
+		Host: "10.1.1.9", Port: 1521, OracleServiceName: "ORCL", Level: "core",
+	}
+}
+
 type staticOraclePolicy struct{ engine *policy.Engine }
 
 func (s staticOraclePolicy) Engine(context.Context) (*policy.Engine, error) { return s.engine, nil }
@@ -341,13 +555,21 @@ func (f *fakeOracleAudit) Get(_ context.Context, sessionID int64) (*model.Sessio
 
 type fakeOracleDB struct {
 	query   OracleTable
+	queryFn func(statement string, args []any) (OracleTable, error)
 	queries []string
+	args    [][]any
+	maxRows []int
 	execs   []string
 	closed  bool
 }
 
-func (f *fakeOracleDB) Query(_ context.Context, statement string, _ int) (OracleTable, error) {
+func (f *fakeOracleDB) Query(_ context.Context, statement string, maxRows int, args ...any) (OracleTable, error) {
 	f.queries = append(f.queries, statement)
+	f.args = append(f.args, append([]any(nil), args...))
+	f.maxRows = append(f.maxRows, maxRows)
+	if f.queryFn != nil {
+		return f.queryFn(statement, args)
+	}
 	return f.query, nil
 }
 

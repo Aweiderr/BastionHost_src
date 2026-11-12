@@ -1,13 +1,5 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ApiError } from '@/api/http'
-import {
-  closeOracleConsole,
-  execOracleSQL,
-  openOracleConsole,
-  type OracleConsoleInfo,
-  type OracleSQLResult,
-} from '@/api/ops'
 import type { OpsAsset } from '@/api/ops'
 import Modal from '@/components/Modal.vue'
 import { useAppStore } from '@/stores/app'
@@ -25,27 +17,25 @@ import {
 } from '@/utils/oracleConnect'
 
 /**
- * Oracle 连接。
+ * Oracle 连接方式。
  *
- * 两种方式都要能点选：本机 CMD / DBeaver 只给可复制说明（浏览器拉不起本机程序）；
- * 堡垒机 SQL 会话走管理服务，不打开 SSH 终端，也不把口令或资产地址交给浏览器去直连。
+ * 本机 CMD / DBeaver 只给可复制说明（浏览器拉不起本机程序）。
+ * 「堡垒机 SQL 会话」关掉本弹窗，交给独立的 SQL 工作台，不在这里贴 SQL。
  */
 const props = defineProps<{
   modelValue: boolean
   asset: OpsAsset | null
 }>()
 
-const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void }>()
+const emit = defineEmits<{
+  (e: 'update:modelValue', value: boolean): void
+  (e: 'open-workbench', accountId: number): void
+}>()
 
 const app = useAppStore()
 const auth = useAuthStore()
 const selectedAccountId = ref(0)
 const mode = ref<'' | 'local' | 'console'>('')
-const sqlText = ref('SELECT 1 FROM DUAL')
-const session = ref<OracleConsoleInfo | null>(null)
-const result = ref<OracleSQLResult | null>(null)
-const panelError = ref('')
-const busy = ref(false)
 
 watch(
   () => [props.modelValue, props.asset?.asset_id] as const,
@@ -53,18 +43,8 @@ watch(
     if (!open) return
     selectedAccountId.value = props.asset?.accounts?.[0]?.account_id ?? 0
     mode.value = ''
-    sqlText.value = 'SELECT 1 FROM DUAL'
-    result.value = null
-    panelError.value = ''
-    void endSession()
   },
 )
-
-watch(selectedAccountId, () => {
-  result.value = null
-  panelError.value = ''
-  void endSession()
-})
 
 const accounts = computed(() => props.asset?.accounts ?? [])
 
@@ -87,25 +67,13 @@ const listedEndpoint = computed(() => {
   return `${props.asset.host}:${props.asset.port}`
 })
 
-function errorText(err: unknown): string {
-  if (err instanceof ApiError) return err.message
-  if (err instanceof Error && err.message) return err.message
-  return 'Oracle SQL 会话失败'
+function close(): void {
+  emit('update:modelValue', false)
 }
 
-async function endSession(): Promise<void> {
-  const id = session.value?.session_id
-  session.value = null
-  if (!id) return
-  try {
-    await closeOracleConsole(id)
-  } catch {
-    /* 会话可能已经结束 */
-  }
-}
-
-async function close(): Promise<void> {
-  await endSession()
+function enterWorkbench(): void {
+  if (!selectedAccount.value) return
+  emit('open-workbench', selectedAccount.value.account_id)
   emit('update:modelValue', false)
 }
 
@@ -117,44 +85,6 @@ async function copyText(text: string, label: string): Promise<void> {
   else app.error(CLIPBOARD_DENIED_MESSAGE)
 }
 
-async function openSession(): Promise<void> {
-  if (!props.asset || !selectedAccount.value || busy.value) return
-  busy.value = true
-  panelError.value = ''
-  result.value = null
-  try {
-    await endSession()
-    session.value = await openOracleConsole(props.asset.asset_id, selectedAccount.value.account_id)
-  } catch (err) {
-    panelError.value = errorText(err)
-  } finally {
-    busy.value = false
-  }
-}
-
-async function runSQL(): Promise<void> {
-  if (!session.value || busy.value) return
-  const sql = sqlText.value.trim()
-  if (!sql) {
-    panelError.value = '请输入 SQL'
-    return
-  }
-  busy.value = true
-  panelError.value = ''
-  try {
-    result.value = await execOracleSQL(session.value.session_id, sql)
-  } catch (err) {
-    result.value = null
-    panelError.value = errorText(err)
-  } finally {
-    busy.value = false
-  }
-}
-
-function cellText(cell: string | null | undefined): string {
-  if (cell === null || cell === undefined) return 'NULL'
-  return cell
-}
 </script>
 
 <template>
@@ -330,10 +260,10 @@ function cellText(cell: string | null | undefined): string {
 
       <template v-else-if="mode === ORACLE_CONSOLE_MODE">
         <div class="result-panel guide-warn mb-16">
-          SQL 在堡垒机上执行：先校验当前登录的授权，再用托管账号连接资产库，语句写入会话审计。
+          将进入独立的 SQL 工作台。语句在堡垒机上执行：先校验当前登录的授权，再用托管账号连接资产库，并写入会话审计。
           这不是 SSH 终端，浏览器也不会直接连接
           <span class="text-mono">{{ listedEndpoint }}</span>
-          。未托管口令的账号请改用「{{ ORACLE_LOCAL_MODE_LABEL }}」。本页不显示、不代填口令。
+          。未托管口令的账号请改用「{{ ORACLE_LOCAL_MODE_LABEL }}」。这里不显示、不代填口令。
         </div>
 
         <div class="field-row">
@@ -350,55 +280,16 @@ function cellText(cell: string | null | undefined): string {
             </select>
             <div v-else-if="guide.dbUsername" class="field-value text-mono">{{ guide.dbUsername }}</div>
             <div v-else class="field-value text-muted">未绑定可用账号</div>
+            <div class="form-hint">选定账号后进入工作台。切到其它页面再回来，会话仍会留着。</div>
           </div>
           <button
             class="btn btn-primary btn-sm"
             type="button"
-            :disabled="busy || !selectedAccount"
-            @click="openSession"
+            :disabled="!selectedAccount"
+            @click="enterWorkbench"
           >
-            {{ session ? '重新打开' : '打开 SQL 会话' }}
+            进入 SQL 工作台
           </button>
-        </div>
-
-        <p v-if="session" class="form-hint">
-          会话 {{ session.session_no }} · {{ session.asset_name }} · {{ session.account_name }}
-          <button class="btn btn-sm" type="button" :disabled="busy" @click="endSession">结束会话</button>
-        </p>
-        <p v-if="panelError" class="form-error">{{ panelError }}</p>
-
-        <label class="form-label" for="oracle-sql">SQL</label>
-        <textarea
-          id="oracle-sql"
-          v-model="sqlText"
-          class="input sql-box text-mono"
-          rows="5"
-          spellcheck="false"
-          placeholder="一次一条 SQL"
-        />
-        <div class="sql-actions">
-          <button class="btn btn-primary btn-sm" type="button" :disabled="busy || !session" @click="runSQL">
-            执行
-          </button>
-          <span v-if="result?.blocked" class="text-secondary">已阻断，未送到数据库</span>
-          <span v-else-if="result?.truncated" class="text-secondary">{{ result.message }}</span>
-        </div>
-        <p v-if="result && !result.blocked && result.kind === 'exec'" class="form-hint">
-          {{ result.message }}<template v-if="result.rows_affected">（影响 {{ result.rows_affected }} 行）</template>
-        </p>
-        <div v-if="result?.columns?.length" class="sql-table-wrap">
-          <table class="sql-table">
-            <thead>
-              <tr>
-                <th v-for="col in result.columns" :key="col">{{ col }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, i) in result.rows || []" :key="i">
-                <td v-for="(cell, j) in row" :key="j">{{ cellText(cell) }}</td>
-              </tr>
-            </tbody>
-          </table>
         </div>
       </template>
     </template>

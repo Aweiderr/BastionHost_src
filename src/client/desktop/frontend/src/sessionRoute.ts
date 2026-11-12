@@ -2,7 +2,7 @@
  * 工作台按资产协议选择标签类型。
  *
  * 与 Web 端一致：只有 RDP / VNC 走画面通道。
- * Oracle 只打开客户端连接说明，不在本窗口建立数据库会话。
+ * Oracle 打开连接页：本机 CMD / DBeaver，或本窗口里的堡垒机 SQL 会话。
  * 空协议和 SSH 走终端。其余协议只展示说明，不拨号。
  */
 
@@ -26,7 +26,7 @@ export function assetConnectHint(protocol: string | undefined | null): string {
   const kind = sessionKind(protocol)
   if (kind === 'desktop') return '将打开图形会话标签，在窗口里显示远端桌面。'
   if (kind === 'oracle') {
-    return '将打开客户端连接说明。请在本机使用 sqlplus 或 DBeaver 连接网关，本窗口不会建立数据库会话。'
+    return '将打开 Oracle 连接。可以选择本机 CMD / DBeaver，或在本窗口打开堡垒机 SQL 会话。'
   }
   if ((protocol ?? '').trim().toLowerCase() === 'sftp') {
     return '请用 SFTP 客户端连接堡垒机 SSH 网关，登录名写成 用户名@资产#账号。本窗口不建立文件会话。'

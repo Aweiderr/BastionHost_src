@@ -98,6 +98,22 @@ export function LaunchLocalTool(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
   return window['go']['main']['App']['LaunchLocalTool'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
 }
 
+export function LaunchOracleClient(arg1, arg2, arg3) {
+  return window['go']['main']['App']['LaunchOracleClient'](arg1, arg2, arg3);
+}
+
+export function OpenOracleConsole(arg1, arg2) {
+  return window['go']['main']['App']['OpenOracleConsole'](arg1, arg2);
+}
+
+export function ExecOracleSQL(arg1, arg2) {
+  return window['go']['main']['App']['ExecOracleSQL'](arg1, arg2);
+}
+
+export function CloseOracleConsole(arg1) {
+  return window['go']['main']['App']['CloseOracleConsole'](arg1);
+}
+
 export function ReconnectSession(arg1) {
   return window['go']['main']['App']['ReconnectSession'](arg1);
 }

@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { ORACLE_GATEWAY_HOST, ORACLE_GATEWAY_PORT, resolveOracleGatewayHost } from './constants.ts'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
+  ORACLE_CONSOLE_MODE_LABEL,
+  ORACLE_LOCAL_MODE_LABEL,
   DB_PASSWORD_PLACEHOLDER,
   DB_USERNAME_PLACEHOLDER,
   OPS_USERNAME_PLACEHOLDER,
@@ -167,4 +172,20 @@ test('登录串里的双引号按 cmd 规则加倍，去掉引号后仍是原来
   assert.deepEqual(windowsArgv(guide.sqlplus), ['sqlplus', logon])
   assert.equal(guide.sqlplus.startsWith('sqlplus "'), true)
   assert.equal(guide.sqlplus.endsWith('"'), true)
+})
+
+test('连接界面有两种明确方式', () => {
+  assert.equal(ORACLE_LOCAL_MODE_LABEL, '本机 CMD / DBeaver')
+  assert.equal(ORACLE_CONSOLE_MODE_LABEL, '堡垒机 SQL 会话')
+  const dialog = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../components/OracleConnectDialog.vue'),
+    'utf8',
+  )
+  assert.match(dialog, /本机 CMD \/ DBeaver/)
+  assert.match(dialog, /堡垒机 SQL 会话/)
+  assert.match(dialog, /浏览器无法启动本机程序/)
+  assert.equal(dialog.includes('type="password"'), false)
+  assert.equal(dialog.includes('navigator.clipboard'), false)
+  assert.match(dialog, /copyToClipboard/)
+  assert.match(dialog, /CLIPBOARD_DENIED_MESSAGE/)
 })

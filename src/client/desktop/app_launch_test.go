@@ -141,6 +141,86 @@ func TestLaunchRDPStaysOnAssignedNode(t *testing.T) {
 	}
 }
 
+func TestLaunchOracleUsesAssignedGateway(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/ops/assets":
+			fmt.Fprint(w, `{"code":"OK","message":"成功","data":{"items":[{"asset_id":6,"asset_name":"fin","host":"10.8.8.8","port":1522,"protocol":"oracle","accounts":[{"account_id":4,"account_name":"app"}]}]}}`)
+		case "/api/v1/ops/sessions/assign":
+			fmt.Fprint(w, `{"code":"OK","message":"成功","data":{"direct":false,"ssh_addr":"10.4.4.4:2222"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	a := NewApp(srv.URL)
+	a.mu.Lock()
+	a.user = &coreapi.LoginResult{Username: "ops", UserID: 1}
+	a.mu.Unlock()
+	a.api.SetToken("tok")
+	var plan launch.Plan
+	a.launchEnv = &launch.Env{
+		GOOS: "linux",
+		Look: func(name string) (string, bool) {
+			if name == "sqlplus" || name == "xterm" {
+				return "/usr/bin/" + name, true
+			}
+			return "", false
+		},
+		Exists: func(string) bool { return false },
+	}
+	a.launchStart = func(p launch.Plan) error {
+		plan = p
+		return nil
+	}
+	res, err := a.LaunchOracleClient("sqlplus", 6, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan.Args, " ")
+	if strings.Contains(joined, "10.8.8.8") || strings.Contains(joined, "1522") || strings.Contains(res.Command, "数据库口令") {
+		t.Fatalf("command %s args %s", res.Command, joined)
+	}
+	if res.Target != "10.4.4.4:1521" || !res.Started {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestLaunchOracleReportsMissingDBeaver(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/ops/assets":
+			fmt.Fprint(w, `{"code":"OK","message":"成功","data":{"items":[{"asset_id":6,"asset_name":"fin","host":"10.8.8.8","port":1522,"protocol":"oracle","accounts":[{"account_id":4,"account_name":"app"}]}]}}`)
+		case "/api/v1/ops/sessions/assign":
+			fmt.Fprint(w, `{"code":"OK","message":"成功","data":{"direct":false,"ssh_addr":"10.4.4.4:2222"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	a := NewApp(srv.URL)
+	a.mu.Lock()
+	a.user = &coreapi.LoginResult{Username: "ops"}
+	a.mu.Unlock()
+	a.api.SetToken("tok")
+	started := false
+	a.launchEnv = &launch.Env{
+		GOOS:   "linux",
+		Look:   func(string) (string, bool) { return "", false },
+		Exists: func(string) bool { return false },
+	}
+	a.launchStart = func(launch.Plan) error {
+		started = true
+		return nil
+	}
+	_, err := a.LaunchOracleClient("dbeaver", 6, 4)
+	if err == nil || !strings.Contains(err.Error(), "未找到 DBeaver") || started {
+		t.Fatal(err)
+	}
+}
+
 func TestAssignedSSHGatewayFollowsLatest(t *testing.T) {
 	n := 0
 	addrs := []string{"10.0.0.1:2222", "10.0.0.8:2223"}

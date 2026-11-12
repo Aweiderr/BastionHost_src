@@ -1,10 +1,17 @@
 /**
- * Oracle 运维不走 Web 终端。
+ * 本机 sqlplus / DBeaver 的可复制连接说明。
  *
  * 网关读的是 TNS 连接描述符：SERVICE_NAME=运维用户@资产ID[#账号]，
- * BASTION_PASSWORD=堡垒机登录口令。库用户名和库口令仍由 SQL 客户端交给 Oracle，
+ * BASTION_PASSWORD=堡垒机登录口令。库用户名和库口令仍由 SQL 客户端交给 Oracle。
  * 本模块只生成可复制的说明，不填入任何真实口令。
+ * 产品内 SQL 会话走另一组接口，不使用这里的连接串。
  */
+
+/** 连接方式。界面必须让运维点选，不能只放一段说明。 */
+export const ORACLE_LOCAL_MODE = 'local'
+export const ORACLE_CONSOLE_MODE = 'console'
+export const ORACLE_LOCAL_MODE_LABEL = '本机 CMD / DBeaver'
+export const ORACLE_CONSOLE_MODE_LABEL = '堡垒机 SQL 会话'
 import {
   ORACLE_GATEWAY_PORT,
   resolveOracleGatewayHost,

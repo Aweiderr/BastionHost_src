@@ -187,6 +187,7 @@ func main() {
 		opsSvc        *service.OpsService
 		sessionSvc    *service.SessionService
 		sessionKiller *service.SessionKiller
+		oracleConsole *service.OracleConsole
 		smsSvc        *service.SmsService
 		captchaStore  *captcha.Store
 		selftestSvc   *service.SelftestService
@@ -243,6 +244,8 @@ func main() {
 		// 运维面：服务端（协议代理）经服务间接口调用，凭据解密只在这里发生
 		opsSvc = service.NewOpsService(authSvc, grantRepo, assetRepo, accountRepo, policyRepo, oplogRepo, cryptoHelper)
 		sessionSvc = service.NewSessionService(sessionRepo, assetRepo, accountRepo, oplogRepo)
+		oracleConsole = service.NewOracleConsole(opsSvc, sessionSvc, policySvc, nil)
+		oracleConsole.StartJanitor(ctx)
 		sessionSvc.SetAlertRepo(repo.NewAlertRepo(pool))
 		sessionSvc.SetAlertNotifier(service.NewAlertNotifier(cfg.Alert.WebhookURL))
 		if cfg.Alert.WebhookURL != "" {
@@ -415,6 +418,7 @@ func main() {
 			Session:       sessionSvc,
 			SessionRepo:   sessionRepo,
 			SessionKiller: sessionKiller,
+			Oracle:        oracleConsole,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

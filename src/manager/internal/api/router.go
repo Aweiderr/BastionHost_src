@@ -51,6 +51,8 @@ type Deps struct {
 	SessionRepo *repo.SessionRepo
 	// SessionKiller 会话强制中断
 	SessionKiller *service.SessionKiller
+	// Oracle 产品内 SQL 会话。为 nil 时相关接口返回未就绪，不影响其它路由。
+	Oracle *service.OracleConsole
 	// Sms 短信验证码服务；为 nil 时短信 MFA 接口整体不可用
 	Sms *service.SmsService
 	// Captcha 图形验证码存储；为 nil 时验证码接口不可用
@@ -105,6 +107,7 @@ type Server struct {
 	ukey *service.UKeyService
 	// sessionKiller 强制中断进行中的运维会话
 	sessionKiller *service.SessionKiller
+	oracle        *service.OracleConsole
 }
 
 // NewRouter 装配管理服务的全部路由。
@@ -115,15 +118,16 @@ func NewRouter(deps Deps) http.Handler {
 		setup: deps.Setup, auth: deps.Auth, asset: deps.Asset, user: deps.User,
 		policy: deps.Policy, ticket: deps.Ticket,
 		ops: deps.Ops, session: deps.Session, sessRepo: deps.SessionRepo,
-		sms:      deps.Sms,
-		captcha:  deps.Captcha,
-		selftest: deps.Selftest,
-		network:  deps.Network,
-		node:     deps.Node,
-		cluster:  deps.Cluster,
-		grant:    deps.Grant,
-		ukey:     deps.UKey,
+		sms:           deps.Sms,
+		captcha:       deps.Captcha,
+		selftest:      deps.Selftest,
+		network:       deps.Network,
+		node:          deps.Node,
+		cluster:       deps.Cluster,
+		grant:         deps.Grant,
+		ukey:          deps.UKey,
 		sessionKiller: deps.SessionKiller,
+		oracle:        deps.Oracle,
 	}
 
 	mux := http.NewServeMux()
@@ -143,6 +147,7 @@ func NewRouter(deps Deps) http.Handler {
 	registerTicketRoutes(mux, s)
 	registerAuditRoutes(mux, s)
 	registerAlertRoutes(mux, s)
+	registerOracleRoutes(mux, s)
 
 	// ---- 集群节点（自注册、心跳、准入）----
 	registerClusterRoutes(mux, s)

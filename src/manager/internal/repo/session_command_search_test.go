@@ -100,6 +100,11 @@ func TestBuildCommandSearchSelectsOriginAndFiltersIt(t *testing.T) {
 	if strings.Contains(ignored.listSQL, "command_origin =") {
 		t.Fatalf("unknown origin must not filter:\n%s", ignored.listSQL)
 	}
+
+	systemOnly := buildCommandSearch(CommandFilter{TenantID: 1, CommandOrigin: " system "})
+	if !strings.Contains(systemOnly.listSQL, "c.command_origin = $2") || len(systemOnly.args) != 2 || systemOnly.args[1] != "system" {
+		t.Fatalf("system filter = %#v\n%s", systemOnly.args, systemOnly.listSQL)
+	}
 }
 
 func TestBuildCommandSearchKeepsUserAssetPredicatesOnJoin(t *testing.T) {

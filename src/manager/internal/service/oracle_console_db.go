@@ -36,11 +36,11 @@ type oracleDB struct {
 	db *sql.DB
 }
 
-func (o *oracleDB) Query(ctx context.Context, statement string, maxRows int) (OracleTable, error) {
-	if maxRows <= 0 || maxRows > maxOracleRows {
-		maxRows = maxOracleRows
+func (o *oracleDB) Query(ctx context.Context, statement string, maxRows int, args ...any) (OracleTable, error) {
+	if maxRows <= 0 || maxRows > maxOracleMetaRows {
+		maxRows = maxOracleMetaRows
 	}
-	rows, err := o.db.QueryContext(ctx, statement)
+	rows, err := o.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return OracleTable{}, err
 	}

@@ -25,6 +25,41 @@ type OracleSQLResult struct {
 	Message      string      `json:"message"`
 	Blocked      bool        `json:"blocked"`
 	PolicyAction string      `json:"policy_action"`
+	ElapsedMS    int64       `json:"elapsed_ms"`
+}
+
+// OracleSchemaList 是对象树的用户列表。
+type OracleSchemaList struct {
+	Schemas   []string `json:"schemas"`
+	Truncated bool     `json:"truncated"`
+}
+
+// OracleObject 是一张表或一个视图。
+type OracleObject struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+// OracleObjectList 是某个用户下的表和视图。
+type OracleObjectList struct {
+	Schema    string         `json:"schema"`
+	Objects   []OracleObject `json:"objects"`
+	Truncated bool           `json:"truncated"`
+}
+
+// OracleColumn 是一列。
+type OracleColumn struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Nullable bool   `json:"nullable"`
+}
+
+// OracleColumnList 是某张表或视图的列。
+type OracleColumnList struct {
+	Schema    string         `json:"schema"`
+	Name      string         `json:"name"`
+	Columns   []OracleColumn `json:"columns"`
+	Truncated bool           `json:"truncated"`
 }
 
 // OpenOracleConsole 在管理服务上打开 SQL 会话。请求里只有资产和账号。
@@ -56,6 +91,40 @@ func (c *Client) ExecOracleSQL(ctx context.Context, sessionID int64, sql string)
 // CloseOracleConsole 结束产品内 SQL 会话。
 func (c *Client) CloseOracleConsole(ctx context.Context, sessionID int64) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/ops/oracle/sessions/"+itoa(sessionID)+"/close", map[string]any{}, nil)
+}
+
+// OracleSchemas 读取已打开会话能看见的用户。请求不带 SQL。
+func (c *Client) OracleSchemas(ctx context.Context, sessionID int64) (*OracleSchemaList, error) {
+	var out OracleSchemaList
+	err := c.do(ctx, http.MethodPost, "/api/v1/ops/oracle/sessions/"+itoa(sessionID)+"/schemas", map[string]any{}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// OracleObjects 读取某个用户下的表和视图。
+func (c *Client) OracleObjects(ctx context.Context, sessionID int64, schema string) (*OracleObjectList, error) {
+	var out OracleObjectList
+	err := c.do(ctx, http.MethodPost, "/api/v1/ops/oracle/sessions/"+itoa(sessionID)+"/objects", map[string]any{
+		"schema": schema,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// OracleColumns 读取某张表或视图的列。
+func (c *Client) OracleColumns(ctx context.Context, sessionID int64, schema, name string) (*OracleColumnList, error) {
+	var out OracleColumnList
+	err := c.do(ctx, http.MethodPost, "/api/v1/ops/oracle/sessions/"+itoa(sessionID)+"/columns", map[string]any{
+		"schema": schema, "name": name,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func itoa(n int64) string {

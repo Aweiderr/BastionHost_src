@@ -3,9 +3,11 @@ import { test } from 'node:test'
 import {
   COMMAND_ORIGIN_CLIENT_AUTO,
   COMMAND_ORIGIN_FILTERS,
+  COMMAND_ORIGIN_SYSTEM,
   COMMAND_ORIGIN_USER,
   commandOriginQuery,
   isClientAutoCommand,
+  isSystemCommand,
 } from './commandOrigin.ts'
 
 test('命令来源筛选默认不过滤，隐藏客户端自动时只查用户输入', () => {
@@ -13,6 +15,8 @@ test('命令来源筛选默认不过滤，隐藏客户端自动时只查用户�
   assert.equal(COMMAND_ORIGIN_FILTERS[0].value, '')
   assert.equal(COMMAND_ORIGIN_FILTERS[1].label, '仅用户输入')
   assert.equal(COMMAND_ORIGIN_FILTERS[2].label, '仅客户端自动')
+  assert.equal(COMMAND_ORIGIN_FILTERS[3].label, '仅系统元数据')
+  assert.equal(commandOriginQuery(COMMAND_ORIGIN_SYSTEM), 'system')
   assert.equal(commandOriginQuery(''), undefined)
   assert.equal(commandOriginQuery('   '), undefined)
   assert.equal(commandOriginQuery(null), undefined)
@@ -31,4 +35,7 @@ test('身份探测显示为客户端自动，手工 SQL 和历史空值显示为
   assert.equal(isClientAutoCommand(undefined), false)
   assert.equal(isClientAutoCommand(null), false)
   assert.equal(isClientAutoCommand('CLIENT_AUTO'), false)
+  assert.equal(isSystemCommand('system'), true)
+  assert.equal(isSystemCommand('user'), false)
+  assert.equal(isClientAutoCommand('system'), false)
 })

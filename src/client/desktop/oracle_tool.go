@@ -127,6 +127,36 @@ func (a *App) CloseOracleConsole(sessionID int64) error {
 	return a.api.CloseOracleConsole(ctx, sessionID)
 }
 
+// ListOracleSchemas 列出已打开会话能看见的数据库用户。
+func (a *App) ListOracleSchemas(sessionID int64) (*coreapi.OracleSchemaList, error) {
+	if err := a.requireOracleUser(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	return a.api.OracleSchemas(ctx, sessionID)
+}
+
+// ListOracleObjects 列出某个用户下的表和视图。
+func (a *App) ListOracleObjects(sessionID int64, schema string) (*coreapi.OracleObjectList, error) {
+	if err := a.requireOracleUser(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	return a.api.OracleObjects(ctx, sessionID, schema)
+}
+
+// ListOracleColumns 列出某张表或视图的列。
+func (a *App) ListOracleColumns(sessionID int64, schema, name string) (*coreapi.OracleColumnList, error) {
+	if err := a.requireOracleUser(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	return a.api.OracleColumns(ctx, sessionID, schema, name)
+}
+
 func (a *App) requireOracleUser() error {
 	a.mu.Lock()
 	user := a.user

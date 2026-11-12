@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	maxOracleSQLBytes  = 16 * 1024
-	maxOracleRows      = 100
+	maxOracleSQLBytes = 16 * 1024
+	maxOracleRows     = 100
+	// maxOracleMetaRows 只给固定的数据字典查询。用户 SQL 仍用 maxOracleRows。
+	maxOracleMetaRows  = 500
 	maxOracleCols      = 32
 	maxOracleCellRunes = 200
 )

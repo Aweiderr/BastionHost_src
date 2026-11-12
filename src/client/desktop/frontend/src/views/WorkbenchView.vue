@@ -9,8 +9,8 @@
  * 按坐标画到画布。JPEG 帧按到达顺序解码。窗口变化时发送 resize，由 VNC
  * SetDesktopSize 改远端分辨率。目标口令不下发到界面，未托管时只弹出一次输入框。
  *
- * Oracle 打开连接页：本机 CMD / sqlplus 或 DBeaver，或本窗口里的堡垒机 SQL 会话。
- * 口令保持占位符，不代填。SQL 会话只把语句交给管理服务。
+ * Oracle 打开连接页：本机 CMD / sqlplus 或 DBeaver 留在这个标签里。
+ * 选堡垒机 SQL 会话则进入独立工作台，不在这个标签里执行 SQL。口令保持占位符。
  * 其他协议只打开说明标签，不拨 SSH，也不拨画面通道。
  *
  * 图形粘贴读系统剪贴板（ClipboardGetText）。读完之前不把 Ctrl/Cmd 的抬起发给远端，
@@ -35,6 +35,7 @@ import {
   buildDesktopOracleConnectGuide,
   type OracleConnectGuide,
 } from '../utils/oracleConnect'
+import { requestDesktopOracleWorkbench } from '../../../../web/src/utils/oracleWorkbench.ts'
 import {
   assetConnectHint,
   protocolLabel,
@@ -46,14 +47,11 @@ import { localLaunchLabel, localLaunchProtocol, wantsLocalLaunch } from '../loca
 import { leave, offerManualReconnect, tryEnter, type ClickGate } from '../reconnectGate'
 import {
   CloseDesktopSession,
-  CloseOracleConsole,
   CloseSession,
-  ExecOracleSQL,
   GetAssets,
   LaunchLocalTool,
   LaunchOracleClient,
   OpenDesktopSession,
-  OpenOracleConsole,
   OpenSession,
   ReconnectDesktopSession,
   ReconnectSession,
@@ -244,9 +242,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  for (const tab of tabs.value) {
-    if (tab.oracleSessionId) void CloseOracleConsole(tab.oracleSessionId)
-  }
   EventsOff('term:data')
   EventsOff('term:closed')
   EventsOff('term:reconnecting')
@@ -690,12 +685,10 @@ async function closeTab(key: string) {
   const tab = tabs.value.find((t) => t.key === key)
   if (!tab) return
   const kind = tab.kind
-  const oracleSessionId = tab.oracleSessionId
   dropTab(key)
   try {
     if (kind === 'ssh') await CloseSession(key)
     else if (kind === 'desktop') await CloseDesktopSession(key)
-    else if (oracleSessionId) await CloseOracleConsole(oracleSessionId)
   } catch (e) {
     console.error(e)
   }
@@ -1044,13 +1037,26 @@ function launchFromTab(tab: SessionTab) {
 }
 
 function chooseOracleMode(tab: SessionTab, mode: 'local' | 'console') {
-  if (tab.oracleMode !== mode) {
-    tab.oracleNote = ''
-    tab.oracleColumns = []
-    tab.oracleRows = []
-    tab.oracleTruncated = false
+  if (mode === 'console') {
+    openOracleWorkbench(tab)
+    return
   }
+  tab.oracleNote = ''
   tab.oracleMode = mode
+}
+
+function openOracleWorkbench(tab: SessionTab) {
+  const accountID = oracleAccountId(tab)
+  if (!accountID) {
+    notify('请选择账号', 'err')
+    return
+  }
+  requestDesktopOracleWorkbench(state, {
+    assetId: tab.assetId,
+    accountId: accountID,
+    assetName: tab.assetName,
+    accountName: tab.accountName,
+  })
 }
 
 function oracleAccountId(tab: SessionTab): number {
@@ -1078,78 +1084,8 @@ async function launchOracle(tab: SessionTab, tool: 'sqlplus' | 'dbeaver') {
   }
 }
 
-async function closeOracleSession(tab: SessionTab) {
-  const id = tab.oracleSessionId
-  tab.oracleSessionId = 0
-  tab.oracleSessionNo = ''
-  if (tab.status === 'connected') tab.status = 'guide'
-  if (!id) return
-  try {
-    await CloseOracleConsole(id)
-  } catch (e: any) {
-    notify(String(e?.message || e), 'err')
-  }
-}
-
-async function openOracleSession(tab: SessionTab) {
-  const accountID = oracleAccountId(tab)
-  if (!accountID || tab.oracleBusy) return
-  tab.oracleBusy = true
-  tab.oracleNote = ''
-  tab.oracleColumns = []
-  tab.oracleRows = []
-  try {
-    if (tab.oracleSessionId) await closeOracleSession(tab)
-    const info: any = await OpenOracleConsole(tab.assetId, accountID)
-    tab.oracleSessionId = Number(info?.session_id || 0)
-    tab.oracleSessionNo = String(info?.session_no || '')
-    tab.sessionNo = tab.oracleSessionNo
-    tab.status = 'connected'
-    tab.oracleNote = 'SQL 会话已打开。语句经堡垒机授权和审计，本窗口不直连资产。'
-  } catch (e: any) {
-    tab.status = 'guide'
-    tab.oracleNote = String(e?.message || e)
-    notify(tab.oracleNote, 'err')
-  } finally {
-    tab.oracleBusy = false
-  }
-}
-
-async function runOracleSQL(tab: SessionTab) {
-  if (!tab.oracleSessionId || tab.oracleBusy) return
-  const sql = tab.oracleSQL.trim()
-  if (!sql) {
-    tab.oracleNote = '请输入 SQL'
-    return
-  }
-  tab.oracleBusy = true
-  try {
-    const res: any = await ExecOracleSQL(tab.oracleSessionId, sql)
-    tab.oracleColumns = Array.isArray(res?.columns) ? res.columns : []
-    tab.oracleRows = Array.isArray(res?.rows) ? res.rows : []
-    tab.oracleTruncated = res?.truncated === true
-    tab.oracleNote = String(res?.message || (res?.blocked ? '已阻断' : '已执行'))
-    if (res?.blocked) notify(tab.oracleNote, 'info')
-  } catch (e: any) {
-    tab.oracleColumns = []
-    tab.oracleRows = []
-    tab.oracleNote = String(e?.message || e)
-    notify(tab.oracleNote, 'err')
-  } finally {
-    tab.oracleBusy = false
-  }
-}
-
 function onOracleAccount(tab: SessionTab) {
-  tab.oracleColumns = []
-  tab.oracleRows = []
   tab.oracleNote = ''
-  if (tab.oracleSessionId) void closeOracleSession(tab)
-}
-
-function oracleCell(cell: string | null | undefined): string {
-  if (cell === null || cell === undefined) return 'NULL'
-  return String(cell)
 }
 </script>
 
@@ -1408,55 +1344,6 @@ function oracleCell(cell: string | null | undefined): string {
                 <div class="oracle-mono">{{ oracleRemark(t) }}</div>
                 <button class="ghost sm" type="button" @click="copyField(oracleRemark(t), '备注')">复制</button>
               </div>
-              </template>
-              <template v-else-if="t.oracleMode === ORACLE_CONSOLE_MODE">
-                <p class="oracle-warn">
-                  SQL 在堡垒机上执行，走当前登录的授权和托管账号，并写入审计。这不是 SSH 终端，也不会把本窗口直接连到
-                  <span class="oracle-mono">{{ t.host }}:{{ t.port }}</span>
-                  。未托管口令请改用「{{ ORACLE_LOCAL_MODE_LABEL }}」。这里不显示、不代填口令。
-                </p>
-                <div class="oracle-row">
-                  <div class="k">数据库用户名</div>
-                  <div>
-                    <select v-if="oracleAccounts(t).length > 1" v-model="t.accountName" @change="onOracleAccount(t)">
-                      <option v-for="acc in oracleAccounts(t)" :key="acc.account_id" :value="acc.account_name">
-                        {{ acc.account_name }}
-                      </option>
-                    </select>
-                    <div v-else-if="oracleGuide(t).dbUsername" class="oracle-mono">{{ oracleGuide(t).dbUsername }}</div>
-                    <div v-else class="hint">未绑定可用账号</div>
-                  </div>
-                  <button class="primary sm" type="button" :disabled="t.oracleBusy || !oracleGuide(t).dbUsername" @click="openOracleSession(t)">
-                    {{ t.oracleSessionId ? '重新打开' : '打开 SQL 会话' }}
-                  </button>
-                </div>
-                <p v-if="t.oracleSessionNo" class="hint">
-                  会话 {{ t.oracleSessionNo }}
-                  <button class="ghost sm" type="button" :disabled="t.oracleBusy" @click="closeOracleSession(t)">结束会话</button>
-                </p>
-                <label class="hint" :for="'oracle-sql-' + t.key">SQL</label>
-                <textarea :id="'oracle-sql-' + t.key" v-model="t.oracleSQL" class="oracle-sql" rows="5" spellcheck="false" />
-                <div class="oracle-actions">
-                  <button class="primary sm" type="button" :disabled="t.oracleBusy || !t.oracleSessionId" @click="runOracleSQL(t)">
-                    执行
-                  </button>
-                  <span v-if="t.oracleTruncated" class="hint">结果已截断</span>
-                </div>
-                <p v-if="t.oracleNote" class="hint">{{ t.oracleNote }}</p>
-                <div v-if="t.oracleColumns.length" class="oracle-table-wrap">
-                  <table class="oracle-table">
-                    <thead>
-                      <tr>
-                        <th v-for="col in t.oracleColumns" :key="col">{{ col }}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="(row, i) in t.oracleRows" :key="i">
-                        <td v-for="(cell, j) in row" :key="j">{{ oracleCell(cell) }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
               </template>
             </div>
           </div>

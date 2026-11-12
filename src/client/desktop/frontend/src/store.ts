@@ -70,7 +70,7 @@ export interface SessionRecord {
   block_count: number
 }
 
-export type ViewName = 'workbench' | 'sessions' | 'device'
+export type ViewName = 'workbench' | 'sessions' | 'device' | 'oracle'
 
 export const state = reactive({
   loggedIn: false,
@@ -85,6 +85,13 @@ export const state = reactive({
   loginError: '',
   /** 当前活动会话 key（终端页签） */
   activeKey: '' as string,
+  /** 从工作台跳进 SQL 工作台时待打开的资产。工作台页取走后清空。 */
+  oraclePending: null as null | {
+    assetId: number
+    accountId: number
+    assetName: string
+    accountName: string
+  },
 })
 
 export function notify(text: string, kind: 'info' | 'ok' | 'err' = 'info') {

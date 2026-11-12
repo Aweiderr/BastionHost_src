@@ -5,11 +5,14 @@ import logo2x from '@/assets/logo@2x.png'
 import logoUrl from '@/assets/logo.png'
 import AccountDialog from '@/components/AccountDialog.vue'
 import { MENU_GROUPS, type MenuGroup } from '@/router'
+import { ORACLE_WORKBENCH_COMPONENT } from '@/utils/oracleWorkbench'
+import { shutdownOracleWorkbench } from '@/stores/oracleWorkbench'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { roleLabel } from '@/utils/constants'
 
 const route = useRoute()
+const oracleKeepAlive = [ORACLE_WORKBENCH_COMPONENT]
 const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
@@ -117,6 +120,7 @@ onBeforeUnmount(() => {
 })
 
 async function handleLogout(): Promise<void> {
+  await shutdownOracleWorkbench()
   await auth.logout()
   app.success('已退出登录')
   void router.replace('/login')
@@ -176,8 +180,13 @@ async function handleLogout(): Promise<void> {
         </div>
       </header>
 
-      <main class="content">
-        <router-view />
+      <main class="content" :class="{ 'content-oracle': route.name === 'oracle' }">
+        <!-- 只缓存 SQL 工作台。图形会话和终端仍按原来的方式进出，切走会卸载。 -->
+        <router-view v-slot="{ Component }">
+          <keep-alive :include="oracleKeepAlive">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </main>
     </div>
 
@@ -356,5 +365,10 @@ async function handleLogout(): Promise<void> {
   min-height: 0;
   overflow-y: auto;
   padding: 20px;
+}
+
+.content-oracle {
+  padding: 0;
+  overflow: hidden;
 }
 </style>

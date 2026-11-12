@@ -26,7 +26,7 @@ test('图形协议和 Oracle 的提示不再写尚未接入', () => {
   assert.equal(oracle.includes('尚未接入'), false)
   assert.match(vnc, /图形会话/)
   assert.match(oracle, /本机 CMD \/ DBeaver/)
-  assert.match(oracle, /堡垒机 SQL 会话/)
+  assert.match(oracle, /SQL 工作台/)
   assert.equal(oracle.includes('不会建立数据库会话'), false)
   assert.match(assetConnectHint('sftp'), /SFTP 客户端/)
   assert.match(assetConnectHint('sftp'), /用户名@资产#账号/)

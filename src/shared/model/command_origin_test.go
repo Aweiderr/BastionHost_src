@@ -12,6 +12,8 @@ func TestNormalizeCommandOrigin(t *testing.T) {
 		{" USER ", CommandOriginUser},
 		{"client_auto", CommandOriginClientAuto},
 		{" Client_Auto ", CommandOriginClientAuto},
+		{"system", CommandOriginSystem},
+		{" System ", CommandOriginSystem},
 		{"client-auto", CommandOriginUser},
 		{"auto", CommandOriginUser},
 		{"user;drop", CommandOriginUser},
@@ -35,5 +37,8 @@ func TestCommandOriginFilter(t *testing.T) {
 	}
 	if got := CommandOriginFilter("CLIENT_AUTO"); got != CommandOriginClientAuto {
 		t.Fatalf("auto filter = %q", got)
+	}
+	if got := CommandOriginFilter("SYSTEM"); got != CommandOriginSystem {
+		t.Fatalf("system filter = %q", got)
 	}
 }

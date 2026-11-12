@@ -60,6 +60,12 @@ export function ExecOracleSQL(arg1:number,arg2:string):Promise<coreapi.OracleSQL
 
 export function CloseOracleConsole(arg1:number):Promise<void>;
 
+export function ListOracleSchemas(arg1:number):Promise<coreapi.OracleSchemaList>;
+
+export function ListOracleObjects(arg1:number,arg2:string):Promise<coreapi.OracleObjectList>;
+
+export function ListOracleColumns(arg1:number,arg2:string,arg3:string):Promise<coreapi.OracleColumnList>;
+
 export function ReconnectSession(arg1:string):Promise<void>;
 
 export function ReconnectDesktopSession(arg1:string):Promise<void>;

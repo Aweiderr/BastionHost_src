@@ -15,6 +15,9 @@ func TestOracleConsoleRouteRequiresAuth(t *testing.T) {
 		"/api/v1/ops/oracle/sessions",
 		"/api/v1/ops/oracle/sessions/9/sql",
 		"/api/v1/ops/oracle/sessions/9/close",
+		"/api/v1/ops/oracle/sessions/9/schemas",
+		"/api/v1/ops/oracle/sessions/9/objects",
+		"/api/v1/ops/oracle/sessions/9/columns",
 	} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"asset_id":1}`))
 		rr := httptest.NewRecorder()

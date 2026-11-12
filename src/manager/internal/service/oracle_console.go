@@ -46,7 +46,7 @@ type OraclePolicy interface {
 
 // OracleConn 是管理服务持有的一条 Oracle 连接。浏览器拿不到它。
 type OracleConn interface {
-	Query(ctx context.Context, statement string, maxRows int) (OracleTable, error)
+	Query(ctx context.Context, statement string, maxRows int, args ...any) (OracleTable, error)
 	Exec(ctx context.Context, statement string) (int64, error)
 	Close() error
 }
@@ -110,6 +110,8 @@ type OracleSQLResult struct {
 	Message      string      `json:"message,omitempty"`
 	Blocked      bool        `json:"blocked,omitempty"`
 	PolicyAction string      `json:"policy_action,omitempty"`
+	// ElapsedMS 是这次执行耗时（含策略判定）。旧客户端忽略未知字段。
+	ElapsedMS int64 `json:"elapsed_ms"`
 }
 
 // OracleConsole 是产品内的 Oracle SQL 会话。
@@ -310,6 +312,13 @@ func (c *OracleConsole) Exec(ctx context.Context, actor OracleActor, sessionID i
 	if err != nil {
 		return nil, errcode.New(errcode.ErrBadRequest, err.Error())
 	}
+	started := time.Now()
+	finish := func(res *OracleSQLResult, err error) (*OracleSQLResult, error) {
+		if res != nil {
+			res.ElapsedMS = time.Since(started).Milliseconds()
+		}
+		return res, err
+	}
 	decision, err := c.judge(ctx, live, in.SQL)
 	if err != nil {
 		return nil, err
@@ -334,7 +343,7 @@ func (c *OracleConsole) Exec(ctx context.Context, actor OracleActor, sessionID i
 	}
 	if _, err := c.sessions.AddCommand(ctx, live.info.SessionID, cmd); err != nil {
 		slog.Warn("Oracle SQL 审计写入失败，已拒绝执行", "session_id", live.info.SessionID, "err", err)
-		return nil, errcode.New(errcode.ErrInternal, "命令审计写入失败，已拒绝执行")
+		return finish(nil, errcode.New(errcode.ErrInternal, "命令审计写入失败，已拒绝执行"))
 	}
 	live.last = c.now()
 	if blocked {
@@ -345,9 +354,9 @@ func (c *OracleConsole) Exec(ctx context.Context, actor OracleActor, sessionID i
 		if rule := oracleRule(decision); rule != "" {
 			msg += "：" + rule
 		}
-		return &OracleSQLResult{
+		return finish(&OracleSQLResult{
 			Kind: "blocked", Blocked: true, Message: msg, PolicyAction: oracleAction(decision),
-		}, nil
+		}, nil)
 	}
 
 	execCtx, cancel := context.WithTimeout(ctx, oracleExecTimeout)
@@ -355,26 +364,26 @@ func (c *OracleConsole) Exec(ctx context.Context, actor OracleActor, sessionID i
 	if queryOracleSQL(statement) {
 		table, qerr := live.conn.Query(execCtx, statement, maxOracleRows)
 		if qerr != nil {
-			return nil, errcode.New(errcode.ErrBadRequest, oracleUserError(qerr))
+			return finish(nil, errcode.New(errcode.ErrBadRequest, oracleUserError(qerr)))
 		}
 		msg := ""
 		if table.Truncated {
 			msg = "结果已截断，只返回前若干行"
 		}
-		return &OracleSQLResult{
+		return finish(&OracleSQLResult{
 			Kind: "query", Columns: table.Columns, Rows: table.Rows,
 			RowCount: len(table.Rows), Truncated: table.Truncated, Message: msg,
 			PolicyAction: oracleAction(decision),
-		}, nil
+		}, nil)
 	}
 	n, eerr := live.conn.Exec(execCtx, statement)
 	if eerr != nil {
-		return nil, errcode.New(errcode.ErrBadRequest, oracleUserError(eerr))
+		return finish(nil, errcode.New(errcode.ErrBadRequest, oracleUserError(eerr)))
 	}
-	return &OracleSQLResult{
+	return finish(&OracleSQLResult{
 		Kind: "exec", RowsAffected: n, RowCount: int(n), Message: "语句已执行",
 		PolicyAction: oracleAction(decision),
-	}, nil
+	}, nil)
 }
 
 // Close 结束会话并断开数据库连接。

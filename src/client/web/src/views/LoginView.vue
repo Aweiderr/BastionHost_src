@@ -10,12 +10,15 @@ import UkeyMfaDialog from '@/components/UkeyMfaDialog.vue'
 import { canAccessPath, firstAllowedPath } from '@/router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import { WINDOWS_CLIENT_HREF } from '@/utils/clientDownload'
+import { CLIENT_PACKAGES, suggestClientPackageForNavigator } from '@/utils/clientDownload'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
+
+// 只给当前系统对应的主选包加「推荐」。Windows 与麒麟的链接都保留。
+const suggestedPackageId = suggestClientPackageForNavigator()
 
 const form = ref({ username: '', password: '', totp_code: '' })
 const showTotp = ref(false)
@@ -349,14 +352,31 @@ function onMfaCancel(): void {
       </form>
 
       <!--
-        直接下载 Windows 桌面客户端，不经过弹窗。
+        按操作系统和格式分别下载，不经过弹窗。
         地址由管理服务从 BASTION_DOWNLOAD_DIR 提供，登录前即可访问。
+        Windows、麒麟 RPM、麒麟 tar.gz 始终都列出：
+        当前电脑是 Windows 时，仍可能要给麒麟机器下安装包，反过来也一样。
         不使用 download 属性：安装包缺失时服务端返回 JSON 404，
-        若强制按文件名保存，用户会得到一个打不开的“exe”。
+        若强制按文件名保存，用户会得到一个打不开的文件。
       -->
-      <a class="btn btn-block mt-16" :href="WINDOWS_CLIENT_HREF" title="下载 Windows 桌面客户端">
-        下载客户端
-      </a>
+      <div class="client-downloads mt-16">
+        <div class="client-downloads-label">下载桌面客户端</div>
+        <a
+          v-for="pkg in CLIENT_PACKAGES"
+          :key="pkg.id"
+          class="btn btn-block"
+          :class="{ 'btn-primary': pkg.id === suggestedPackageId }"
+          :href="pkg.href"
+          :title="pkg.title"
+        >
+          {{ pkg.label }}
+          <span v-if="pkg.id === suggestedPackageId" class="client-download-mark">推荐</span>
+          <span v-else-if="pkg.role === 'alternative'" class="client-download-mark">备选</span>
+        </a>
+        <p class="client-downloads-hint">
+          麒麟优先安装 RPM。没有 rpm 时用 tar.gz，解压后执行 install.sh。其它系统的安装包也可以下载。
+        </p>
+      </div>
 
       <!-- 第二因子弹窗：账密通过后才出现 -->
       <MfaDialog

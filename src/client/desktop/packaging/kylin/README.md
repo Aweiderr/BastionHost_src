@@ -49,6 +49,17 @@ packaging/kylin/package.sh
 
 安装包 **没有国密签名**。签名要用现场密钥，脚本不会伪造。
 
+## 放到登录页供下载
+
+登录页不使用带版本的文件名。把本脚本生成的包放进管理服务的下载目录后，再拷贝或在**同一目录内**做符号链接（链接目标不能跳出该目录）：
+
+| 打包产物 | 登录页使用的稳定文件名 |
+| --- | --- |
+| `bastion-desktop-<版本>-1.ky10.x86_64.rpm`（例如 `bastion-desktop-0.1.0-1.ky10.x86_64.rpm`） | `bastion-desktop-kylin-x86_64.rpm` |
+| `bastion-desktop-<版本>-linux-x86_64.tar.gz`（例如 `bastion-desktop-0.1.0-linux-x86_64.tar.gz`） | `bastion-desktop-linux-x86_64.tar.gz` |
+
+生产目录是 `/opt/bastion/downloads/`。对应地址是 `/bastion/downloads/bastion-desktop-kylin-x86_64.rpm` 和 `/bastion/downloads/bastion-desktop-linux-x86_64.tar.gz`。Windows 的 `bastion-desktop.exe` 仍放在同一目录，地址不变。RPM 是登录页上的麒麟主选，tar.gz 是备选。
+
 ## 装好之后
 
 桌面菜单「堡垒机运维客户端」，或直接运行 `/opt/bastion-desktop/bastion-desktop`。管理服务地址仍按客户端原有规则：`BASTION_CORE_URL`、上次记住的地址，否则 `http://127.0.0.1:8080`。

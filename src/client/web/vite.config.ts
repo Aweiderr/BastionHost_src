@@ -26,7 +26,7 @@ export default defineConfig({
         target: MANAGER_TARGET,
         changeOrigin: true,
       },
-      // 登录页「下载客户端」指向 /bastion/downloads/。
+      // 登录页桌面客户端下载指向 /bastion/downloads/。
       // 开发服务器若不转发，会把这个地址回落成 index.html，浏览器会保存一份登录页。
       '/bastion/downloads': {
         target: MANAGER_TARGET,

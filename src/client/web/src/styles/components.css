@@ -886,6 +886,36 @@
   margin-bottom: 22px;
 }
 
+.client-downloads {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.client-downloads-label {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.client-download-mark {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.client-downloads-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
 .steps {
   display: flex;
   align-items: center;

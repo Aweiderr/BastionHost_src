@@ -140,7 +140,10 @@ func registerStaticRoutes(mux *http.ServeMux, dir, prefix, downloadDir string) {
 		// 浏览器"下载成功"一个 HTML 当客户端，打开是登录页而非程序，
 		// 这种问题很难往"文件不存在"上想。
 		//
-		// 登录页「下载客户端」请求的是 <前缀>/downloads/bastion-desktop.exe，
+		// 登录页按稳定文件名请求安装包，例如
+		// <前缀>/downloads/bastion-desktop.exe、
+		// bastion-desktop-kylin-x86_64.rpm、
+		// bastion-desktop-linux-x86_64.tar.gz，
 		// 对应 BASTION_DOWNLOAD_DIR 里的同名文件。这里不硬编码文件名：
 		// 目录里放什么就提供什么，但只提供普通文件，并且强制按附件下载。
 		if clean == "downloads" || strings.HasPrefix(clean, "downloads/") {

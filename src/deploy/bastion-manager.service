@@ -32,7 +32,8 @@ ProtectHome=true
 #
 # 只放开网络配置目录：即便服务被控，影响面也限于网卡配置（可见、可恢复）。
 #
-# /opt/bastion/downloads 是登录页「下载客户端」读取 bastion-desktop.exe 的目录。
+# /opt/bastion/downloads 是登录页读取桌面客户端安装包的目录
+# （bastion-desktop.exe、bastion-desktop-kylin-x86_64.rpm、bastion-desktop-linux-x86_64.tar.gz）。
 # ProtectSystem=full 下进程创建不了工作目录里的新子目录，所以这里单独放开，
 # 让启动时的 MkdirAll 能够成功。安装包由运维拷入，服务只负责读出。
 ReadWritePaths=/opt/bastion/data /opt/bastion/client /opt/bastion/downloads /var/log/bastion /etc/sysconfig/network-scripts

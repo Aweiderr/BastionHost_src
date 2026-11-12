@@ -41,20 +41,26 @@
 | `bin/manager`、`bin/server`、`bin/migrate` | `.\build.ps1 linux`（Windows）或 `make linux`（Linux/macOS） |
 | 前端 `client/web/dist/` | `cd client/web && npm install && npm run build` |
 | `downloads/bastion-desktop.exe` | 在 Windows 上 `cd client/desktop && wails build`，拷贝 `build/bin/bastion-desktop.exe`。云端环境编不出该文件 |
+| `downloads/bastion-desktop-kylin-x86_64.rpm` | 麒麟打包出的 RPM。公开文件名不含版本。把 `bastion-desktop-<版本>-1.ky10.x86_64.rpm`（例如 `bastion-desktop-0.1.0-1.ky10.x86_64.rpm`）拷贝或在同目录符号链接成这个名字 |
+| `downloads/bastion-desktop-linux-x86_64.tar.gz` | 麒麟打包出的 tar.gz，作为 RPM 的备选。把 `bastion-desktop-<版本>-linux-x86_64.tar.gz`（例如 `bastion-desktop-0.1.0-linux-x86_64.tar.gz`）拷贝或在同目录符号链接成这个名字 |
 | `record-verify`（可选） | `go build -o bin/record-verify ./cmd/record-verify` |
 
-登录页「下载客户端」请求 `http://<服务器IP>:8080/bastion/downloads/bastion-desktop.exe`，无需登录。
-`install.sh` 会创建 `/opt/bastion/downloads/` 并写入 `BASTION_DOWNLOAD_DIR`。已部署的机器补放文件即可，不必重装：
+登录页分别提供 Windows（.exe）、麒麟 RPM 和麒麟 tar.gz，无需登录。
+`install.sh` 会创建 `/opt/bastion/downloads/` 并写入 `BASTION_DOWNLOAD_DIR`。已部署的机器补放文件即可，不必重装。
+原来的 Windows 地址保持为 `http://<服务器IP>:8080/bastion/downloads/bastion-desktop.exe`。
 
 ```bash
 install -d -m 0755 /opt/bastion/downloads
 install -m 0644 bastion-desktop.exe /opt/bastion/downloads/bastion-desktop.exe
+# 带版本的麒麟包留在同一目录，再链成登录页使用的稳定名字。
+ln -sfn bastion-desktop-0.1.0-1.ky10.x86_64.rpm /opt/bastion/downloads/bastion-desktop-kylin-x86_64.rpm
+ln -sfn bastion-desktop-0.1.0-linux-x86_64.tar.gz /opt/bastion/downloads/bastion-desktop-linux-x86_64.tar.gz
 curl -fsS -D - -o /tmp/bastion-desktop.exe \
   http://127.0.0.1:8080/bastion/downloads/bastion-desktop.exe
 # 期望：HTTP 200，Content-Disposition 含 bastion-desktop.exe，文件与拷入的一致
 ```
 
-目录里还没有该文件时，同一地址返回 JSON `API_4040`，而不是登录页。本版本不做客户端自动更新。
+符号链接的目标必须仍在下载目录内。目录里还没有对应文件时，该地址返回 JSON `API_4040`，而不是登录页。本版本不做客户端自动更新。
 
 二进制是**纯静态**（`CGO_ENABLED=0`），不依赖 glibc 版本：
 

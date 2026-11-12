@@ -9,8 +9,8 @@
  * 按坐标画到画布。JPEG 帧按到达顺序解码。窗口变化时发送 resize，由 VNC
  * SetDesktopSize 改远端分辨率。目标口令不下发到界面，未托管时只弹出一次输入框。
  *
- * Oracle 只打开客户端连接说明（网关、SERVICE_NAME、sqlplus、JDBC）。
- * 口令保持占位符，不在本窗口建立数据库会话。
+ * Oracle 打开连接页：本机 CMD / sqlplus 或 DBeaver，或本窗口里的堡垒机 SQL 会话。
+ * 口令保持占位符，不代填。SQL 会话只把语句交给管理服务。
  * 其他协议只打开说明标签，不拨 SSH，也不拨画面通道。
  *
  * 图形粘贴读系统剪贴板（ClipboardGetText）。读完之前不把 Ctrl/Cmd 的抬起发给远端，
@@ -28,6 +28,10 @@ import { BitmapProtocolError, fitDesktopSize, keysymOf, mapDesktopPoint, paintBi
 import {
   BASTION_PASSWORD_PLACEHOLDER,
   DB_PASSWORD_PLACEHOLDER,
+  ORACLE_CONSOLE_MODE,
+  ORACLE_CONSOLE_MODE_LABEL,
+  ORACLE_LOCAL_MODE,
+  ORACLE_LOCAL_MODE_LABEL,
   buildDesktopOracleConnectGuide,
   type OracleConnectGuide,
 } from '../utils/oracleConnect'
@@ -42,10 +46,14 @@ import { localLaunchLabel, localLaunchProtocol, wantsLocalLaunch } from '../loca
 import { leave, offerManualReconnect, tryEnter, type ClickGate } from '../reconnectGate'
 import {
   CloseDesktopSession,
+  CloseOracleConsole,
   CloseSession,
+  ExecOracleSQL,
   GetAssets,
   LaunchLocalTool,
+  LaunchOracleClient,
   OpenDesktopSession,
+  OpenOracleConsole,
   OpenSession,
   ReconnectDesktopSession,
   ReconnectSession,
@@ -113,6 +121,15 @@ interface SessionTab {
   clipText: string
   clipOrigin: SessionClipOrigin
   lastPanelPaste: string
+  oracleMode: '' | 'local' | 'console'
+  oracleSessionId: number
+  oracleSessionNo: string
+  oracleSQL: string
+  oracleBusy: boolean
+  oracleColumns: string[]
+  oracleRows: (string | null)[][]
+  oracleNote: string
+  oracleTruncated: boolean
 }
 
 interface TermRuntime {
@@ -227,6 +244,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  for (const tab of tabs.value) {
+    if (tab.oracleSessionId) void CloseOracleConsole(tab.oracleSessionId)
+  }
   EventsOff('term:data')
   EventsOff('term:closed')
   EventsOff('term:reconnecting')
@@ -487,6 +507,15 @@ async function connect(acc?: Account) {
     clipText: '',
     clipOrigin: '',
     lastPanelPaste: '',
+    oracleMode: '',
+    oracleSessionId: 0,
+    oracleSessionNo: '',
+    oracleSQL: 'SELECT 1 FROM DUAL',
+    oracleBusy: false,
+    oracleColumns: [],
+    oracleRows: [],
+    oracleNote: '',
+    oracleTruncated: false,
   }
   tabs.value.push(tab)
   activate(key)
@@ -497,7 +526,7 @@ async function connect(acc?: Account) {
     return
   }
   if (kind === 'oracle') {
-    notify(`${asset.asset_name}：已打开客户端连接说明`, 'info')
+    notify(`${asset.asset_name}：请选择本机 CMD / DBeaver 或堡垒机 SQL 会话`, 'info')
     return
   }
 
@@ -661,10 +690,12 @@ async function closeTab(key: string) {
   const tab = tabs.value.find((t) => t.key === key)
   if (!tab) return
   const kind = tab.kind
+  const oracleSessionId = tab.oracleSessionId
   dropTab(key)
   try {
     if (kind === 'ssh') await CloseSession(key)
     else if (kind === 'desktop') await CloseDesktopSession(key)
+    else if (oracleSessionId) await CloseOracleConsole(oracleSessionId)
   } catch (e) {
     console.error(e)
   }
@@ -881,7 +912,12 @@ function desktopWaitText(tab: SessionTab): string {
 }
 
 function statusText(tab: SessionTab) {
-  if (tab.kind === 'oracle') return '连接说明'
+  if (tab.kind === 'oracle') {
+    if (tab.status === 'connected') return 'SQL 会话'
+    if (tab.oracleMode === 'local') return '本机工具'
+    if (tab.oracleMode === 'console') return '堡垒机会话'
+    return '选择连接方式'
+  }
   if (tab.kind === 'unsupported') return '尚未接入'
   if (tab.status === 'connecting') return '连接中'
   if (tab.status === 'connected') return '已连接'
@@ -944,8 +980,8 @@ function protocolTagClass(protocol: string) {
   return sessionKind(protocol) === 'unsupported' ? 'warn' : 'brand'
 }
 
-function connectLabel(protocol: string) {
-  return sessionKind(protocol) === 'oracle' ? '查看说明' : '连接'
+function connectLabel(_protocol: string) {
+  return '连接'
 }
 
 async function reconnectTab(key: string) {
@@ -1005,6 +1041,115 @@ function launchFromTab(tab: SessionTab) {
     return
   }
   void launchLocal(asset, account)
+}
+
+function chooseOracleMode(tab: SessionTab, mode: 'local' | 'console') {
+  if (tab.oracleMode !== mode) {
+    tab.oracleNote = ''
+    tab.oracleColumns = []
+    tab.oracleRows = []
+    tab.oracleTruncated = false
+  }
+  tab.oracleMode = mode
+}
+
+function oracleAccountId(tab: SessionTab): number {
+  const asset = assets.value.find((item) => item.asset_id === tab.assetId)
+  const account = asset?.accounts?.find((item) => item.account_name === tab.accountName)
+  return account?.account_id ?? 0
+}
+
+async function launchOracle(tab: SessionTab, tool: 'sqlplus' | 'dbeaver') {
+  const accountID = oracleAccountId(tab)
+  if (!accountID) {
+    notify('请选择账号', 'err')
+    return
+  }
+  if (!tryEnter(launchGate)) return
+  try {
+    const res: any = await LaunchOracleClient(tool, tab.assetId, accountID)
+    tab.oracleNote = String(res?.message || '已打开本机工具')
+    notify(tab.oracleNote, 'ok')
+  } catch (e: any) {
+    tab.oracleNote = String(e?.message || e)
+    notify(tab.oracleNote, 'err')
+  } finally {
+    leave(launchGate)
+  }
+}
+
+async function closeOracleSession(tab: SessionTab) {
+  const id = tab.oracleSessionId
+  tab.oracleSessionId = 0
+  tab.oracleSessionNo = ''
+  if (tab.status === 'connected') tab.status = 'guide'
+  if (!id) return
+  try {
+    await CloseOracleConsole(id)
+  } catch (e: any) {
+    notify(String(e?.message || e), 'err')
+  }
+}
+
+async function openOracleSession(tab: SessionTab) {
+  const accountID = oracleAccountId(tab)
+  if (!accountID || tab.oracleBusy) return
+  tab.oracleBusy = true
+  tab.oracleNote = ''
+  tab.oracleColumns = []
+  tab.oracleRows = []
+  try {
+    if (tab.oracleSessionId) await closeOracleSession(tab)
+    const info: any = await OpenOracleConsole(tab.assetId, accountID)
+    tab.oracleSessionId = Number(info?.session_id || 0)
+    tab.oracleSessionNo = String(info?.session_no || '')
+    tab.sessionNo = tab.oracleSessionNo
+    tab.status = 'connected'
+    tab.oracleNote = 'SQL 会话已打开。语句经堡垒机授权和审计，本窗口不直连资产。'
+  } catch (e: any) {
+    tab.status = 'guide'
+    tab.oracleNote = String(e?.message || e)
+    notify(tab.oracleNote, 'err')
+  } finally {
+    tab.oracleBusy = false
+  }
+}
+
+async function runOracleSQL(tab: SessionTab) {
+  if (!tab.oracleSessionId || tab.oracleBusy) return
+  const sql = tab.oracleSQL.trim()
+  if (!sql) {
+    tab.oracleNote = '请输入 SQL'
+    return
+  }
+  tab.oracleBusy = true
+  try {
+    const res: any = await ExecOracleSQL(tab.oracleSessionId, sql)
+    tab.oracleColumns = Array.isArray(res?.columns) ? res.columns : []
+    tab.oracleRows = Array.isArray(res?.rows) ? res.rows : []
+    tab.oracleTruncated = res?.truncated === true
+    tab.oracleNote = String(res?.message || (res?.blocked ? '已阻断' : '已执行'))
+    if (res?.blocked) notify(tab.oracleNote, 'info')
+  } catch (e: any) {
+    tab.oracleColumns = []
+    tab.oracleRows = []
+    tab.oracleNote = String(e?.message || e)
+    notify(tab.oracleNote, 'err')
+  } finally {
+    tab.oracleBusy = false
+  }
+}
+
+function onOracleAccount(tab: SessionTab) {
+  tab.oracleColumns = []
+  tab.oracleRows = []
+  tab.oracleNote = ''
+  if (tab.oracleSessionId) void closeOracleSession(tab)
+}
+
+function oracleCell(cell: string | null | undefined): string {
+  if (cell === null || cell === undefined) return 'NULL'
+  return String(cell)
 }
 </script>
 
@@ -1097,7 +1242,7 @@ function launchFromTab(tab: SessionTab) {
         </template>
         <template v-else>
           <span class="tag">未连接</span>
-          <span>选择资产后点击「连接」。SSH 打开终端，RDP / VNC 打开远端桌面，Oracle 打开客户端连接说明。</span>
+          <span>选择资产后点击「连接」。SSH 打开终端，RDP / VNC 打开远端桌面，Oracle 选择本机工具或堡垒机 SQL 会话。</span>
         </template>
         <span class="spacer"></span>
         <button
@@ -1116,14 +1261,43 @@ function launchFromTab(tab: SessionTab) {
           <div v-if="t.kind === 'oracle'" class="oracle-guide">
             <div class="oracle-card">
               <span class="tag brand">{{ protocolLabel(t.protocol) }}</span>
-              <h3>Oracle 客户端连接说明</h3>
+              <h3>Oracle 连接</h3>
+              <div class="oracle-modes" role="tablist" aria-label="Oracle 连接方式">
+                <button
+                  class="ghost sm"
+                  :class="{ primary: t.oracleMode === ORACLE_LOCAL_MODE }"
+                  type="button"
+                  role="tab"
+                  :aria-selected="t.oracleMode === ORACLE_LOCAL_MODE"
+                  @click="chooseOracleMode(t, ORACLE_LOCAL_MODE)"
+                >
+                  {{ ORACLE_LOCAL_MODE_LABEL }}
+                </button>
+                <button
+                  class="ghost sm"
+                  :class="{ primary: t.oracleMode === ORACLE_CONSOLE_MODE }"
+                  type="button"
+                  role="tab"
+                  :aria-selected="t.oracleMode === ORACLE_CONSOLE_MODE"
+                  @click="chooseOracleMode(t, ORACLE_CONSOLE_MODE)"
+                >
+                  {{ ORACLE_CONSOLE_MODE_LABEL }}
+                </button>
+              </div>
+              <p v-if="!t.oracleMode" class="hint">请先选择一种连接方式。</p>
+              <p class="oracle-asset">{{ t.assetName }}</p>
+              <template v-if="t.oracleMode === ORACLE_LOCAL_MODE">
               <p class="oracle-warn">
-                请在本机使用 sqlplus 或 DBeaver 连接下方网关。本窗口不会建立数据库会话。
+                可以拉起本机已安装的 CMD / sqlplus 或 DBeaver，只连堡垒机网关。未安装时会提示，下面的命令仍可复制。
                 列表中的资产地址
                 <span class="oracle-mono">{{ t.host }}:{{ t.port }}</span>
-                是堡垒机转发用的目标，工作站不要直连。
+                是堡垒机转发用的目标，工作站不要直连。命令行不放口令。
               </p>
-              <p class="oracle-asset">{{ t.assetName }}</p>
+              <div class="oracle-actions">
+                <button class="primary sm" type="button" @click="launchOracle(t, 'sqlplus')">打开本机 CMD / sqlplus</button>
+                <button class="ghost sm" type="button" @click="launchOracle(t, 'dbeaver')">打开 DBeaver</button>
+              </div>
+              <p v-if="t.oracleNote" class="hint">{{ t.oracleNote }}</p>
               <div class="oracle-row">
                 <div class="k">网关地址</div>
                 <div>
@@ -1145,7 +1319,7 @@ function launchFromTab(tab: SessionTab) {
               <div class="oracle-row">
                 <div class="k">数据库用户名</div>
                 <div>
-                  <select v-if="oracleAccounts(t).length > 1" v-model="t.accountName">
+                  <select v-if="oracleAccounts(t).length > 1" v-model="t.accountName" @change="onOracleAccount(t)">
                     <option v-for="acc in oracleAccounts(t)" :key="acc.account_id" :value="acc.account_name">
                       {{ acc.account_name }}
                     </option>
@@ -1234,6 +1408,56 @@ function launchFromTab(tab: SessionTab) {
                 <div class="oracle-mono">{{ oracleRemark(t) }}</div>
                 <button class="ghost sm" type="button" @click="copyField(oracleRemark(t), '备注')">复制</button>
               </div>
+              </template>
+              <template v-else-if="t.oracleMode === ORACLE_CONSOLE_MODE">
+                <p class="oracle-warn">
+                  SQL 在堡垒机上执行，走当前登录的授权和托管账号，并写入审计。这不是 SSH 终端，也不会把本窗口直接连到
+                  <span class="oracle-mono">{{ t.host }}:{{ t.port }}</span>
+                  。未托管口令请改用「{{ ORACLE_LOCAL_MODE_LABEL }}」。这里不显示、不代填口令。
+                </p>
+                <div class="oracle-row">
+                  <div class="k">数据库用户名</div>
+                  <div>
+                    <select v-if="oracleAccounts(t).length > 1" v-model="t.accountName" @change="onOracleAccount(t)">
+                      <option v-for="acc in oracleAccounts(t)" :key="acc.account_id" :value="acc.account_name">
+                        {{ acc.account_name }}
+                      </option>
+                    </select>
+                    <div v-else-if="oracleGuide(t).dbUsername" class="oracle-mono">{{ oracleGuide(t).dbUsername }}</div>
+                    <div v-else class="hint">未绑定可用账号</div>
+                  </div>
+                  <button class="primary sm" type="button" :disabled="t.oracleBusy || !oracleGuide(t).dbUsername" @click="openOracleSession(t)">
+                    {{ t.oracleSessionId ? '重新打开' : '打开 SQL 会话' }}
+                  </button>
+                </div>
+                <p v-if="t.oracleSessionNo" class="hint">
+                  会话 {{ t.oracleSessionNo }}
+                  <button class="ghost sm" type="button" :disabled="t.oracleBusy" @click="closeOracleSession(t)">结束会话</button>
+                </p>
+                <label class="hint" :for="'oracle-sql-' + t.key">SQL</label>
+                <textarea :id="'oracle-sql-' + t.key" v-model="t.oracleSQL" class="oracle-sql" rows="5" spellcheck="false" />
+                <div class="oracle-actions">
+                  <button class="primary sm" type="button" :disabled="t.oracleBusy || !t.oracleSessionId" @click="runOracleSQL(t)">
+                    执行
+                  </button>
+                  <span v-if="t.oracleTruncated" class="hint">结果已截断</span>
+                </div>
+                <p v-if="t.oracleNote" class="hint">{{ t.oracleNote }}</p>
+                <div v-if="t.oracleColumns.length" class="oracle-table-wrap">
+                  <table class="oracle-table">
+                    <thead>
+                      <tr>
+                        <th v-for="col in t.oracleColumns" :key="col">{{ col }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(row, i) in t.oracleRows" :key="i">
+                        <td v-for="(cell, j) in row" :key="j">{{ oracleCell(cell) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </template>
             </div>
           </div>
           <div v-else-if="t.kind === 'unsupported'" class="term-placeholder">

@@ -90,6 +90,9 @@ type StartSessionRequest struct {
 	GrantSource string `json:"grant_source"`
 	TicketID    *int64 `json:"ticket_id"`
 	Purpose     string `json:"purpose"`
+	// SkipPlacement 只给进程内调用。产品内 Oracle SQL 会话由管理服务自己持有连接，
+	// 不落到某台代理的在途清单。字段不进 JSON，代理上报无法把它打开。
+	SkipPlacement bool `json:"-"`
 }
 
 // Start 创建会话记录。
@@ -97,7 +100,7 @@ func (s *SessionService) Start(ctx context.Context, req StartSessionRequest) (*m
 	if req.UserID == 0 || req.AssetID == 0 {
 		return nil, fmt.Errorf("会话必须包含用户与资产")
 	}
-	if s.place != nil {
+	if s.place != nil && !req.SkipPlacement {
 		if err := s.place(ctx, req); err != nil {
 			return nil, err
 		}

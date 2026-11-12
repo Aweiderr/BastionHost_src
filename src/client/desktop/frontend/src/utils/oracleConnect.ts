@@ -1,10 +1,10 @@
 /**
- * 桌面端 Oracle 连接说明。
+ * 桌面端 Oracle 连接说明，以及两种连接方式的名称。
  *
  * 与 Web 端 src/client/web/src/utils/oracleConnect.ts 同一套字段：
  * 网关读的是 TNS 连接描述符，SERVICE_NAME=运维用户@资产ID[#账号]，
  * BASTION_PASSWORD=堡垒机登录口令。库用户名和库口令仍由 SQL 客户端交给 Oracle。
- * 这里只生成可复制的说明，不建立数据库会话，也不填入任何真实口令。
+ * 这里只生成可复制的说明，不填入任何真实口令。产品内 SQL 会话走管理服务接口。
  *
  * Windows cmd 不认单引号。sqlplus 命令把整段登录串放在双引号里，
  * 复制后可直接粘贴到 cmd.exe。bash 仍用单引号，避免服务名里的 # 被当成注释。
@@ -16,6 +16,12 @@ export const BASTION_PASSWORD_PLACEHOLDER = 'BASTION_PASSWORD'
 export const DB_PASSWORD_PLACEHOLDER = '数据库口令'
 export const DB_USERNAME_PLACEHOLDER = '数据库用户名'
 export const OPS_USERNAME_PLACEHOLDER = '运维用户'
+
+/** 与 Web 端相同的两种连接方式名称。 */
+export const ORACLE_LOCAL_MODE = 'local'
+export const ORACLE_CONSOLE_MODE = 'console'
+export const ORACLE_LOCAL_MODE_LABEL = '本机 CMD / DBeaver'
+export const ORACLE_CONSOLE_MODE_LABEL = '堡垒机 SQL 会话'
 
 export function isOracleProtocol(protocol: string | undefined | null): boolean {
   return (protocol ?? '').trim().toLowerCase() === 'oracle'

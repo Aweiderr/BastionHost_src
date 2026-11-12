@@ -366,6 +366,23 @@ button.tab-x:hover:not(:disabled) { background: transparent; color: #fff; }
   margin: 0 0 8px; padding: 10px 12px;
   background: #101a30; border: 1px solid var(--line); border-radius: 8px;
 }
+.oracle-modes, .oracle-actions {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0;
+}
+.oracle-modes .primary, .oracle-actions .primary { border-color: transparent; }
+.oracle-sql {
+  width: 100%; min-height: 96px; resize: vertical; margin-top: 6px;
+  font-family: var(--mono); font-size: 12.5px;
+}
+.oracle-table-wrap {
+  overflow: auto; max-height: 280px; margin-top: 8px;
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.oracle-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.oracle-table th, .oracle-table td {
+  padding: 6px 8px; border-bottom: 1px solid var(--line);
+  text-align: left; white-space: pre-wrap; word-break: break-all;
+}
 
 /* ---------- Toast ---------- */
 .toast {

@@ -623,6 +623,7 @@
 - [x] **桌面客户端运维闭环补强（MFA 短信 / 强制改密）** —— 2026-10-21
 - [x] **短信验证码清理任务** —— 2026-10-21：`SmsService.StartCleanupLoop`（发送/校验/频控原已具备）
 - [x] **RDP / VNC / Oracle 通道骨架** —— 2026-10-21：可编译监听骨架 + PROTOCOL_SKELETON.md（协议解析未做）
+- [x] **Oracle 连接方式** —— 2026-11-12：Web 与桌面客户端可选择「本机 CMD / DBeaver」或「堡垒机 SQL 会话」。SQL 会话由管理服务按授权和托管账号执行并写入审计；浏览器和桌面端不直连资产。TNS 网关仍给本机 sqlplus / DBeaver 使用。
 
 （备查）
 

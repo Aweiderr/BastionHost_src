@@ -189,7 +189,7 @@ function connectTab(key: string, followRedirect = false): void {
   if (isOracleProtocol(tab.protocol)) {
     tab.status = 'error'
     tab.statusText = '请用客户端'
-    tab.errorText = 'Oracle 不使用 Web 终端。请回到「我的资源」，点「连接」查看 sqlplus / DBeaver 说明。'
+    tab.errorText = 'Oracle 不使用 SSH 终端。请回到「我的资源」，点「连接」后选择本机 CMD / DBeaver 或堡垒机 SQL 会话。'
     return
   }
   if (tab.status === 'connecting' || tab.status === 'connected') return
@@ -598,7 +598,7 @@ async function openFromRoute(): Promise<void> {
     if (isGraphicalProtocol(asset.protocol)) {
       app.info('RDP / VNC 请从「我的资源」打开图形会话')
     } else {
-      app.info('Oracle 不使用 Web 终端，请回到「我的资源」查看客户端连接说明')
+      app.info('Oracle 不使用 SSH 终端，请回到「我的资源」选择本机 CMD / DBeaver 或堡垒机 SQL 会话')
     }
   }
 }
@@ -644,7 +644,7 @@ onBeforeUnmount(() => {
 
     <div v-if="!tabs.length" class="card">
       <div class="card-body">
-        还没有打开的资源。SSH 等协议请从「我的资源」点「连接」。Oracle 请在该页查看客户端连接说明。
+        还没有打开的资源。SSH 等协议请从「我的资源」点「连接」。Oracle 请在该页选择本机 CMD / DBeaver 或堡垒机 SQL 会话。
       </div>
     </div>
 

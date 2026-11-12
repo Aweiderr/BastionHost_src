@@ -129,6 +129,13 @@ type envelope struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doHTTP(ctx, c.http, method, path, body, out)
+}
+
+func (c *Client) doHTTP(ctx context.Context, hc *http.Client, method, path string, body, out any) error {
+	if hc == nil {
+		hc = c.http
+	}
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -146,7 +153,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("无法连接管理服务 %s：%w", c.base, err)
 	}

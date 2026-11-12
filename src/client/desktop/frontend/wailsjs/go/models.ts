@@ -140,6 +140,52 @@ export namespace coreapi {
 	        this.block_count = source["block_count"];
 	    }
 	}
+	export class OracleConsoleInfo {
+	    session_id: number;
+	    session_no: string;
+	    asset_name: string;
+	    account_name: string;
+
+	    static createFrom(source: any = {}) {
+	        return new OracleConsoleInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.session_id = source["session_id"];
+	        this.session_no = source["session_no"];
+	        this.asset_name = source["asset_name"];
+	        this.account_name = source["account_name"];
+	    }
+	}
+	export class OracleSQLResult {
+	    kind: string;
+	    columns?: string[];
+	    rows?: (string | null)[][];
+	    row_count: number;
+	    rows_affected?: number;
+	    truncated?: boolean;
+	    message?: string;
+	    blocked?: boolean;
+	    policy_action?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new OracleSQLResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.columns = source["columns"];
+	        this.rows = source["rows"];
+	        this.row_count = source["row_count"];
+	        this.rows_affected = source["rows_affected"];
+	        this.truncated = source["truncated"];
+	        this.message = source["message"];
+	        this.blocked = source["blocked"];
+	        this.policy_action = source["policy_action"];
+	    }
+	}
 
 }
 

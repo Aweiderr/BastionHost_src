@@ -52,6 +52,14 @@ export function ChangePassword(arg1:string,arg2:string):Promise<void>;
 
 export function LaunchLocalTool(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number,arg6:string,arg7:number):Promise<main.LocalLaunchResult>;
 
+export function LaunchOracleClient(arg1:string,arg2:number,arg3:number):Promise<main.LocalLaunchResult>;
+
+export function OpenOracleConsole(arg1:number,arg2:number):Promise<coreapi.OracleConsoleInfo>;
+
+export function ExecOracleSQL(arg1:number,arg2:string):Promise<coreapi.OracleSQLResult>;
+
+export function CloseOracleConsole(arg1:number):Promise<void>;
+
 export function ReconnectSession(arg1:string):Promise<void>;
 
 export function ReconnectDesktopSession(arg1:string):Promise<void>;

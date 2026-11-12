@@ -101,6 +101,50 @@ export interface SessionAssignment {
  * 默认静默：没有健康节点时由会话页自己展示，避免再弹一条全局提示。
  * 网络故障和 5xx 才由调用方回退到本机入口。
  */
+/** 产品内 Oracle SQL 会话。响应里没有地址和口令。 */
+export interface OracleConsoleInfo {
+  session_id: number
+  session_no: string
+  asset_name: string
+  account_name: string
+}
+
+export interface OracleSQLResult {
+  kind: string
+  columns?: string[]
+  rows?: (string | null)[][]
+  row_count: number
+  rows_affected?: number
+  truncated?: boolean
+  message?: string
+  blocked?: boolean
+  policy_action?: string
+}
+
+export function openOracleConsole(assetId: number, accountId: number) {
+  return request<OracleConsoleInfo>('/ops/oracle/sessions', {
+    method: 'POST',
+    body: { asset_id: assetId, account_id: accountId },
+    silent: true,
+  })
+}
+
+export function execOracleSQL(sessionId: number, sql: string) {
+  return request<OracleSQLResult>(`/ops/oracle/sessions/${sessionId}/sql`, {
+    method: 'POST',
+    body: { sql },
+    silent: true,
+  })
+}
+
+export function closeOracleConsole(sessionId: number) {
+  return request<{ session_id: number; status: string }>(`/ops/oracle/sessions/${sessionId}/close`, {
+    method: 'POST',
+    body: {},
+    silent: true,
+  })
+}
+
 export function assignOpsSession(body: {
   asset_id: number
   account_id?: number

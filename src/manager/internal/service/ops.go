@@ -318,6 +318,8 @@ type OpsCredential struct {
 	// 网关用完口令即丢，连接标识可以留在会话路径上。
 	OracleServiceName string `json:"oracle_service_name,omitempty"`
 	OracleSID         string `json:"oracle_sid,omitempty"`
+	// Level 是资产等级，命令策略按它匹配。多出来的字段，旧客户端会忽略。
+	Level string `json:"level,omitempty"`
 }
 
 // FetchCredential 校验授权并解密下发连接凭据。
@@ -365,6 +367,7 @@ func (s *OpsService) FetchCredential(ctx context.Context, op OperatorContext, us
 			CanFile: check.CanFile, CanCopy: check.CanCopy, CanPaste: check.CanPaste,
 			HostKeyFingerprint: asset.SSHHostKeyFP, HostKeyPolicy: asset.SSHHostKeyPolicy,
 			OracleServiceName: asset.OracleServiceName, OracleSID: asset.OracleSID,
+			Level: asset.Level,
 		}, nil
 	}
 
@@ -383,6 +386,7 @@ func (s *OpsService) FetchCredential(ctx context.Context, op OperatorContext, us
 		CanFile: check.CanFile, CanCopy: check.CanCopy, CanPaste: check.CanPaste,
 		HostKeyFingerprint: asset.SSHHostKeyFP, HostKeyPolicy: asset.SSHHostKeyPolicy,
 		OracleServiceName: asset.OracleServiceName, OracleSID: asset.OracleSID,
+		Level: asset.Level,
 	}
 	if acc.PasswordCipher != "" {
 		plain, err := s.crypto.DecryptWith(ctx, keyID, acc.PasswordCipher)

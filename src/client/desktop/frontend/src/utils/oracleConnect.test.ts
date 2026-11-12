@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildOracleConnectGuide as buildWebOracleConnectGuide } from '../../../../web/src/utils/oracleConnect.ts'
+import {
+  ORACLE_CONSOLE_MODE_LABEL as WEB_CONSOLE_LABEL,
+  ORACLE_LOCAL_MODE_LABEL as WEB_LOCAL_LABEL,
+  buildOracleConnectGuide as buildWebOracleConnectGuide,
+} from '../../../../web/src/utils/oracleConnect.ts'
 import { ORACLE_GATEWAY_HOST } from './oracleGateway.ts'
 import {
   BASTION_PASSWORD_PLACEHOLDER,
+  ORACLE_CONSOLE_MODE_LABEL,
+  ORACLE_LOCAL_MODE_LABEL,
   DB_PASSWORD_PLACEHOLDER,
   DB_USERNAME_PLACEHOLDER,
   OPS_USERNAME_PLACEHOLDER,
@@ -199,4 +205,11 @@ test('工作台说明用管理服务主机，不用资产目标地址，回环�
   assert.equal(local.sqlplus.includes('127.0.0.1'), false)
   assert.equal(local.description.includes('BASTION_PASSWORD=BASTION_PASSWORD'), true)
   assert.equal(local.sqlplus.includes('数据库口令'), true)
+})
+
+test('桌面端和 Web 端的两种连接方式名称一致', () => {
+  assert.equal(ORACLE_LOCAL_MODE_LABEL, '本机 CMD / DBeaver')
+  assert.equal(ORACLE_CONSOLE_MODE_LABEL, '堡垒机 SQL 会话')
+  assert.equal(ORACLE_LOCAL_MODE_LABEL, WEB_LOCAL_LABEL)
+  assert.equal(ORACLE_CONSOLE_MODE_LABEL, WEB_CONSOLE_LABEL)
 })

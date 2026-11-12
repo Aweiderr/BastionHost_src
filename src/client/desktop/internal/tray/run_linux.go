@@ -10,13 +10,6 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 )
 
-// Handlers 是托盘图标准备好、被点开或被要求退出时的回调。
-type Handlers struct {
-	Ready func()
-	Show  func()
-	Quit  func()
-}
-
 type statusItem struct {
 	show func()
 	quit func()
@@ -94,7 +87,11 @@ func Run(h Handlers) error {
 		conn.Close()
 		return fmt.Errorf("导出托盘菜单失败：%w", err)
 	}
-	w, ht, pix := IconARGB()
+	w, ht, pix, err := IconARGB()
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("托盘图标不可用：%w", err)
+	}
 	_, err = prop.Export(conn, "/StatusNotifierItem", prop.Map{
 		"org.kde.StatusNotifierItem": {
 			"Category": {Value: "Application"},

@@ -41,22 +41,42 @@ func (a *App) beforeClose(ctx context.Context) bool {
 	return true
 }
 
+// wailsFrontendKey 是 Wails v2.16 挂桌面前端的 context key。
+// runtime.getFrontend 用字符串 "frontend" 取值；WindowShow、WindowHide、
+// WindowUnminimise 和 Quit 缺了这个值会 log.Fatalf。
+//
+// 事件总线是另一个字符串 key "events"，只给 EventsEmit 用。
+// 用它判断窗口能不能显示时，总线上拿不到值就会直接返回。
+// beforeClose 拿到的是 Wails 传入的上下文，没有这道判断，所以窗口能藏起来，点托盘却回不来。
+const wailsFrontendKey = "frontend"
+
+func wailsWindowReady(ctx context.Context) bool {
+	return ctx != nil && ctx.Value(wailsFrontendKey) != nil
+}
+
+var (
+	trayUnminimise = runtime.WindowUnminimise
+	trayShow       = runtime.WindowShow
+	trayHide       = runtime.WindowHide
+	trayQuit       = runtime.Quit
+)
+
 func (a *App) showFromTray() {
-	if a.ctx == nil || a.ctx.Value("events") == nil {
+	if !wailsWindowReady(a.ctx) {
 		return
 	}
-	runtime.WindowUnminimise(a.ctx)
-	runtime.WindowShow(a.ctx)
+	trayUnminimise(a.ctx)
+	trayShow(a.ctx)
 }
 
 func (a *App) quitFromTray() {
 	if a.trayCtl != nil {
 		a.trayCtl.RequestQuit()
 	}
-	if a.ctx == nil || a.ctx.Value("events") == nil {
+	if !wailsWindowReady(a.ctx) {
 		return
 	}
-	runtime.Quit(a.ctx)
+	trayQuit(a.ctx)
 }
 
 // TrayReady 告诉界面托盘图标是否已经显示。
@@ -69,9 +89,9 @@ func (a *App) HideToTray() error {
 	if a.trayCtl == nil || !a.trayCtl.Ready() {
 		return fmt.Errorf("当前环境没有可用的系统托盘")
 	}
-	if a.ctx == nil || a.ctx.Value("events") == nil {
+	if !wailsWindowReady(a.ctx) {
 		return fmt.Errorf("窗口尚未就绪")
 	}
-	runtime.WindowHide(a.ctx)
+	trayHide(a.ctx)
 	return nil
 }

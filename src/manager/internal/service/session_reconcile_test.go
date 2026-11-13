@@ -140,3 +140,28 @@ func TestSelectOrphansResetsWhenSessionReturns(t *testing.T) {
 		t.Fatalf("closes only after a fresh grace window, got %v", got)
 	}
 }
+
+func TestSelectOrphansSkipsLogicalConsoleNode(t *testing.T) {
+	r := NewSessionReconciler(nil, nil)
+	r.minAge = 30 * time.Second
+	r.orphanGrace = 45 * time.Second
+	now := time.Date(2026, 11, 13, 2, 36, 0, 0, time.UTC)
+	// 253 is the production shape: oracle_console lives in the manager
+	// process with proxy_node=console. That name is not a proxy, so there
+	// is no live-session report for it. CloseStale owns real offline nodes;
+	// this path must keep treating a missing report as "not eligible".
+	sessions := []*model.Session{
+		activeSession(253, "console", now.Add(-2*time.Minute)),
+		activeSession(41, "node-1", now.Add(-2*time.Minute)),
+	}
+	reports := map[string]liveNodeReport{
+		"node-1": {reported: true, at: now, ids: liveSet(41)},
+	}
+	if got := r.selectOrphans(now, sessions, reports, 60*time.Second); len(got) != 0 {
+		t.Fatalf("console must not be armed as an orphan, got %v", got)
+	}
+	got := r.selectOrphans(now.Add(time.Hour), sessions, reports, 60*time.Second)
+	if len(got) != 0 {
+		t.Fatalf("console stays ineligible without a fresh live-session report, got %v", got)
+	}
+}

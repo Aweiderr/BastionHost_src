@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -63,10 +64,26 @@ const (
 	recordFailed    = "failed"
 )
 
+// gatewayClient 是 SSH / SFTP 网关回源管理面的能力。*managerclient.Client 直接满足。
+type gatewayClient interface {
+	VerifyOps(ctx context.Context, username, password, totpCode, clientIP string) (*managerclient.OpsIdentity, error)
+	VerifyToken(ctx context.Context, token string) (*managerclient.OpsIdentity, error)
+	AccessibleAssets(ctx context.Context, userID int64) ([]*managerclient.AssetBrief, error)
+	AccessibleFileAssets(ctx context.Context, userID int64) ([]*managerclient.AssetBrief, error)
+	CheckGrant(ctx context.Context, userID, assetID, accountID int64) (*managerclient.GrantCheck, error)
+	FetchCredential(ctx context.Context, userID int64, username string, assetID, accountID int64, sessionNo, clientIP string) (*managerclient.Credential, error)
+	LearnHostKey(ctx context.Context, assetID int64, fingerprint, policy string) error
+	StartSession(ctx context.Context, payload map[string]any) (*managerclient.SessionInfo, error)
+	AddCommand(ctx context.Context, sessionID int64, payload *managerclient.SessionCommandPayload) error
+	AddFile(ctx context.Context, sessionID int64, payload *managerclient.SessionFilePayload) error
+	FinishSession(ctx context.Context, sessionID int64, payload map[string]any) error
+	Schedule(ctx context.Context, in managerclient.ScheduleRequest) (*managerclient.Placement, error)
+}
+
 // Server 是 SSH 网关。
 type Server struct {
 	cfg          *config.Config
-	client       *managerclient.Client
+	client       gatewayClient
 	policies     *policycache.Cache
 	prov         crypto.Provider
 	recordKeyID  string
@@ -108,14 +125,21 @@ type Server struct {
 	admit func() (bool, string)
 }
 
+var _ gatewayClient = (*managerclient.Client)(nil)
+
 // NewServer 创建 SSH 网关。
 func NewServer(cfg *config.Config, client *managerclient.Client, policies *policycache.Cache,
 	prov crypto.Provider, recordKeyID string) *Server {
-	return &Server{
-		cfg: cfg, client: client, policies: policies, prov: prov, recordKeyID: recordKeyID,
+	s := &Server{
+		cfg: cfg, policies: policies, prov: prov, recordKeyID: recordKeyID,
 		conns: make(map[net.Conn]struct{}),
 		lives: make(map[int64]*liveSession),
 	}
+	// nil 指针赋给接口后接口本身不为 nil，后续判空会失效。
+	if client != nil {
+		s.client = client
+	}
+	return s
 }
 
 // identity 是认证通过后随连接保存的身份信息。
@@ -317,7 +341,14 @@ func (s *Server) authenticate(ctx context.Context, meta ssh.ConnMetadata, raw st
 	id, err := s.client.VerifyOps(actx, user, pwd, totp, remoteIP)
 	if err != nil {
 		slog.Info("SSH 认证失败", "user", user, "remote", remoteIP, "err", err)
-		return nil, fmt.Errorf("%s", managerclient.UserMessage(err))
+		msg := managerclient.UserMessage(err)
+		// 口令错误只回一句通用失败。短信 / UKey 要把原因送到认证横幅，
+		// 否则 Xshell 这类客户端只能看到“认证失败”，和口令错误分不开。
+		var ae *managerclient.APIError
+		if errors.As(err, &ae) && ae.Code == managerclient.CodeGatewayMFAUnsupported {
+			return nil, &ssh.BannerError{Message: msg, Err: errors.New(msg)}
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 	if !hasPermission(id.Permissions, "ops:session:connect") {
 		slog.Info("SSH 认证被拒：缺少会话权限", "user", user, "remote", remoteIP)

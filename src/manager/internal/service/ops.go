@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,7 +24,7 @@ type OpsService struct {
 	assetRepo  *repo.AssetRepo
 	acctRepo   *repo.AccountRepo
 	policyRepo *repo.PolicyRepo
-	oplog      *repo.OperationLogRepo
+	oplog      opLogWriter
 	crypto     *CryptoHelper
 }
 
@@ -36,10 +38,14 @@ func NewOpsService(
 	oplog *repo.OperationLogRepo,
 	crypto *CryptoHelper,
 ) *OpsService {
-	return &OpsService{
+	s := &OpsService{
 		auth: auth, grantRepo: grantRepo, assetRepo: assetRepo, acctRepo: acctRepo,
-		policyRepo: policyRepo, oplog: oplog, crypto: crypto,
+		policyRepo: policyRepo, crypto: crypto,
 	}
+	if oplog != nil {
+		s.oplog = oplog
+	}
+	return s
 }
 
 // OpsIdentity 是服务端认证成功后拿到的操作者身份。
@@ -57,8 +63,7 @@ type OpsIdentity struct {
 func (s *OpsService) VerifyCredential(ctx context.Context, username, password, totpCode, clientIP string) (*OpsIdentity, error) {
 	u, roles, perms, err := s.auth.Authenticate(ctx, username, password, totpCode, clientIP)
 	if err != nil {
-		s.writeOpsLog(ctx, OperatorContext{Username: username, ClientIP: clientIP},
-			"ops", "ops_login", "user", "", username, "failed", err.Error())
+		s.writeOpsAuthFailure(ctx, username, clientIP, err)
 		return nil, err
 	}
 	s.writeOpsLog(ctx, OperatorContext{UserID: u.UserID, Username: u.Username, ClientIP: clientIP},
@@ -462,6 +467,50 @@ func (s *OpsService) pickAccount(ctx context.Context, assetID, accountID int64) 
 // 规则本身不敏感，但必须与执行侧完全一致，因此以"管理服务为准"下发。
 func (s *OpsService) CommandPolicies(ctx context.Context) ([]*policy.Rule, error) {
 	return s.policyRepo.LoadEnabledRules(ctx, 0)
+}
+
+// writeOpsAuthFailure 记录网关登录失败。
+//
+// 失败原因放在 error_message（文本列）。二次认证类型不被该入口支持时，
+// after_value 再写一条 JSON，原因码与普通口令错误不同，避免审计里混成同一件事。
+// 早先把 err.Error() 塞进 after_value，那一列是 jsonb，纯文本插入会失败，记录实际落不了库。
+func (s *OpsService) writeOpsAuthFailure(ctx context.Context, username, clientIP string, err error) {
+	if s == nil || s.oplog == nil || err == nil {
+		return
+	}
+	l := &model.OperationLog{
+		Module: "ops", Action: "ops_login", TargetType: "user",
+		TargetName: username, Result: "failed",
+		ErrorMessage: truncate(err.Error(), 1000),
+		ClientIP:     clientIP, OperatorNameSnap: username,
+	}
+	if errors.Is(err, ErrGatewayMFAUnsupported) {
+		l.AfterValue = gatewayMFAAuditDetail(err)
+	}
+	_ = s.oplog.Write(ctx, l)
+}
+
+// gatewayMFAAuditDetail 是“这一入口不支持该二次认证”的审计正文。
+func gatewayMFAAuditDetail(err error) string {
+	mfaType := ""
+	var ge *gatewayMFAUnsupportedError
+	if errors.As(err, &ge) && ge != nil {
+		mfaType = ge.Type
+	}
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	raw, jerr := json.Marshal(map[string]string{
+		"reason":   gatewayMFAAuditReason,
+		"entry":    "ssh_sftp_oracle",
+		"mfa_type": mfaType,
+		"message":  msg,
+	})
+	if jerr != nil {
+		return msg
+	}
+	return string(raw)
 }
 
 // writeOpsLog 记录运维面操作日志。

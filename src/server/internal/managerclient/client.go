@@ -60,6 +60,8 @@ const (
 	CodeMFARequired       = "AUTH_4003"
 	CodeMFAInvalid        = "AUTH_4004"
 	CodeAccountDisabled   = "AUTH_4006"
+	// CodeGatewayMFAUnsupported 短信 / UKey 账号不能从 SSH、SFTP、Oracle 只凭口令进入。
+	CodeGatewayMFAUnsupported = "AUTH_4010"
 )
 
 // IsAuthError 判断是否为认证类错误（可提示给终端用户）。
@@ -69,7 +71,8 @@ func IsAuthError(err error) bool {
 		return false
 	}
 	switch ae.Code {
-	case CodeInvalidCredential, CodeAccountLocked, CodeMFARequired, CodeMFAInvalid, CodeAccountDisabled:
+	case CodeInvalidCredential, CodeAccountLocked, CodeMFARequired, CodeMFAInvalid, CodeAccountDisabled,
+		CodeGatewayMFAUnsupported:
 		return true
 	}
 	return false
@@ -92,6 +95,11 @@ func UserMessage(err error) string {
 		return "动态令牌验证码错误"
 	case CodeAccountDisabled:
 		return "账号已停用"
+	case CodeGatewayMFAUnsupported:
+		if ae.Message != "" {
+			return ae.Message
+		}
+		return "该账号已启用 UKey 或短信二次认证，请使用 Web 控制台或桌面客户端登录"
 	default:
 		return ae.Message
 	}

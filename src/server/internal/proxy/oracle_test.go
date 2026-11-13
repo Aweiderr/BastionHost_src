@@ -29,9 +29,11 @@ func (s staticJudge) Evaluate(ctx policy.EvalContext, cmd string) *policy.Decisi
 }
 
 type fakeOracle struct {
-	mu       sync.Mutex
-	user     string
-	pass     string
+	mu   sync.Mutex
+	user string
+	pass string
+	// verify 非空时替代默认的口令核对，用来模拟管理面的认证结论。
+	verify   func(username, password, totpCode string) (*managerclient.OpsIdentity, error)
 	assets   []*managerclient.AssetBrief
 	cred     *managerclient.Credential
 	deny     bool
@@ -61,6 +63,9 @@ func (f *fakeOracle) VerifyToken(_ context.Context, token string) (*managerclien
 }
 
 func (f *fakeOracle) VerifyOps(_ context.Context, username, password, totpCode, _ string) (*managerclient.OpsIdentity, error) {
+	if f.verify != nil {
+		return f.verify(username, password, totpCode)
+	}
 	if username != f.user || password != f.pass {
 		return nil, &managerclient.APIError{Code: managerclient.CodeInvalidCredential, Message: "bad", Status: 401}
 	}

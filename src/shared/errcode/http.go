@@ -16,7 +16,7 @@ func ErrToStatus(code Code) int {
 	// ErrPasswordExpired 与「未登录 / 令牌失效」不是同一件事：令牌有效，
 	// 用户必须先改口令。用 403，避免客户端把 AUTH_4008 当成 401 清会话。
 	case ErrForbidden, ErrNoGrant, ErrStrictModeOnly, ErrAccessModeLoose, ErrAppScopeViolation,
-		ErrPasswordExpired:
+		ErrPasswordExpired, ErrGatewayMFAUnsupported:
 		return http.StatusForbidden
 	case ErrNotFound:
 		return http.StatusNotFound
@@ -47,15 +47,16 @@ var defaultMessages = map[Code]string{
 	ErrConflict:     "资源冲突",
 	ErrTooManyReq:   "请求过于频繁，请稍后重试",
 
-	ErrInvalidCredential:   "用户名或口令不正确",
-	ErrAccountLocked:       "账号已被锁定",
-	ErrMFARequired:         "需要完成多因素认证",
-	ErrMFAInvalid:          "验证码不正确",
-	ErrTokenExpired:        "登录已过期，请重新登录",
-	ErrTokenInvalid:        "令牌无效",
-	ErrNoGrant:             "未获得该资产或账号的授权",
-	ErrPasswordExpired:     "口令已过期，请先修改口令",
-	ErrKickedByOtherClient: "已在其他端登录",
+	ErrInvalidCredential:     "用户名或口令不正确",
+	ErrAccountLocked:         "账号已被锁定",
+	ErrMFARequired:           "需要完成多因素认证",
+	ErrMFAInvalid:            "验证码不正确",
+	ErrTokenExpired:          "登录已过期，请重新登录",
+	ErrTokenInvalid:          "令牌无效",
+	ErrNoGrant:               "未获得该资产或账号的授权",
+	ErrPasswordExpired:       "口令已过期，请先修改口令",
+	ErrKickedByOtherClient:   "已在其他端登录",
+	ErrGatewayMFAUnsupported: "该账号的二次认证方式在 SSH、SFTP、Oracle 入口不受支持，请使用 Web 控制台或桌面客户端登录",
 
 	ErrPermitRequired:    "请先登录堡垒机客户端获取运维许可",
 	ErrPermitExpired:     "运维许可已过期，请重新登录客户端",

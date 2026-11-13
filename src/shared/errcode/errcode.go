@@ -40,6 +40,10 @@ const (
 	// HTTP 401，客户端应清掉本地令牌，并明确提示「已在其他端登录」，
 	// 不要和口令过期（403）或普通过期混成同一句。
 	ErrKickedByOtherClient Code = "AUTH_4009"
+	// ErrGatewayMFAUnsupported 账号启用了短信或 UKey，SSH / SFTP / Oracle 入口无法完成后一步。
+	//
+	// 与口令错误（AUTH_4001）分开：口令可能已经正确，缺的是这一入口做不了的第二因子。
+	ErrGatewayMFAUnsupported Code = "AUTH_4010"
 
 	// 402x 段：准入模式（FR-08-13）
 	ErrPermitRequired    Code = "PERMIT_4001"

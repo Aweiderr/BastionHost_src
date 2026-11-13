@@ -16,11 +16,35 @@ import (
 	smsutil "bastion.local/shared/sms"
 )
 
+// authUserStore 是认证流程读写用户的部分。*repo.UserRepo 直接满足。
+type authUserStore interface {
+	GetByUsername(ctx context.Context, tenantID int64, username string) (*model.User, error)
+	GetByID(ctx context.Context, userID int64) (*model.User, error)
+	ListRoles(ctx context.Context, userID int64) ([]string, error)
+	UpdateLoginSuccess(ctx context.Context, userID int64, ip string) error
+	IncrFailCount(ctx context.Context, userID int64) (int, error)
+	Lock(ctx context.Context, userID int64, until time.Time) error
+	UpdatePassword(ctx context.Context, userID int64, hash, salt string) error
+	SetMFA(ctx context.Context, userID int64, enabled bool, secretCipher string) error
+}
+
+// authConfigStore 是认证流程读取的系统配置。*repo.ConfigRepo 直接满足。
+type authConfigStore interface {
+	GetInt(ctx context.Context, tenantID int64, key string, def int) int
+	GetString(ctx context.Context, tenantID int64, key, def string) string
+	GetBool(ctx context.Context, tenantID int64, key string, def bool) bool
+}
+
+// loginRecorder 写入登录审计。*repo.LoginLogRepo 直接满足。
+type loginRecorder interface {
+	Append(ctx context.Context, in repo.LoginLogInput) error
+}
+
 // AuthService 实现身份认证（对应需求 FR-01）。
 type AuthService struct {
-	userRepo   *repo.UserRepo
+	userRepo   authUserStore
 	roleRepo   *repo.RoleRepo
-	configRepo *repo.ConfigRepo
+	configRepo authConfigStore
 	tm         *auth.TokenManager
 	cfg        *config.Config
 	crypto     *CryptoHelper
@@ -31,7 +55,7 @@ type AuthService struct {
 	// captcha 图形验证码存储；按连续失败次数触发，不需要时为 nil
 	captcha *captcha.Store
 	// loginLog 登录日志仓储；为 nil 时只打服务日志、不落库
-	loginLog *repo.LoginLogRepo
+	loginLog loginRecorder
 	// ukey UKey 证书认证服务；为 nil 时 ukey 类型的第二因子不可用
 	ukey *UKeyService
 	// sessions 登录会话登记。签发时写入 jti，另一端登录或登出时作废。
@@ -70,7 +94,16 @@ func (s *AuthService) SetChallengeRepo(r *repo.ChallengeRepo) { s.challenges = r
 // audit_login_log 在 0004 迁移里就建好了，但一直没有任何写入方：
 // 结果是"谁、什么时间、从哪个 IP 登录，成功还是失败"完全没有留痕 ——
 // 而这正是审计最常查的一条线（等保的登录审计要求）。
-func (s *AuthService) SetLoginLogRepo(r *repo.LoginLogRepo) { s.loginLog = r }
+func (s *AuthService) SetLoginLogRepo(r *repo.LoginLogRepo) {
+	if s == nil {
+		return
+	}
+	if r == nil {
+		s.loginLog = nil
+		return
+	}
+	s.loginLog = r
+}
 
 // writeLoginLog 落一条登录日志。
 //
@@ -166,6 +199,12 @@ func (s *AuthService) NeedCaptcha(ctx context.Context, username string) bool {
 	return s.needCaptchaFor(ctx, username)
 }
 
+var (
+	_ authUserStore   = (*repo.UserRepo)(nil)
+	_ authConfigStore = (*repo.ConfigRepo)(nil)
+	_ loginRecorder   = (*repo.LoginLogRepo)(nil)
+)
+
 // NewAuthService 创建认证服务。
 func NewAuthService(
 	userRepo *repo.UserRepo,
@@ -175,11 +214,19 @@ func NewAuthService(
 	cfg *config.Config,
 	cryptoHelper *CryptoHelper,
 ) *AuthService {
-	return &AuthService{
-		userRepo: userRepo, roleRepo: roleRepo, configRepo: configRepo,
-		tm: tm, cfg: cfg, crypto: cryptoHelper,
+	s := &AuthService{
+		roleRepo: roleRepo,
+		tm:       tm, cfg: cfg, crypto: cryptoHelper,
 		sessions: auth.NewMemorySessionStore(),
 	}
+	// 具体类型的 nil 不能直接塞进接口，否则 != nil 为真，随后按指针调用会崩溃。
+	if userRepo != nil {
+		s.userRepo = userRepo
+	}
+	if configRepo != nil {
+		s.configRepo = configRepo
+	}
+	return s
 }
 
 // SetLoginEnded 在某一端的登录会话作废后收到通知。
@@ -229,7 +276,60 @@ var (
 	ErrMFAInvalid = errors.New("验证码不正确")
 	// ErrPasswordExpired 口令已过期
 	ErrPasswordExpired = errors.New("口令已过期，请先修改口令")
+	// ErrGatewayMFAUnsupported 表示 SSH / SFTP / Oracle 完成不了该账号的第二因子。
+	//
+	// 口令可以是对的。短信和 UKey 还要一次挑战，这三条入口目前没有那一步，
+	// 不能把“口令正确”当成登录成功。短时票据做好之后再放开。
+	ErrGatewayMFAUnsupported = errors.New("该账号的二次认证方式在 SSH、SFTP、Oracle 入口不受支持，请使用 Web 控制台或桌面客户端登录")
 )
+
+// gatewayMFAAuditReason 是运维审计里区分“这一入口不支持该二次认证”和普通口令错误的原因码。
+const gatewayMFAAuditReason = "mfa_type_unsupported_on_entry"
+
+// gatewayMFAUnsupportedError 带上具体的二次认证类型，便于审计和终端提示。
+type gatewayMFAUnsupportedError struct {
+	Type string
+}
+
+func (e *gatewayMFAUnsupportedError) Error() string {
+	if e == nil {
+		return ErrGatewayMFAUnsupported.Error()
+	}
+	return fmt.Sprintf("%s 二次认证：%s", gatewayMFALabel(e.Type), ErrGatewayMFAUnsupported.Error())
+}
+
+func (e *gatewayMFAUnsupportedError) Unwrap() error { return ErrGatewayMFAUnsupported }
+
+func gatewayMFALabel(mfaType string) string {
+	switch mfaType {
+	case "ukey":
+		return "UKey"
+	case "sms":
+		return "短信"
+	default:
+		if mfaType == "" {
+			return "未知"
+		}
+		return mfaType
+	}
+}
+
+// gatewayChallengeMFA 在网关入口拒绝挑战式第二因子。
+//
+// 空类型和 totp 仍按动态令牌处理（口令后附 6 位验证码）。
+// none 表示没有第二因子。其余已启用的类型（短信、UKey，以及以后新增的挑战式因子）
+// 在 SSH / SFTP / Oracle 上没有后续校验，必须拒绝。Web 登录不走这里。
+func gatewayChallengeMFA(u *model.User) error {
+	if u == nil || !u.MFAEnabled {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(u.MFAType)) {
+	case "", "totp", "none":
+		return nil
+	default:
+		return &gatewayMFAUnsupportedError{Type: strings.ToLower(strings.TrimSpace(u.MFAType))}
+	}
+}
 
 // LoginRequest 是登录请求。
 type LoginRequest struct {
@@ -628,7 +728,9 @@ func (s *AuthService) cfgBool(ctx context.Context, key string, def bool) bool {
 // 供服务端（SSH 网关）经服务间接口调用：堡垒机账号的口令校验必须回到
 // 管理面完成，服务端不持有用户口令散列，也不接触凭据密钥。
 func (s *AuthService) Authenticate(ctx context.Context, username, password, totpCode, clientIP string) (*model.User, []string, []string, error) {
-	u, err := s.verifyUser(ctx, username, password, totpCode, clientIP)
+	// gateway=true：短信 / UKey 不能只凭口令进入 SSH、SFTP、Oracle。
+	// Web 的 Login 仍调用 verifyUser（gateway=false），继续下发挑战，不走这条拒绝。
+	u, err := s.verifyUserEntry(ctx, username, password, totpCode, clientIP, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -637,8 +739,13 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password, totp
 	if u.PasswordExpired() || u.MustChangePassword {
 		return nil, nil, nil, ErrPasswordExpired
 	}
-	roles, _ := s.userRepo.ListRoles(ctx, u.UserID)
-	perms, _ := s.roleRepo.ListUserPermissions(ctx, u.UserID)
+	var roles, perms []string
+	if s.userRepo != nil {
+		roles, _ = s.userRepo.ListRoles(ctx, u.UserID)
+	}
+	if s.roleRepo != nil {
+		perms, _ = s.roleRepo.ListUserPermissions(ctx, u.UserID)
+	}
 	return u, roles, perms, nil
 }
 
@@ -688,9 +795,25 @@ func (s *AuthService) AuthenticateByToken(ctx context.Context, token string) (*m
 }
 
 // verifyUser 校验身份（口令 + 可选动态令牌），成功后记录登录成功。
+//
+// Web 登录使用这一入口：短信 / UKey 在账密通过后由 Login 下发挑战，这里不拦截。
 func (s *AuthService) verifyUser(ctx context.Context, username, password, totpCode, clientIP string) (*model.User, error) {
-	maxFail := s.configRepo.GetInt(ctx, 0, "security.login.max_fail", s.cfg.Auth.MaxLoginFail)
-	lockMinutes := s.configRepo.GetInt(ctx, 0, "security.login.lock_minutes", int(s.cfg.Auth.LockDuration.Minutes()))
+	return s.verifyUserEntry(ctx, username, password, totpCode, clientIP, false)
+}
+
+// verifyUserEntry 校验身份。gateway 为 true 时，已启用且不是 TOTP 的第二因子直接拒绝。
+//
+// 拒绝发生在口令核对之后、记登录成功之前：口令错仍是普通口令错误，
+// 不会先暴露该账号用的是哪一种二次认证；口令对了也不能把这次尝试记成登录成功。
+func (s *AuthService) verifyUserEntry(ctx context.Context, username, password, totpCode, clientIP string, gateway bool) (*model.User, error) {
+	maxFail := 0
+	lockMinutes := 0
+	if s.cfg != nil {
+		maxFail = s.cfg.Auth.MaxLoginFail
+		lockMinutes = int(s.cfg.Auth.LockDuration.Minutes())
+	}
+	maxFail = s.cfgInt(ctx, "security.login.max_fail", maxFail)
+	lockMinutes = s.cfgInt(ctx, "security.login.lock_minutes", lockMinutes)
 
 	u, err := s.userRepo.GetByUsername(ctx, 0, username)
 	if err != nil {
@@ -712,13 +835,26 @@ func (s *AuthService) verifyUser(ctx context.Context, username, password, totpCo
 		return nil, s.onLoginFail(ctx, u, maxFail, lockMinutes)
 	}
 
+	if gateway {
+		if err := gatewayChallengeMFA(u); err != nil {
+			s.writeLoginLog(ctx, repo.LoginLogInput{
+				TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
+				LoginType:  "password+" + strings.ToLower(strings.TrimSpace(u.MFAType)),
+				ClientType: "gateway", ClientIP: clientIP,
+				Result: "fail", FailReason: err.Error(), MFAUsed: true,
+			})
+			return nil, err
+		}
+	}
+
 	// 多因素校验：**只有 TOTP 类型在这一步完成**。
 	//
 	// 短信与 UKey 属于"挑战式"第二因子：账密通过后由 Login 生成登录挑战，
 	// 再由弹窗（短信）或客户端硬件（UKey）完成校验。
 	// 因此这里必须按类型跳过，否则短信用户会被要求输入动态口令 ——
 	// 而他们的 MFASecretCipher 为空，表现为"解密失败"这种难以理解的报错。
-	if u.MFAEnabled && (u.MFAType == "" || u.MFAType == "totp") {
+	// 网关入口已在上面把这两种类型拒绝掉，不会走到“跳过即成功”。
+	if u.MFAEnabled && (u.MFAType == "" || strings.EqualFold(u.MFAType, "totp")) {
 		if totpCode == "" {
 			return nil, ErrMFARequired
 		}

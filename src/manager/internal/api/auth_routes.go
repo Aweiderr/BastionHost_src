@@ -290,6 +290,9 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.FailCode(w, "AUTH_4006")
 	case errors.Is(err, service.ErrPasswordExpired):
 		httpx.FailCode(w, "AUTH_4008")
+	case errors.Is(err, service.ErrGatewayMFAUnsupported):
+		// 口令可能已经正确。不能映射成 AUTH_4001，否则终端和审计都只看见“口令错误”。
+		httpx.Fail(w, errcode.New(errcode.ErrGatewayMFAUnsupported, err.Error()))
 	case errors.Is(err, service.ErrUKeyLoginRejected):
 		// UKey 认证失败：**只回统一文案**，与现有 MFA 校验失败同为 AUTH_4004。
 		// 具体原因（未注册 / 已吊销 / 链不可信 / 验签不过）已在服务端写入登录日志，

@@ -2,6 +2,7 @@ package errcode
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +14,16 @@ func TestErrToStatusPasswordExpiredIsForbidden(t *testing.T) {
 	}
 	if got := MessageOf(ErrPasswordExpired); got != "口令已过期，请先修改口令" {
 		t.Fatalf("ErrPasswordExpired 文案 = %q", got)
+	}
+
+	if got := ErrToStatus(ErrGatewayMFAUnsupported); got != http.StatusForbidden {
+		t.Fatalf("ErrGatewayMFAUnsupported HTTP 状态 = %d，期望 403", got)
+	}
+	if got := MessageOf(ErrGatewayMFAUnsupported); !strings.Contains(got, "Web 控制台") {
+		t.Fatalf("ErrGatewayMFAUnsupported 文案 = %q", got)
+	}
+	if ErrGatewayMFAUnsupported == ErrInvalidCredential {
+		t.Fatal("网关二次认证拒绝不能与口令错误共用错误码")
 	}
 
 	// 真正的会话失效仍是 401，前端可以继续据此清令牌。

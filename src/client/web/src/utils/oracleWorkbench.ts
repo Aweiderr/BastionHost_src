@@ -4,6 +4,9 @@
  * 会话状态放在这里，而不是绑在页面实例上：路由切走或侧栏切走时只标记 hidden，
  * 不结束后端会话。编辑器、结果、历史和对象树都留在这份状态里。
  * 真正关闭只发生在「结束会话」，或页面被销毁（退出登录）时取走会话号去调用关闭接口。
+ *
+ * 打开请求单独记一代（connectGen）。地址变化、超时或用户先结束会话后，
+ * 迟到的成功不能再把页面标成已打开；那次服务端会话要关掉。
  */
 
 export const ORACLE_WORKBENCH_COMPONENT = 'OracleWorkbenchView'
@@ -13,23 +16,62 @@ export function keptAliveViewNames(): readonly string[] {
   return [ORACLE_WORKBENCH_COMPONENT]
 }
 
-export function oracleWorkbenchLocation(assetId: number, accountId: number): {
+/**
+ * 管理端 HTTP 只有 ReadHeaderTimeout，没有 WriteTimeout。
+ * 打开请求一旦在浏览器侧不返回，页面不能一直停在「正在连接」。
+ */
+export const ORACLE_OPEN_TIMEOUT_MS = 60_000
+
+export const ORACLE_OPEN_TIMEOUT_MESSAGE =
+  '连接 Oracle 超时。可重新连接或结束会话；若这次连接稍后成功，工作台会自动打开。'
+
+let openEntrySeq = 0
+
+/** 每一次用户发起的打开用不同记号，避免和上一次还没返回的请求缠在一起。 */
+export function nextOpenEntry(prefix = 'open'): string {
+  openEntrySeq += 1
+  return `${prefix}-${openEntrySeq}`
+}
+
+function queryText(value: unknown): string {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (typeof raw === 'string') return raw.trim()
+  if (raw == null || raw === '') return ''
+  return String(raw).trim()
+}
+
+export function oracleWorkbenchLocation(
+  assetId: number,
+  accountId: number,
+  names: { assetName?: string; accountName?: string } = {},
+): {
   path: string
-  query: { asset: string; account: string }
+  query: { asset: string; account: string; assetName: string; accountName: string; entry: string }
 } {
   return {
     path: ORACLE_WORKBENCH_PATH,
-    query: { asset: String(assetId), account: String(accountId) },
+    query: {
+      asset: String(assetId),
+      account: String(accountId),
+      assetName: (names.assetName ?? '').trim(),
+      accountName: (names.accountName ?? '').trim(),
+      entry: nextOpenEntry('route'),
+    },
   }
 }
 
-export function readOracleRouteQuery(query: Record<string, unknown>): { assetId: number; accountId: number } | null {
-  const assetRaw = Array.isArray(query.asset) ? query.asset[0] : query.asset
-  const accountRaw = Array.isArray(query.account) ? query.account[0] : query.account
-  const assetId = Number(assetRaw)
-  const accountId = Number(accountRaw)
+export interface OracleRouteTarget extends OpenTarget {
+  entry: string
+}
+
+export function readOracleRouteQuery(query: Record<string, unknown>): OracleRouteTarget | null {
+  const assetId = Number(queryText(query.asset))
+  const accountId = Number(queryText(query.account))
   if (!Number.isInteger(assetId) || !Number.isInteger(accountId) || assetId <= 0 || accountId <= 0) return null
-  return { assetId, accountId }
+  const assetName = queryText(query.assetName)
+  const accountName = queryText(query.accountName)
+  const entry = queryText(query.entry) || `${assetId}:${accountId}`
+  return { assetId, accountId, assetName, accountName, entry }
 }
 
 export interface SqlResult {
@@ -119,6 +161,10 @@ export interface WorkbenchSession {
   treeError: string
   treeLoading: boolean
   busy: boolean
+  /** 每发起一次连接加一。迟到的响应必须对上这一次，才允许标成已打开。 */
+  connectGen: number
+  /** 同一次进入（同一个 entry）不要并发开两次。用户再次进入用新 entry 覆盖。 */
+  openEntry: string
 }
 
 export interface WorkbenchState {
@@ -201,15 +247,20 @@ export function focusSession(state: WorkbenchState, key: string): void {
 }
 
 export function beginSession(state: WorkbenchState, target: OpenTarget): WorkbenchSession {
+  const assetName = target.assetName.trim()
+  const accountName = target.accountName.trim()
   const existing = state.sessions.find(
     (item) => item.assetId === target.assetId && item.accountId === target.accountId && item.status !== 'closed',
   )
   if (existing) {
+    if (assetName) existing.assetName = assetName
+    if (accountName) existing.accountName = accountName
     if (existing.status === 'error') {
       existing.status = 'connecting'
       existing.error = ''
       existing.sessionId = 0
       existing.sessionNo = ''
+      existing.busy = false
     }
     state.activeKey = existing.key
     state.hidden = false
@@ -220,8 +271,8 @@ export function beginSession(state: WorkbenchState, target: OpenTarget): Workben
     key: nextId(state, 's'),
     assetId: target.assetId,
     accountId: target.accountId,
-    assetName: target.assetName || 'Oracle',
-    accountName: target.accountName || '',
+    assetName: assetName || 'Oracle',
+    accountName,
     sessionId: 0,
     sessionNo: '',
     openedAt: Date.now(),
@@ -235,6 +286,8 @@ export function beginSession(state: WorkbenchState, target: OpenTarget): Workben
     treeError: '',
     treeLoading: false,
     busy: false,
+    connectGen: 0,
+    openEntry: '',
   }
   state.sessions.push(session)
   state.activeKey = session.key
@@ -253,6 +306,7 @@ export function markOpen(
   session.status = 'open'
   session.openedAt = Date.now()
   session.error = ''
+  session.busy = false
 }
 
 export function markSessionError(session: WorkbenchSession, message: string): void {
@@ -261,11 +315,15 @@ export function markSessionError(session: WorkbenchSession, message: string): vo
   session.busy = false
 }
 
-/** 用户点「结束会话」。返回要交给关闭接口的会话号，0 表示还没连上。 */
+/** 用户点「结束会话」。返回要交给关闭接口的会话号，0 表示还没连上。会话号为 0 也要清掉界面。 */
 export function endSession(state: WorkbenchState, key: string): number {
   const index = state.sessions.findIndex((item) => item.key === key)
   if (index < 0) return 0
-  const id = state.sessions[index].sessionId
+  const session = state.sessions[index]
+  session.connectGen += 1
+  session.busy = false
+  session.status = 'closed'
+  const id = session.sessionId
   state.sessions.splice(index, 1)
   if (state.activeKey === key) {
     state.activeKey = state.sessions[Math.min(index, Math.max(state.sessions.length - 1, 0))]?.key ?? ''
@@ -276,9 +334,166 @@ export function endSession(state: WorkbenchState, key: string): number {
 /** 页面真正被销毁（例如退出登录）时取走仍打开的会话号。路由切换不要调用。 */
 export function takeAllSessionIds(state: WorkbenchState): number[] {
   const ids = state.sessions.map((item) => item.sessionId).filter((id) => id > 0)
+  for (const session of state.sessions) {
+    session.connectGen += 1
+    session.busy = false
+    session.status = 'closed'
+  }
   state.sessions = []
   state.activeKey = ''
   return ids
+}
+
+export function sessionAccountLabel(session: { accountName: string; accountId: number }): string {
+  const name = session.accountName.trim()
+  if (name) return name
+  if (session.accountId > 0) return `账号 ${session.accountId}`
+  return '未选择账号'
+}
+
+/** 只有 SQL 正在跑才写「执行中」。连接阶段不能用这四个字，否则像卡在一条语句上。 */
+export function runButtonText(session: { busy: boolean; status: WorkbenchSession['status'] }): string {
+  if (session.busy && session.status === 'open') return '执行中…'
+  return '执行'
+}
+
+export type RouteOpenIntent =
+  | { type: 'none' }
+  | { type: 'open'; session: WorkbenchSession; entry: string }
+
+/**
+ * 决定这次路由要不要发起连接。
+ *
+ * 没有 asset/account（侧栏，或已经离开本页）时，不要拆掉正在连接的会话。
+ * 人还停在工作台、上次已经失败时，侧栏再进来算一次重试。
+ * 同一账号已经打开则只聚焦，不重复 Open。
+ */
+export function routeOpenIntent(
+  state: WorkbenchState,
+  path: string,
+  target: OracleRouteTarget | null,
+): RouteOpenIntent {
+  if (path !== ORACLE_WORKBENCH_PATH) return { type: 'none' }
+  if (!target) {
+    const current = activeSession(state)
+    if (!current || current.status !== 'error' || current.accountId <= 0 || current.assetId <= 0) {
+      return { type: 'none' }
+    }
+    return { type: 'open', session: current, entry: nextOpenEntry('retry') }
+  }
+  const session = beginSession(state, target)
+  if (session.status === 'open' && session.sessionId > 0) return { type: 'none' }
+  return { type: 'open', session, entry: target.entry }
+}
+
+export interface OracleOpenInfo {
+  sessionId: number
+  sessionNo: string
+  assetName?: string
+  accountName?: string
+}
+
+function armConnect(session: WorkbenchSession, entry: string): number | null {
+  if (session.status === 'open' && session.sessionId > 0) return null
+  if (session.busy && session.status === 'connecting' && session.openEntry === entry) return null
+  session.openEntry = entry
+  session.connectGen += 1
+  session.busy = true
+  session.status = 'connecting'
+  session.error = ''
+  session.sessionId = 0
+  session.sessionNo = ''
+  return session.connectGen
+}
+
+function noteOpenTimeout(
+  state: WorkbenchState,
+  key: string,
+  generation: number,
+  message = ORACLE_OPEN_TIMEOUT_MESSAGE,
+): boolean {
+  const session = sessionByKey(state, key)
+  if (!session || session.connectGen !== generation) return false
+  if (session.status !== 'connecting') return false
+  markSessionError(session, message)
+  return true
+}
+
+/** 这一代还在（连接中，或超时后仍是同一次）才应用。人已经结束或又发起了新的一次，就丢掉。 */
+function settleOracleOpen(state: WorkbenchState, key: string, generation: number): 'apply' | 'drop' {
+  const session = sessionByKey(state, key)
+  if (!session || session.connectGen !== generation) return 'drop'
+  if (session.status !== 'connecting' && session.status !== 'error') return 'drop'
+  return 'apply'
+}
+
+function openFailureText(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message.trim()
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  return 'Oracle SQL 会话失败'
+}
+
+function defaultScheduleTimeout(fire: () => void, ms: number): () => void {
+  const id = setTimeout(fire, ms)
+  return () => clearTimeout(id)
+}
+
+/**
+ * 发起一次打开。超时只解开界面，不取消请求：
+ * 管理端可能已经建好会话，响应晚到时要么补上 markOpen，要么把多余会话关掉。
+ * 同一次 entry 重复触发（挂载和路由监听各走一遍）不会开两次。
+ */
+export async function runOracleOpen(args: {
+  state: WorkbenchState
+  session: WorkbenchSession
+  entry: string
+  open: () => Promise<OracleOpenInfo>
+  close: (sessionId: number) => Promise<unknown>
+  timeoutMs?: number
+  scheduleTimeout?: (fire: () => void, ms: number) => () => void
+}): Promise<'skipped' | 'opened' | 'failed' | 'dropped'> {
+  const generation = armConnect(args.session, args.entry)
+  if (generation === null) return 'skipped'
+  const key = args.session.key
+  const schedule = args.scheduleTimeout ?? defaultScheduleTimeout
+  let cancel = () => {}
+  try {
+    cancel = schedule(() => {
+      noteOpenTimeout(args.state, key, generation)
+    }, args.timeoutMs ?? ORACLE_OPEN_TIMEOUT_MS)
+    const info = await args.open()
+    const sessionId = Number(info?.sessionId) || 0
+    if (settleOracleOpen(args.state, key, generation) === 'drop') {
+      if (sessionId > 0) {
+        try {
+          await args.close(sessionId)
+        } catch {
+          /* 关掉被丢弃的服务端会话失败时，也不再把它打开 */
+        }
+      }
+      return 'dropped'
+    }
+    if (sessionId <= 0) throw new Error('Oracle SQL 会话没有返回会话号')
+    const session = sessionByKey(args.state, key)
+    if (!session) return 'dropped'
+    markOpen(session, {
+      sessionId,
+      sessionNo: info?.sessionNo || '',
+      assetName: info?.assetName,
+      accountName: info?.accountName,
+    })
+    return 'opened'
+  } catch (err) {
+    const session = sessionByKey(args.state, key)
+    if (!session || session.connectGen !== generation) return 'dropped'
+    if (session.status === 'error') return 'failed'
+    markSessionError(session, openFailureText(err))
+    return 'failed'
+  } finally {
+    cancel()
+    const session = sessionByKey(args.state, key)
+    if (session && session.connectGen === generation) session.busy = false
+  }
 }
 
 export function addEditor(state: WorkbenchState, key: string): void {

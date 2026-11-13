@@ -21,8 +21,12 @@ import {
   oracleWorkbenchLocation,
   readOracleRouteQuery,
   requestDesktopOracleWorkbench,
+  routeOpenIntent,
+  runButtonText,
+  runOracleOpen,
   runScript,
   sampleSelect,
+  sessionAccountLabel,
   setColumns,
   setObjects,
   setSchemas,
@@ -32,17 +36,36 @@ import {
   toggleObject,
   toggleSchema,
   visibleRows,
+  type OracleOpenInfo,
 } from './oracleWorkbench.ts'
 
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('堡垒机 SQL 会话进入独立工作台路由，本机模式不走这条路由', () => {
   assert.equal(ORACLE_WORKBENCH_PATH, '/oracle')
-  assert.deepEqual(oracleWorkbenchLocation(12, 4), {
-    path: '/oracle',
-    query: { asset: '12', account: '4' },
+  const location = oracleWorkbenchLocation(12, 4, { assetName: 'Oracle连接测试', accountName: 'user01' })
+  assert.equal(location.path, '/oracle')
+  assert.equal(location.query.asset, '12')
+  assert.equal(location.query.account, '4')
+  assert.equal(location.query.assetName, 'Oracle连接测试')
+  assert.equal(location.query.accountName, 'user01')
+  assert.match(location.query.entry, /^route-/)
+  const again = oracleWorkbenchLocation(12, 4)
+  assert.notEqual(again.query.entry, location.query.entry)
+  assert.deepEqual(readOracleRouteQuery(location.query), {
+    assetId: 12,
+    accountId: 4,
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: location.query.entry,
   })
-  assert.deepEqual(readOracleRouteQuery({ asset: '12', account: ['4'] }), { assetId: 12, accountId: 4 })
+  assert.deepEqual(readOracleRouteQuery({ asset: '12', account: ['4'] }), {
+    assetId: 12,
+    accountId: 4,
+    assetName: '',
+    accountName: '',
+    entry: '12:4',
+  })
   assert.equal(readOracleRouteQuery({ asset: '0', account: '1' }), null)
   assert.equal(readOracleRouteQuery({}), null)
   const router = readFileSync(join(srcRoot, 'router/index.ts'), 'utf8')
@@ -55,6 +78,8 @@ test('堡垒机 SQL 会话进入独立工作台路由，本机模式不走这条
   const resources = readFileSync(join(srcRoot, 'views/OpsResourcesView.vue'), 'utf8')
   assert.match(resources, /oracleWorkbenchLocation/)
   assert.match(resources, /open-workbench/)
+  assert.match(resources, /assetName: asset\.asset_name/)
+  assert.match(resources, /account\?\.account_name/)
 })
 
 test('工作台被单独缓存，图形会话和终端不因为这次改动被留在内存里', () => {
@@ -214,4 +239,328 @@ test('桌面端选择堡垒机 SQL 会话时切到工作台视图，不清掉已
   noteRouteLeave(state)
   assert.equal(session.sessionId, 3)
   assert.equal(activeEditor(session)?.sql, 'SELECT * FROM APP.T')
+})
+
+function deferOpen(): { promise: Promise<OracleOpenInfo>; resolve: (info: OracleOpenInfo) => void } {
+  let resolve: (info: OracleOpenInfo) => void = () => {}
+  const promise = new Promise<OracleOpenInfo>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+test('选中账号后标题立刻是资产名和账号名，连接中的执行按钮不写执行中', () => {
+  const state = createWorkbenchState()
+  const session = beginSession(state, { assetId: 9, accountId: 3, assetName: '', accountName: '' })
+  assert.equal(session.assetName, 'Oracle')
+  assert.equal(session.accountName, '')
+  assert.equal(sessionAccountLabel(session), '账号 3')
+  assert.notEqual(sessionAccountLabel(session), '未选择账号')
+  beginSession(state, { assetId: 9, accountId: 3, assetName: 'Oracle连接测试', accountName: 'user01' })
+  assert.equal(session.assetName, 'Oracle连接测试')
+  assert.equal(session.accountName, 'user01')
+  assert.equal(sessionAccountLabel(session), 'user01')
+  session.busy = true
+  session.status = 'connecting'
+  assert.equal(runButtonText(session), '执行')
+  session.status = 'open'
+  assert.equal(runButtonText(session), '执行中…')
+  assert.equal(sessionAccountLabel({ accountName: '  ', accountId: 0 }), '未选择账号')
+})
+
+test('打开请求返回前清掉 query 不会拆掉这次连接，超时后迟到的成功仍能进入工作台', async () => {
+  const state = createWorkbenchState()
+  const target = readOracleRouteQuery({
+    asset: '9',
+    account: '3',
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: '260',
+  })
+  assert.ok(target)
+  const intent = routeOpenIntent(state, '/oracle', target)
+  assert.equal(intent.type, 'open')
+  if (intent.type !== 'open') return
+  assert.equal(intent.session.assetName, 'Oracle连接测试')
+  assert.equal(intent.session.accountName, 'user01')
+  assert.equal(intent.session.status, 'connecting')
+
+  let fire: (() => void) | null = null
+  const pending = deferOpen()
+  const closed: number[] = []
+  const done = runOracleOpen({
+    state,
+    session: intent.session,
+    entry: intent.entry,
+    scheduleTimeout: (fn) => {
+      fire = fn
+      return () => {
+        fire = null
+      }
+    },
+    open: () => pending.promise,
+    close: async (id) => {
+      closed.push(id)
+    },
+  })
+  assert.equal(intent.session.busy, true)
+  assert.equal(runButtonText(intent.session), '执行')
+  const duplicate = await runOracleOpen({
+    state,
+    session: intent.session,
+    entry: intent.entry,
+    scheduleTimeout: () => () => {},
+    open: async () => {
+      throw new Error('同一次进入不能再开')
+    },
+    close: async () => {},
+  })
+  assert.equal(duplicate, 'skipped')
+  // router.replace 把 query 抹掉之后，路由监听再进来：进行中的打开要留着。
+  assert.deepEqual(routeOpenIntent(state, '/oracle', null), { type: 'none' })
+  assert.equal(intent.session.status, 'connecting')
+  assert.equal(intent.session.sessionId, 0)
+
+  assert.ok(fire)
+  fire!()
+  assert.equal(intent.session.status, 'error')
+  assert.equal(intent.session.busy, false)
+  assert.match(intent.session.error, /超时/)
+  assert.equal(endSession(state, 'missing'), 0)
+
+  pending.resolve({
+    sessionId: 260,
+    sessionNo: 'S202611131121177702',
+    assetName: 'Oracle连接测试',
+    accountName: 'USER01',
+  })
+  assert.equal(await done, 'opened')
+  assert.equal(intent.session.status, 'open')
+  assert.equal(intent.session.sessionId, 260)
+  assert.equal(intent.session.accountName, 'USER01')
+  assert.equal(intent.session.busy, false)
+  assert.equal(intent.session.error, '')
+  assert.deepEqual(closed, [])
+})
+
+test('还没有会话号时结束会话会清掉界面，迟到的打开会被关掉', async () => {
+  const state = createWorkbenchState()
+  const target = readOracleRouteQuery({
+    asset: '9',
+    account: '3',
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: 'e',
+  })
+  assert.ok(target)
+  const intent = routeOpenIntent(state, '/oracle', target)
+  assert.equal(intent.type, 'open')
+  if (intent.type !== 'open') return
+  const pending = deferOpen()
+  const closed: number[] = []
+  const done = runOracleOpen({
+    state,
+    session: intent.session,
+    entry: intent.entry,
+    scheduleTimeout: () => () => {},
+    open: () => pending.promise,
+    close: async (id) => {
+      closed.push(id)
+    },
+  })
+  assert.equal(intent.session.sessionId, 0)
+  assert.equal(intent.session.busy, true)
+  const id = endSession(state, intent.session.key)
+  assert.equal(id, 0)
+  assert.equal(state.sessions.length, 0)
+  pending.resolve({ sessionId: 260, sessionNo: 'S260', assetName: 'Oracle连接测试', accountName: 'user01' })
+  assert.equal(await done, 'dropped')
+  assert.deepEqual(closed, [260])
+  assert.equal(state.sessions.length, 0)
+})
+
+test('打开失败或再次从我的资源进入后可以重新连接，离开页面不会自动重连', async () => {
+  const state = createWorkbenchState()
+  const target = readOracleRouteQuery({
+    asset: '9',
+    account: '3',
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: '1',
+  })
+  assert.ok(target)
+  const intent = routeOpenIntent(state, '/oracle', target)
+  assert.equal(intent.type, 'open')
+  if (intent.type !== 'open') return
+  const failed = await runOracleOpen({
+    state,
+    session: intent.session,
+    entry: intent.entry,
+    scheduleTimeout: () => () => {},
+    open: async () => {
+      throw new Error('没有可用的授权')
+    },
+    close: async () => {},
+  })
+  assert.equal(failed, 'failed')
+  assert.equal(intent.session.status, 'error')
+  assert.equal(intent.session.busy, false)
+  assert.equal(intent.session.error, '没有可用的授权')
+  assert.deepEqual(routeOpenIntent(state, '/resources', null), { type: 'none' })
+  assert.equal(intent.session.status, 'error')
+
+  const same = routeOpenIntent(state, '/oracle', target)
+  assert.equal(same.type, 'open')
+  if (same.type !== 'open') return
+  let openedCalls = 0
+  const retried = await runOracleOpen({
+    state,
+    session: same.session,
+    entry: same.entry,
+    scheduleTimeout: () => () => {},
+    open: () => {
+      openedCalls += 1
+      return Promise.resolve({ sessionId: 1, sessionNo: 'S1', assetName: 'Oracle连接测试', accountName: 'user01' })
+    },
+    close: async () => {},
+  })
+  const duplicate = await runOracleOpen({
+    state,
+    session: same.session,
+    entry: same.entry,
+    scheduleTimeout: () => () => {},
+    open: () => {
+      openedCalls += 1
+      return Promise.resolve({ sessionId: 2, sessionNo: 'S2', assetName: 'Oracle连接测试', accountName: 'user01' })
+    },
+    close: async () => {},
+  })
+  assert.equal(retried, 'opened')
+  assert.equal(duplicate, 'skipped')
+  assert.equal(openedCalls, 1)
+  assert.equal(same.session.status, 'open')
+  assert.equal(same.session.sessionId, 1)
+
+  const again = routeOpenIntent(state, '/oracle', { ...target, entry: '1' })
+  assert.equal(again.type, 'none')
+  assert.equal(same.session.sessionId, 1)
+})
+
+test('上一次打开还没返回时，新的一次会盖掉它并关掉迟到的服务端会话', async () => {
+  const state = createWorkbenchState()
+  const firstTarget = readOracleRouteQuery({
+    asset: '9',
+    account: '3',
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: 'a',
+  })
+  assert.ok(firstTarget)
+  const first = routeOpenIntent(state, '/oracle', firstTarget)
+  assert.equal(first.type, 'open')
+  if (first.type !== 'open') return
+  const older = deferOpen()
+  const closed: number[] = []
+  const done1 = runOracleOpen({
+    state,
+    session: first.session,
+    entry: first.entry,
+    scheduleTimeout: () => () => {},
+    open: () => older.promise,
+    close: async (id) => {
+      closed.push(id)
+    },
+  })
+  const secondTarget = readOracleRouteQuery({
+    asset: '9',
+    account: '3',
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: 'b',
+  })
+  assert.ok(secondTarget)
+  const second = routeOpenIntent(state, '/oracle', secondTarget)
+  assert.equal(second.type, 'open')
+  if (second.type !== 'open') return
+  assert.equal(second.session.key, first.session.key)
+  const newer = deferOpen()
+  const done2 = runOracleOpen({
+    state,
+    session: second.session,
+    entry: second.entry,
+    scheduleTimeout: () => () => {},
+    open: () => newer.promise,
+    close: async (id) => {
+      closed.push(id)
+    },
+  })
+  older.resolve({ sessionId: 260, sessionNo: 'S260', assetName: 'Oracle连接测试', accountName: 'user01' })
+  assert.equal(await done1, 'dropped')
+  newer.resolve({ sessionId: 261, sessionNo: 'S261', assetName: 'Oracle连接测试', accountName: 'USER01' })
+  assert.equal(await done2, 'opened')
+  assert.equal(second.session.status, 'open')
+  assert.equal(second.session.sessionId, 261)
+  assert.equal(second.session.busy, false)
+  assert.deepEqual(closed, [260])
+})
+
+test('失败后从侧栏再进工作台会重新连接', async () => {
+  const state = createWorkbenchState()
+  const target = readOracleRouteQuery({
+    asset: '9',
+    account: '3',
+    assetName: 'Oracle连接测试',
+    accountName: 'user01',
+    entry: 'side',
+  })
+  assert.ok(target)
+  const intent = routeOpenIntent(state, '/oracle', target)
+  assert.equal(intent.type, 'open')
+  if (intent.type !== 'open') return
+  await runOracleOpen({
+    state,
+    session: intent.session,
+    entry: intent.entry,
+    scheduleTimeout: () => () => {},
+    open: async () => {
+      throw new Error('连接目标 Oracle 失败')
+    },
+    close: async () => {},
+  })
+  const retry = routeOpenIntent(state, '/oracle', null)
+  assert.equal(retry.type, 'open')
+  if (retry.type !== 'open') return
+  const opened = await runOracleOpen({
+    state,
+    session: retry.session,
+    entry: retry.entry,
+    scheduleTimeout: () => () => {},
+    open: async () => ({ sessionId: 8, sessionNo: 'S8', assetName: 'Oracle连接测试', accountName: 'user01' }),
+    close: async () => {},
+  })
+  assert.equal(opened, 'opened')
+  assert.equal(retry.session.status, 'open')
+  assert.equal(retry.session.sessionId, 8)
+  assert.equal(retry.session.busy, false)
+})
+
+test('工作台页面不再在打开请求期间改路由，结束会话在连接中也能点', () => {
+  const view = readFileSync(join(srcRoot, 'views/OracleWorkbenchView.vue'), 'utf8')
+  assert.equal(/router\.replace\s*\(/.test(view), false)
+  assert.match(view, /runOracleOpen/)
+  assert.match(view, /routeOpenIntent/)
+  assert.equal(view.includes("assetName: ''"), false)
+  assert.equal(/session\.busy\) return/.test(view), false)
+  const pane = readFileSync(join(srcRoot, 'components/OracleWorkbenchPane.vue'), 'utf8')
+  assert.match(pane, /sessionAccountLabel/)
+  assert.match(pane, /runButtonText/)
+  assert.match(pane, /重新连接/)
+  assert.equal(pane.includes("session.busy ? '执行中"), false)
+  assert.match(pane, /class="ow-btn danger" @click="emit\('end', session\.key\)"/)
+  assert.equal(pane.includes(':disabled="session.busy" @click="emit(\'end\''), false)
+  const desktop = readFileSync(
+    join(srcRoot, '../../desktop/frontend/src/views/OracleWorkbenchView.vue'),
+    'utf8',
+  )
+  assert.match(desktop, /runOracleOpen/)
 })

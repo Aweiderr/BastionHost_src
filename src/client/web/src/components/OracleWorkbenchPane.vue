@@ -15,7 +15,9 @@ import {
   focusSession,
   formatDuration,
   insertEditorSQL,
+  runButtonText,
   sampleSelect,
+  sessionAccountLabel,
   setEditorSQL,
   toggleObject,
   toggleResultSort,
@@ -34,6 +36,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   run: [sessionKey: string]
   end: [sessionKey: string]
+  retry: [sessionKey: string]
   loadSchema: [sessionKey: string, schema: string]
   loadColumns: [sessionKey: string, schema: string, name: string]
 }>()
@@ -153,19 +156,22 @@ function sortMark(column: string): string {
           :class="{ on: item.key === state.activeKey }"
           @click="focusSession(state, item.key)"
         >
-          {{ item.assetName }} · {{ item.accountName || '账号' }}
+          {{ item.assetName }} · {{ sessionAccountLabel(item) }}
         </button>
       </div>
 
       <header v-if="session" class="ow-bar">
         <strong>{{ session.assetName }}</strong>
-        <span>{{ session.accountName || '未选择账号' }}</span>
+        <span>{{ sessionAccountLabel(session) }}</span>
         <span v-if="session.sessionId">会话 {{ session.sessionNo || session.sessionId }} · ID {{ session.sessionId }}</span>
         <span v-if="duration">已连接 {{ duration }}</span>
         <span v-if="session.status === 'connecting'" class="ow-muted">正在连接…</span>
         <span v-else-if="session.status === 'error'" class="ow-danger">{{ session.error }}</span>
         <span class="ow-spacer" />
-        <button type="button" class="ow-btn danger" :disabled="session.busy" @click="emit('end', session.key)">
+        <button v-if="session.status === 'error'" type="button" class="ow-btn" @click="emit('retry', session.key)">
+          重新连接
+        </button>
+        <button type="button" class="ow-btn danger" @click="emit('end', session.key)">
           结束会话
         </button>
       </header>
@@ -242,7 +248,7 @@ function sortMark(column: string): string {
                 :disabled="session.busy || session.status !== 'open' || !editor"
                 @click="emit('run', session.key)"
               >
-                {{ session.busy ? '执行中…' : '执行' }}
+                {{ runButtonText(session) }}
               </button>
             </div>
             <OracleSqlEditor

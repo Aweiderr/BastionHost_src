@@ -17,8 +17,9 @@ import (
 
 const (
 	oracleConsoleClient = "oracle_console"
-	// oracleConsoleNode 不是代理节点。巡检只收「某台在线代理的清单里没有」的会话，
-	// 这个名字不会出现在心跳里，产品内会话就不会被当成僵尸关掉。
+	// oracleConsoleNode 不是代理节点，sys_node 里没有这一行。
+	// CloseStale 只收真实节点且心跳已超时的会话；selectOrphans 只收
+	// 「某台在线代理的清单里没有」的会话。这个名字两边都对不上。
 	oracleConsoleNode = "console"
 	oracleConsoleIdle = 15 * time.Minute
 	oracleExecTimeout = 20 * time.Second

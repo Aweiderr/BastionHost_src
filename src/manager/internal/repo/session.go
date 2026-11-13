@@ -195,20 +195,50 @@ func (r *SessionRepo) CloseActive(ctx context.Context, sessionID int64, endReaso
 	return tag.RowsAffected() > 0, nil
 }
 
+// closeStaleSQL 收尾心跳已超时的真实代理节点上的 active 会话。
+//
+// 必须先有 sys_node 行。proxy_node 对不上任何节点时不能更新：
+// 产品内 SQL 会话的逻辑名 console 不会出现在 sys_node 里，
+// 把「没有这个节点」当成「节点离线」会在 minAge 之后把它标成 node_offline。
+// 心跳为空，或已经不比 offlineAfter（$1）更新，才算这台已经注册的节点离线。
+// 心跳仍新的节点、以及 start_time 还在 minAge（$2）以内的会话，都不更新。
+const closeStaleSQL = `
+		UPDATE ops_session s SET
+		   status = 'closed',
+		   end_reason = $3,
+		   end_time = COALESCE(s.end_time, now()),
+		   duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (now() - s.start_time))::int),
+		   record_status = CASE WHEN s.record_status = 'recording' THEN 'failed'
+		                        ELSE s.record_status END
+		 WHERE s.status = 'active'
+		   AND s.start_time < now() - make_interval(secs => $2::double precision)
+		   AND EXISTS (
+		        SELECT 1 FROM sys_node n
+		         WHERE n.node_id = s.proxy_node
+		           AND (n.last_heartbeat_at IS NULL
+		                OR n.last_heartbeat_at <= now() - make_interval(secs => $1::double precision))
+		   )`
+
 // CloseStale 收尾"所属代理节点已离线"的在途会话。
+//
+// 只处理 proxy_node 能对上 sys_node 的会话，并且该节点心跳为空或已超过
+// offlineAfterSec。逻辑名（产品内 SQL 会话的 proxy_node=console）和
+// 已经从集群里删掉的节点都没有 sys_node 行，不能在这里收尾。
 //
 // 节点还在心跳、但这条会话已经不在节点的在途清单里时，这里不会命中。
 // 那种孤儿由 SessionReconciler 按心跳上报的 live_session_ids 收尾
-// （end_reason=no_live_conn）。
+// （end_reason=no_live_conn）。没有上报清单的名字（包括 console）
+// 也不会被那条路径收掉。
 //
 // 为什么需要它：进程被强制杀死（SIGKILL / OOM / 断电）时没有任何机会
-// 写归档，会话会永远停在 active —— 审计页显示"进行中"、活跃会话统计
-// 与服务端运行态对不上，录像也没有封存尾（无法回放）。
+// 写归档。节点行还在，心跳停了，会话会永远停在 active —— 审计页显示
+// "进行中"、活跃会话统计与服务端运行态对不上，录像也没有封存尾（无法回放）。
 //
 // 判定放在**一条 SQL 里**完成，而不是"先查在线节点、再逐个关闭"：
 //   - 原子：并发下不会出现"查的时候在线、关的时候已离线"；
 //   - 幂等：多实例管理服务同时巡检也安全；
-//   - 单一事实来源：在线的定义就是 sys_node.last_heartbeat_at。
+//   - 单一事实来源：在线的定义就是 sys_node.last_heartbeat_at，
+//     且节点必须先在 sys_node 里。
 //
 // 参数：
 //   - offlineAfterSec 心跳超过多少秒算离线（调用方取配置值与下限的较大者）；
@@ -219,22 +249,7 @@ func (r *SessionRepo) CloseStale(ctx context.Context, offlineAfterSec, minAgeSec
 	if endReason == "" {
 		endReason = "node_offline"
 	}
-	tag, err := r.pool.Exec(ctx, `
-		UPDATE ops_session s SET
-		   status = 'closed',
-		   end_reason = $3,
-		   end_time = COALESCE(s.end_time, now()),
-		   duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (now() - s.start_time))::int),
-		   record_status = CASE WHEN s.record_status = 'recording' THEN 'failed'
-		                        ELSE s.record_status END
-		 WHERE s.status = 'active'
-		   AND s.start_time < now() - make_interval(secs => $2::double precision)
-		   AND NOT EXISTS (
-		        SELECT 1 FROM sys_node n
-		         WHERE n.node_id = s.proxy_node
-		           AND n.last_heartbeat_at IS NOT NULL
-		           AND n.last_heartbeat_at > now() - make_interval(secs => $1::double precision)
-		   )`,
+	tag, err := r.pool.Exec(ctx, closeStaleSQL,
 		offlineAfterSec, minAgeSec, endReason)
 	if err != nil {
 		return 0, fmt.Errorf("收尾僵尸会话失败: %w", err)

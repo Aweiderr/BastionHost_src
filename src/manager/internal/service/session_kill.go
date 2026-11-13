@@ -24,11 +24,24 @@ type KillResult struct {
 	Message     string `json:"message"`
 }
 
+// killSessions 是强制中断要读写的会话记录。*SessionService 满足它。
+type killSessions interface {
+	Get(ctx context.Context, sessionID int64) (*model.Session, error)
+	Terminate(ctx context.Context, sessionID int64, endReason, interruptReason string) (bool, error)
+}
+
+// killNodes 按节点 ID 查询代理。不存在时必须返回 (nil, nil)，调用方不能把空指针当节点用。
+type killNodes interface {
+	Get(ctx context.Context, nodeID string) (*model.Node, error)
+}
+
 // SessionKiller 依赖节点查询与内部密钥，用于向代理节点下发掐断指令。
 type SessionKiller struct {
-	Sessions *SessionService
-	Nodes    *NodeService
+	Sessions killSessions
+	Nodes    killNodes
 	Secret   string
+	// Console 是产品内 SQL 会话。proxy_node=console 不是代理，掐断时由它断开数据库连接。
+	Console *OracleConsole
 	// HTTPClient 可注入以便测试；为空时用默认客户端
 	HTTPClient *http.Client
 }
@@ -59,7 +72,7 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 	}
 	endReason, interruptReason := model.SplitKillReason(reason)
 
-	updated, err := k.Sessions.sessionRepo.Terminate(ctx, sessionID, endReason, interruptReason)
+	updated, err := k.Sessions.Terminate(ctx, sessionID, endReason, interruptReason)
 	if err != nil {
 		return nil, err
 	}
@@ -67,12 +80,30 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 		return k.alreadyEnded(ctx, sess), nil
 	}
 
+	// 先落库再拆产品内连接。归档若随后上报 client_disconnect，
+	// MergeFinish 会保住 terminated / admin_kill，不会改回正常断开。
+	released := false
+	if k.Console != nil {
+		released = k.Console.Release(sessionID)
+	}
+
 	proxyKilled := false
 	msg := "已标记终止"
-	if sess.ProxyNode != "" && k.Nodes != nil && k.Secret != "" {
+	if released {
+		msg = "已断开 SQL 会话并更新库状态"
+	}
+	if k.shouldNotifyProxy(sess) {
 		node, nerr := k.Nodes.Get(ctx, sess.ProxyNode)
-		if nerr != nil {
-			msg = "节点信息不可用，仅更新库状态：" + nerr.Error()
+		// NodeRepo.Get 在没有这一行时返回 (nil, nil)。产品内 SQL 会话的
+		// proxy_node 是逻辑名 console，sys_node 里没有它；已删除的节点也一样。
+		// 不能把空指针当成节点去读地址，否则第一次中断会在库已改完之后 panic，
+		// 界面看到「系统内部错误」，第二次才发现会话已经不在进行中。
+		if nerr != nil || node == nil {
+			detail := "节点不存在"
+			if nerr != nil {
+				detail = nerr.Error()
+			}
+			msg = "节点信息不可用，仅更新库状态：" + detail
 		} else if node.Address == "" {
 			msg = "节点未上报地址，仅更新库状态"
 		} else {
@@ -89,7 +120,7 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 		}
 	}
 
-	if k.Sessions.oplog != nil {
+	if svc, ok := k.Sessions.(*SessionService); ok && svc.oplog != nil {
 		l := &model.OperationLog{
 			Module: "ops", Action: "session_kill", TargetType: "session",
 			TargetID: fmt.Sprint(sess.SessionID), TargetName: sess.SessionNo,
@@ -101,13 +132,27 @@ func (k *SessionKiller) Kill(ctx context.Context, sessionID int64, operator Oper
 			uid := operator.UserID
 			l.OperatorID = &uid
 		}
-		_ = k.Sessions.oplog.Write(ctx, l)
+		_ = svc.oplog.Write(ctx, l)
 	}
 
 	return &KillResult{
 		SessionID: sess.SessionID, SessionNo: sess.SessionNo, ProxyNode: sess.ProxyNode,
 		ProxyKilled: proxyKilled, Status: model.SessionStatusTerminated, Message: msg,
 	}, nil
+}
+
+// shouldNotifyProxy 判断这次中断要不要去叫一台代理。
+//
+// 产品内 SQL 会话的 proxy_node 是逻辑名 console，不是 sys_node。
+// 空节点名同样没有可通知的地址。这两种都只更新库并拆本进程里的连接。
+func (k *SessionKiller) shouldNotifyProxy(sess *model.Session) bool {
+	if k == nil || sess == nil || k.Nodes == nil || k.Secret == "" {
+		return false
+	}
+	if sess.ProxyNode == "" || sess.ProxyNode == oracleConsoleNode || sess.ClientType == oracleConsoleClient {
+		return false
+	}
+	return true
 }
 
 // alreadyEnded 在落库时发现会话已不再是 active 时返回当前状态。

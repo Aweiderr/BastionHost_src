@@ -30,10 +30,7 @@ func (s *Server) handleOracleOpen(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	claims := claimsFrom(r)
-	info, err := s.oracle.Open(r.Context(), service.OracleActor{
-		UserID: claims.UserID, Username: claims.Username, ClientIP: clientIP(r),
-	}, req)
+	info, err := s.oracle.Open(r.Context(), s.oracleActor(r), req)
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -56,10 +53,7 @@ func (s *Server) handleOracleSQL(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	claims := claimsFrom(r)
-	result, err := s.oracle.Exec(r.Context(), service.OracleActor{
-		UserID: claims.UserID, Username: claims.Username, ClientIP: clientIP(r),
-	}, id, req)
+	result, err := s.oracle.Exec(r.Context(), s.oracleActor(r), id, req)
 	if err != nil {
 		httpx.Fail(w, err)
 		return
@@ -102,15 +96,23 @@ func (s *Server) handleOracleMeta(w http.ResponseWriter, r *http.Request, call f
 			return
 		}
 	}
-	claims := claimsFrom(r)
-	result, err := call(r.Context(), service.OracleActor{
-		UserID: claims.UserID, Username: claims.Username, ClientIP: clientIP(r),
-	}, id, req)
+	result, err := call(r.Context(), s.oracleActor(r), id, req)
 	if err != nil {
 		httpx.Fail(w, err)
 		return
 	}
 	httpx.OK(w, result)
+}
+
+func (s *Server) oracleActor(r *http.Request) service.OracleActor {
+	claims := claimsFrom(r)
+	actor := service.OracleActor{
+		UserID: claims.UserID, Username: claims.Username, ClientIP: clientIP(r),
+	}
+	if s != nil && s.auth != nil {
+		actor.LoginClient = s.auth.LoginClient(r.Context(), claims.TokenID)
+	}
+	return actor
 }
 
 func (s *Server) handleOracleClose(w http.ResponseWriter, r *http.Request) {
@@ -123,10 +125,7 @@ func (s *Server) handleOracleClose(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	claims := claimsFrom(r)
-	if err := s.oracle.Close(service.OracleActor{
-		UserID: claims.UserID, Username: claims.Username, ClientIP: clientIP(r),
-	}, id); err != nil {
+	if err := s.oracle.Close(s.oracleActor(r), id); err != nil {
 		httpx.Fail(w, err)
 		return
 	}

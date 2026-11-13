@@ -37,6 +37,7 @@ export const KICKED_BY_OTHER_CLIENT_CODE = 'AUTH_4009'
 
 /** 与后端 MessageOf(ErrKickedByOtherClient) 保持一致 */
 export const KICKED_BY_OTHER_CLIENT_MESSAGE = '已在其他端登录'
+export const KICKED_BY_SAME_CLIENT_MESSAGE = '账号已在其他会话登录'
 
 /** 登录页读取后展示，避免只闪一下 toast 用户就不知道为什么被退回。 */
 export const SESSION_ENDED_STORAGE_KEY = 'bastion.auth.ended'
@@ -143,6 +144,16 @@ export function sessionEndedMessage(code: string | undefined, message: string | 
   if (code === KICKED_BY_OTHER_CLIENT_CODE) return text || KICKED_BY_OTHER_CLIENT_MESSAGE
   if (text) return text
   return '登录状态已失效，请重新登录'
+}
+
+/**
+ * 这一端的登录已经被另一端或本端的新登录作废。
+ * 令牌已经不能再调关闭接口，服务端会拆掉这一端打开的 SQL 会话。
+ * 普通过期不是这种情况：重新登录后还要用工作台里留下的会话号去关闭。
+ */
+export function endedByOtherLogin(message: string | undefined): boolean {
+  const text = message?.trim() ?? ''
+  return text === KICKED_BY_OTHER_CLIENT_MESSAGE || text === KICKED_BY_SAME_CLIENT_MESSAGE
 }
 
 async function readPayload<T>(response: Response): Promise<Envelope<T> | null> {

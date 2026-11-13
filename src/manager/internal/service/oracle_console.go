@@ -10,6 +10,7 @@ import (
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/oracleprov"
 	"bastion.local/manager/internal/repo"
+	"bastion.local/shared/auth"
 	"bastion.local/shared/errcode"
 	sharedmodel "bastion.local/shared/model"
 	"bastion.local/shared/policy"
@@ -68,6 +69,8 @@ type OracleActor struct {
 	Username    string
 	DisplayName string
 	ClientIP    string
+	// LoginClient 是这次请求所属的登录端（web / desktop）。空表示调用方没有带登录会话。
+	LoginClient string
 }
 
 // OracleOpenInput 只接受资产和账号。填写地址或口令会被拒绝，避免把这条接口当成直连入口。
@@ -133,17 +136,20 @@ type OracleConsole struct {
 }
 
 type oracleLive struct {
-	mu       sync.Mutex
-	userID   int64
-	assetID  int64
-	level    string
-	credMode string
-	conn     OracleConn
-	seq      int
-	blocked  int
-	last     time.Time
-	closed   bool
-	info     OracleSessionInfo
+	mu     sync.Mutex
+	userID int64
+	// loginClient 是打开这次会话的登录端：web 或 desktop。
+	// 同一账号可以两端同时在线。结束某一端的登录时只拆这一端打开的连接。
+	loginClient string
+	assetID     int64
+	level       string
+	credMode    string
+	conn        OracleConn
+	seq         int
+	blocked     int
+	last        time.Time
+	closed      bool
+	info        OracleSessionInfo
 }
 
 // NewOracleConsole 创建产品内 SQL 会话。open 为空时使用 go-ora。
@@ -277,7 +283,8 @@ func (c *OracleConsole) Open(ctx context.Context, actor OracleActor, in OracleOp
 		info.AccountName = sess.AccountName
 	}
 	live := &oracleLive{
-		userID: actor.UserID, assetID: cred.AssetID, level: cred.Level,
+		userID: actor.UserID, loginClient: normalizeLoginClient(actor.LoginClient),
+		assetID: cred.AssetID, level: cred.Level,
 		credMode: credMode, conn: conn, last: c.now(), info: info,
 	}
 	if live.assetID == 0 {
@@ -388,6 +395,9 @@ func (c *OracleConsole) Exec(ctx context.Context, actor OracleActor, sessionID i
 }
 
 // Close 结束会话并断开数据库连接。
+//
+// 同一运维账号在 Web 和桌面同时登录时，任意一端都可以结束自己打开的会话。
+// 这里只核对用户，不核对登录端：会话号已经在那一端的工作台里。
 func (c *OracleConsole) Close(actor OracleActor, sessionID int64) error {
 	live, err := c.take(actor.UserID, sessionID)
 	if err != nil {
@@ -395,6 +405,53 @@ func (c *OracleConsole) Close(actor OracleActor, sessionID int64) error {
 	}
 	c.shutdown(live, model.SessionStatusClosed, model.EndReasonClientDisconnect)
 	return nil
+}
+
+// Release 断开一条产品内 SQL 连接。管理员强制中断时调用方不是会话主人，不能走 Close。
+//
+// 库状态若已经是 terminated，随后的归档不会把结束结论改回正常断开。
+// 没有这条连接时返回 false，调用方按普通代理会话继续。
+func (c *OracleConsole) Release(sessionID int64) bool {
+	if c == nil || sessionID == 0 {
+		return false
+	}
+	c.mu.Lock()
+	live := c.live[sessionID]
+	if live != nil {
+		delete(c.live, sessionID)
+	}
+	c.mu.Unlock()
+	if live == nil {
+		return false
+	}
+	c.shutdown(live, model.SessionStatusClosed, model.EndReasonClientDisconnect)
+	return true
+}
+
+// ReleaseLogin 结束某用户在某一端打开的产品内 SQL 会话。
+//
+// 另一端仍登录时，只收这一端的连接。Web 被桌面踢下线、或这一端主动登出时，
+// 令牌已经作废，浏览器和工作台都来不及再调关闭接口；不在这里拆掉的话，
+// 数据库连接会一直留到空闲回收。
+func (c *OracleConsole) ReleaseLogin(userID int64, loginClient string) int {
+	loginClient = normalizeLoginClient(loginClient)
+	if c == nil || userID == 0 || loginClient == "" {
+		return 0
+	}
+	c.mu.Lock()
+	var drop []*oracleLive
+	for id, live := range c.live {
+		if live == nil || live.userID != userID || live.loginClient != loginClient {
+			continue
+		}
+		drop = append(drop, live)
+		delete(c.live, id)
+	}
+	c.mu.Unlock()
+	for _, live := range drop {
+		c.shutdown(live, model.SessionStatusClosed, model.EndReasonClientDisconnect)
+	}
+	return len(drop)
 }
 
 // Reap 回收空闲会话。测试可以直接调用。
@@ -535,6 +592,18 @@ func (c *OracleConsole) judge(ctx context.Context, live *oracleLive, sql string)
 	return engine.Evaluate(policy.EvalContext{
 		AssetID: live.assetID, AssetLevel: live.level, UserID: live.userID, Protocol: "oracle",
 	}, sql), nil
+}
+
+func normalizeLoginClient(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	ct, err := auth.NormalizeClientType(raw)
+	if err != nil {
+		return ""
+	}
+	return ct
 }
 
 func rejectOracleOpenTarget(in OracleOpenInput) string {

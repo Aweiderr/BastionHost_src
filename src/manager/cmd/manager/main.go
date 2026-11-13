@@ -246,6 +246,9 @@ func main() {
 		sessionSvc = service.NewSessionService(sessionRepo, assetRepo, accountRepo, oplogRepo)
 		oracleConsole = service.NewOracleConsole(opsSvc, sessionSvc, policySvc, nil)
 		oracleConsole.StartJanitor(ctx)
+		authSvc.SetLoginEnded(func(_ context.Context, userID int64, clientType string) {
+			oracleConsole.ReleaseLogin(userID, clientType)
+		})
 		sessionSvc.SetAlertRepo(repo.NewAlertRepo(pool))
 		sessionSvc.SetAlertNotifier(service.NewAlertNotifier(cfg.Alert.WebhookURL))
 		if cfg.Alert.WebhookURL != "" {
@@ -387,6 +390,7 @@ func main() {
 			Sessions: sessionSvc,
 			Nodes:    nodeSvc,
 			Secret:   cfg.Internal.Secret,
+			Console:  oracleConsole,
 		}
 	}
 

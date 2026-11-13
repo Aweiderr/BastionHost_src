@@ -2,7 +2,8 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
-import { configureHttp } from './api/http'
+import { configureHttp, endedByOtherLogin } from './api/http'
+import { discardOracleWorkbench } from './stores/oracleWorkbench'
 import { useAppStore } from './stores/app'
 import { useAuthStore } from './stores/auth'
 import './styles/base.css'
@@ -22,6 +23,9 @@ configureHttp({
   getToken: () => auth.accessToken || null,
   onUnauthorized: (message: string) => {
     if (!auth.isAuthenticated) return
+    // 被另一端顶掉时令牌已经作废，关闭接口不会成功。工作台状态留在模块里的话，
+    // 下次登录还会显示一条服务端已经拆掉的会话。普通过期不丢会话号，重新登录后仍可关闭。
+    if (endedByOtherLogin(message)) discardOracleWorkbench()
     auth.clear()
     const text = message || '登录状态已失效，请重新登录'
     appStore.error(text)

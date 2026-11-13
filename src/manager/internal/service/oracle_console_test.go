@@ -12,6 +12,7 @@ import (
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/oracleprov"
 	"bastion.local/manager/internal/repo"
+	"bastion.local/shared/auth"
 	"bastion.local/shared/policy"
 )
 
@@ -584,3 +585,137 @@ func (f *fakeOracleDB) Close() error {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestCloseWhileWebAndDesktopBothLoggedIn(t *testing.T) {
+	svc := newSessionAuth(t)
+	svc.kickOverride = &kickFlags{opposite: false, same: false}
+	ctx := context.Background()
+	user := &model.User{UserID: 7, Username: "ops", DisplayName: "运维"}
+	webTok, err := svc.issueSessionTokens(ctx, user, auth.ClientWeb, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deskTok, err := svc.issueSessionTokens(ctx, user, auth.ClientDesktop, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := &fakeOracleDir{
+		grant: &OpsGrantCheck{Allowed: true, GrantID: 9, GrantSource: "manual"},
+		cred:  managedOracleCred(),
+	}
+	audit := newFakeOracleAudit()
+	dbs := []*fakeOracleDB{{}, {}}
+	n := 0
+	console := NewOracleConsole(dir, audit, allowOraclePolicy(), func(context.Context, oracleprov.Target, string, string) (OracleConn, error) {
+		db := dbs[n]
+		n++
+		return db, nil
+	})
+	svc.SetLoginEnded(func(_ context.Context, userID int64, client string) {
+		console.ReleaseLogin(userID, client)
+	})
+	webInfo, err := console.Open(ctx, OracleActor{UserID: 7, Username: "ops", LoginClient: auth.ClientWeb}, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deskInfo, err := console.Open(ctx, OracleActor{UserID: 7, Username: "ops", LoginClient: auth.ClientDesktop}, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 桌面端的令牌关掉 Web 上打开的那条。两端登录都还在。
+	if err := console.Close(OracleActor{UserID: 7, LoginClient: auth.ClientDesktop}, webInfo.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if !dbs[0].closed || dbs[1].closed {
+		t.Fatalf("web closed=%v desktop closed=%v", dbs[0].closed, dbs[1].closed)
+	}
+	if _, err := svc.VerifyToken(ctx, webTok.AccessToken); err != nil {
+		t.Fatalf("web login: %v", err)
+	}
+	if _, err := svc.VerifyToken(ctx, deskTok.AccessToken); err != nil {
+		t.Fatalf("desktop login: %v", err)
+	}
+	if _, err := console.Exec(ctx, OracleActor{UserID: 7}, deskInfo.SessionID, OracleSQLInput{SQL: "SELECT 1 FROM DUAL"}); err != nil {
+		t.Fatal(err)
+	}
+
+	webClaims, err := svc.VerifyToken(ctx, webTok.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Logout(ctx, webClaims.TokenID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.VerifyToken(ctx, deskTok.AccessToken); err != nil {
+		t.Fatalf("web logout revoked the desktop login: %v", err)
+	}
+	if dbs[1].closed {
+		t.Fatal("logging out of web closed the desktop SQL session")
+	}
+	if _, err := console.Exec(ctx, OracleActor{UserID: 7}, deskInfo.SessionID, OracleSQLInput{SQL: "SELECT 1 FROM DUAL"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deskClaims, err := svc.VerifyToken(ctx, deskTok.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Logout(ctx, deskClaims.TokenID); err != nil {
+		t.Fatal(err)
+	}
+	if !dbs[1].closed {
+		t.Fatal("desktop logout left its SQL session open")
+	}
+}
+
+func TestOppositeLoginEndsOnlyThatClientsSQLSession(t *testing.T) {
+	svc := newSessionAuth(t)
+	ctx := context.Background()
+	user := &model.User{UserID: 7, Username: "ops"}
+	webTok, err := svc.issueSessionTokens(ctx, user, auth.ClientWeb, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := &fakeOracleDir{
+		grant: &OpsGrantCheck{Allowed: true, GrantID: 1, GrantSource: "manual"},
+		cred:  managedOracleCred(),
+	}
+	audit := newFakeOracleAudit()
+	webDB := &fakeOracleDB{}
+	deskDB := &fakeOracleDB{}
+	which := 0
+	console := NewOracleConsole(dir, audit, allowOraclePolicy(), func(context.Context, oracleprov.Target, string, string) (OracleConn, error) {
+		which++
+		if which == 1 {
+			return webDB, nil
+		}
+		return deskDB, nil
+	})
+	svc.SetLoginEnded(func(_ context.Context, userID int64, client string) {
+		console.ReleaseLogin(userID, client)
+	})
+	if _, err := console.Open(ctx, OracleActor{UserID: 7, Username: "ops", LoginClient: auth.ClientWeb}, OracleOpenInput{AssetID: 1, AccountID: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.issueSessionTokens(ctx, user, auth.ClientDesktop, true); err != nil {
+		t.Fatal(err)
+	}
+	if !webDB.closed {
+		t.Fatal("desktop login left the web SQL connection open")
+	}
+	if _, err := svc.VerifyToken(ctx, webTok.AccessToken); !errors.Is(err, auth.ErrKickedByOtherClient) {
+		t.Fatalf("web token = %v", err)
+	}
+	info, err := console.Open(ctx, OracleActor{UserID: 7, Username: "ops", LoginClient: auth.ClientDesktop}, OracleOpenInput{AssetID: 1, AccountID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := console.Exec(ctx, OracleActor{UserID: 7}, info.SessionID, OracleSQLInput{SQL: "SELECT 1 FROM DUAL"}); err != nil {
+		t.Fatal(err)
+	}
+	if deskDB.closed {
+		t.Fatal("new desktop SQL session was closed with the web one")
+	}
+}

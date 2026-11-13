@@ -3,8 +3,10 @@ import { test } from 'node:test'
 import {
   KICKED_BY_OTHER_CLIENT_CODE,
   KICKED_BY_OTHER_CLIENT_MESSAGE,
+  KICKED_BY_SAME_CLIENT_MESSAGE,
   PASSWORD_EXPIRED_CODE,
   PASSWORD_EXPIRED_MESSAGE,
+  endedByOtherLogin,
   sessionEndedMessage,
   shouldClearSession,
 } from './http.ts'
@@ -37,4 +39,8 @@ test('被其他端踢下线时清会话并保留「已在其他端登录」', ()
   assert.equal(sessionEndedMessage(KICKED_BY_OTHER_CLIENT_CODE, '账号已在其他会话登录'), '账号已在其他会话登录')
   assert.equal(sessionEndedMessage('AUTH_4005', '登录已过期，请重新登录'), '登录已过期，请重新登录')
   assert.equal(sessionEndedMessage('AUTH_4005', ''), '登录状态已失效，请重新登录')
+  assert.equal(endedByOtherLogin(KICKED_BY_OTHER_CLIENT_MESSAGE), true)
+  assert.equal(endedByOtherLogin(KICKED_BY_SAME_CLIENT_MESSAGE), true)
+  assert.equal(endedByOtherLogin('登录已过期，请重新登录'), false)
+  assert.equal(endedByOtherLogin(''), false)
 })

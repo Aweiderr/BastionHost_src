@@ -14,3 +14,8 @@ export async function shutdownOracleWorkbench(): Promise<void> {
   const ids = takeAllSessionIds(oracleBench)
   await Promise.all(ids.map((id) => closeOracleConsole(id).catch(() => undefined)))
 }
+
+/** 丢掉本地工作台状态，不再调用关闭接口。用于令牌已经作废、服务端会自行收口的情况。 */
+export function discardOracleWorkbench(): void {
+  takeAllSessionIds(oracleBench)
+}

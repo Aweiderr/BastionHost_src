@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -104,7 +105,14 @@ func (a *App) OpenOracleConsole(assetID, accountID int64) (*coreapi.OracleConsol
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	return a.api.OpenOracleConsole(ctx, assetID, accountID)
+	info, err := a.api.OpenOracleConsole(ctx, assetID, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if info != nil {
+		a.rememberOracle(info.SessionID)
+	}
+	return info, nil
 }
 
 // ExecOracleSQL 把一条 SQL 交给管理服务执行。
@@ -124,7 +132,62 @@ func (a *App) CloseOracleConsole(sessionID int64) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return a.api.CloseOracleConsole(ctx, sessionID)
+	err := a.api.CloseOracleConsole(ctx, sessionID)
+	if err == nil {
+		a.forgetOracle(sessionID)
+	}
+	return err
+}
+
+func (a *App) rememberOracle(id int64) {
+	if a == nil || id <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.oracleIDs == nil {
+		a.oracleIDs = map[int64]struct{}{}
+	}
+	a.oracleIDs[id] = struct{}{}
+}
+
+func (a *App) forgetOracle(id int64) {
+	if a == nil || id <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.oracleIDs, id)
+}
+
+func (a *App) forgetOracleAll() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.oracleIDs = map[int64]struct{}{}
+	a.mu.Unlock()
+}
+
+// closeOracleConsoles 在令牌还有效时结束本机打开的 SQL 会话。
+func (a *App) closeOracleConsoles() {
+	if a == nil || a.api == nil {
+		return
+	}
+	a.mu.Lock()
+	ids := make([]int64, 0, len(a.oracleIDs))
+	for id := range a.oracleIDs {
+		ids = append(ids, id)
+	}
+	a.oracleIDs = map[int64]struct{}{}
+	a.mu.Unlock()
+	for _, id := range ids {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		if err := a.api.CloseOracleConsole(ctx, id); err != nil {
+			slog.Warn("登出时结束 SQL 会话失败", "session_id", id, "err", err)
+		}
+		cancel()
+	}
 }
 
 // ListOracleSchemas 列出已打开会话能看见的数据库用户。

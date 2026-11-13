@@ -129,6 +129,24 @@ func (r *AuthSessionRepo) Rejection(ctx context.Context, jti string) error {
 	}
 }
 
+// Owner 返回 jti 属于哪个用户、哪一端。未登记时 ok 为 false。
+// 已作废的行也返回：登出时要知道该拆掉哪一端打开的 SQL 会话。
+func (r *AuthSessionRepo) Owner(ctx context.Context, jti string) (int64, string, bool, error) {
+	if r == nil || r.pool == nil || jti == "" {
+		return 0, "", false, nil
+	}
+	var userID int64
+	var ct string
+	err := r.pool.QueryRow(ctx, `SELECT user_id, client_type FROM sys_auth_session WHERE jti = $1`, jti).Scan(&userID, &ct)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, fmt.Errorf("查询登录会话失败: %w", err)
+	}
+	return userID, ct, true, nil
+}
+
 // ClientType 返回 jti 登记时的客户端类型。
 func (r *AuthSessionRepo) ClientType(ctx context.Context, jti string) (string, bool, error) {
 	if r == nil || r.pool == nil || jti == "" {

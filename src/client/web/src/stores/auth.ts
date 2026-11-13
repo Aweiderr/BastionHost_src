@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import * as authApi from '@/api/auth'
 import type { CurrentUser, LoginResult } from '@/api/types'
+import { discardOracleWorkbench } from '@/stores/oracleWorkbench'
 
 const STORAGE_KEY = 'bastion.auth.session'
 
@@ -210,6 +211,9 @@ export const useAuthStore = defineStore('auth', () => {
   async function logout(): Promise<void> {
     try {
       if (accessToken.value) await authApi.logout()
+      // 服务端登出时会拆掉这一端打开的 SQL 会话。接口成功后再丢掉本地会话号。
+      // 接口失败时先留着，重新登录后还能用同一个会话号去关闭。
+      discardOracleWorkbench()
     } catch {
       /* 忽略登出接口异常 */
     } finally {

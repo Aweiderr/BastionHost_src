@@ -2,6 +2,9 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { getSetupStatus } from '@/api/setup'
+import { appHref, chunkReloadHref, WEB_PREFIX } from './appHref'
+
+export { appHref, chunkReloadHref, WEB_PREFIX }
 
 declare module 'vue-router' {
   interface RouteMeta {
@@ -409,15 +412,7 @@ export const MENU_GROUPS: MenuGroup[] = [
   },
 ]
 
-/**
- * Web 控制台的 URL 前缀。
- *
- * 系统不再占用根路径：所有页面都在 /bastion/* 之下，
- * 便于同一台服务器上并存其它服务，也让"这是堡垒机"一眼可辨。
- * 访问根路径 / 时由后端重定向到这里（见 manager 的 static.go）。
- */
-export const WEB_PREFIX = '/bastion'
-
+// WEB_PREFIX 定义在 ./appHref，硬导航与 history base 共用同一前缀。
 const router = createRouter({
   history: createWebHistory(WEB_PREFIX + '/'),
   routes,
@@ -463,6 +458,9 @@ async function probeInitialized(): Promise<boolean> {
  *
  * 处理方式：自动重新加载一次目标路由。用 sessionStorage 记录时间戳，
  * 避免"新版本仍然加载失败"时陷入无限刷新。
+ *
+ * 刷新地址必须带上 history base。to.fullPath 是 `/resources` 这种相对前缀
+ * 的路径；赋给 location.href 会请求站点根，管理服务返回 API_4040。
  */
 const CHUNK_RELOAD_KEY = 'bastion:chunk-reload-at'
 
@@ -481,7 +479,9 @@ router.onError((error, to) => {
     return
   }
   window.sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()))
-  window.location.href = to?.fullPath || window.location.pathname
+  // fullPath 不含 /bastion。直接赋给 location.href 会跳到 /resources，
+  // 管理服务对前缀之外的路径返回 API_4040 JSON，而不是控制台。
+  window.location.href = chunkReloadHref(to, window.location)
 })
 
 /**

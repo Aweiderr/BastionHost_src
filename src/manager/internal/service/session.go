@@ -278,6 +278,14 @@ func (s *SessionService) Get(ctx context.Context, sessionID int64) (*model.Sessi
 	return s.sessionRepo.Get(ctx, sessionID)
 }
 
+// Terminate 把仍在进行中的会话标成被强制中断。
+func (s *SessionService) Terminate(ctx context.Context, sessionID int64, endReason, interruptReason string) (bool, error) {
+	if s == nil || s.sessionRepo == nil {
+		return false, fmt.Errorf("会话服务未启用")
+	}
+	return s.sessionRepo.Terminate(ctx, sessionID, endReason, interruptReason)
+}
+
 // List 查询会话列表。
 func (s *SessionService) List(ctx context.Context, f repo.SessionFilter) ([]*model.Session, int64, error) {
 	return s.sessionRepo.List(ctx, f)

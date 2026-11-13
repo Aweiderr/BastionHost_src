@@ -19,9 +19,13 @@ func TestKillMarksTerminatedBeforeNotifyingProxy(t *testing.T) {
 	body := string(src)
 	fn := body[strings.Index(body, "func (k *SessionKiller) Kill("):]
 	fn = fn[:strings.Index(fn, "\nfunc ")]
-	term := strings.Index(fn, "sessionRepo.Terminate(")
+	term := strings.Index(fn, ".Terminate(")
+	release := strings.Index(fn, ".Release(")
 	proxy := strings.Index(fn, "callProxyKill(")
 	if term < 0 || proxy < 0 || term > proxy {
 		t.Fatalf("Terminate must run before callProxyKill, term=%d proxy=%d", term, proxy)
+	}
+	if release < 0 || release < term || release > proxy {
+		t.Fatalf("Release must run after Terminate and before callProxyKill, release=%d term=%d proxy=%d", release, term, proxy)
 	}
 }

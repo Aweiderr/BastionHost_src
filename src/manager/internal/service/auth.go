@@ -41,6 +41,9 @@ type AuthService struct {
 	sessions auth.SessionRegistry
 	// kickOverride 非 nil 时覆盖 sys_config 里的互斥开关，只给测试固定策略。
 	kickOverride *kickFlags
+	// loginEnded 在某一端登录会话作废后调用（被另一端踢下线，或这一端登出）。
+	// 用来拆掉该端打开、但令牌已经作废所以客户端来不及关闭的 SQL 会话。
+	loginEnded func(ctx context.Context, userID int64, clientType string)
 }
 
 // kickFlags 是登录互斥的两个开关。
@@ -177,6 +180,28 @@ func NewAuthService(
 		tm: tm, cfg: cfg, crypto: cryptoHelper,
 		sessions: auth.NewMemorySessionStore(),
 	}
+}
+
+// SetLoginEnded 在某一端的登录会话作废后收到通知。
+//
+// userID 和 clientType 标明是哪一端结束了。另一端仍然在线时不会被通知到。
+func (s *AuthService) SetLoginEnded(fn func(ctx context.Context, userID int64, clientType string)) {
+	if s == nil {
+		return
+	}
+	s.loginEnded = fn
+}
+
+// LoginClient 返回这个访问令牌登记时的客户端类型。未登记时返回空串。
+func (s *AuthService) LoginClient(ctx context.Context, jti string) string {
+	if s == nil || s.sessions == nil || strings.TrimSpace(jti) == "" {
+		return ""
+	}
+	ct, ok, err := s.sessions.ClientType(ctx, jti)
+	if err != nil || !ok {
+		return ""
+	}
+	return normalizeLoginClient(ct)
 }
 
 // SetSessionStore 注入登录会话登记。
@@ -822,6 +847,7 @@ func (s *AuthService) kickOnLogin(ctx context.Context, userID int64, clientType 
 		}
 		if n > 0 {
 			slog.Info("已撤销另一端登录会话", "user_id", userID, "login_client", clientType, "revoked_client", other, "count", n)
+			s.noteLoginEnded(ctx, userID, other)
 		}
 	}
 	if s.kickSameEnabled(ctx) {
@@ -831,9 +857,32 @@ func (s *AuthService) kickOnLogin(ctx context.Context, userID int64, clientType 
 		}
 		if n > 0 {
 			slog.Info("已撤销本端其它登录会话", "user_id", userID, "client", clientType, "count", n)
+			s.noteLoginEnded(ctx, userID, clientType)
 		}
 	}
 	return nil
+}
+
+func (s *AuthService) noteLoginEnded(ctx context.Context, userID int64, clientType string) {
+	if s == nil || s.loginEnded == nil || userID == 0 || strings.TrimSpace(clientType) == "" {
+		return
+	}
+	s.loginEnded(ctx, userID, clientType)
+}
+
+// loginOwner 读出 jti 属于哪个用户、哪一端。登记表没有这个方法时按未登记处理。
+func (s *AuthService) loginOwner(ctx context.Context, jti string) (int64, string, bool, error) {
+	type owner interface {
+		Owner(context.Context, string) (int64, string, bool, error)
+	}
+	if s == nil || s.sessions == nil {
+		return 0, "", false, nil
+	}
+	own, ok := s.sessions.(owner)
+	if !ok {
+		return 0, "", false, nil
+	}
+	return own.Owner(ctx, jti)
 }
 
 func (s *AuthService) kickOppositeEnabled(ctx context.Context) bool {
@@ -874,7 +923,17 @@ func (s *AuthService) Logout(ctx context.Context, jti string) error {
 	if s == nil || s.sessions == nil || strings.TrimSpace(jti) == "" {
 		return nil
 	}
-	return s.sessions.RevokeFamily(ctx, jti, auth.RevokeReasonLogout)
+	userID, ct, ok, oerr := s.loginOwner(ctx, jti)
+	if oerr != nil {
+		slog.Warn("查询登录会话所属端失败", "err", oerr)
+	}
+	if err := s.sessions.RevokeFamily(ctx, jti, auth.RevokeReasonLogout); err != nil {
+		return err
+	}
+	if ok {
+		s.noteLoginEnded(ctx, userID, ct)
+	}
+	return nil
 }
 
 // onLoginFail 处理登录失败：计数并按阈值锁定。

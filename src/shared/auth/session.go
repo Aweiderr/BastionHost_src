@@ -201,6 +201,20 @@ func (s *MemorySessionStore) Rejection(_ context.Context, jti string) error {
 	return rejectionError(rec.reason)
 }
 
+// Owner 返回 jti 属于哪个用户、哪一端。未登记时 ok 为 false。已作废的行仍然返回，登出时还要知道该拆哪一端的 SQL 会话。
+func (s *MemorySessionStore) Owner(_ context.Context, jti string) (int64, string, bool, error) {
+	if jti == "" {
+		return 0, "", false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.items[jti]
+	if !ok {
+		return 0, "", false, nil
+	}
+	return rec.UserID, rec.ClientType, true, nil
+}
+
 // ClientType 查询 jti 登记的客户端类型。
 func (s *MemorySessionStore) ClientType(_ context.Context, jti string) (string, bool, error) {
 	s.mu.Lock()

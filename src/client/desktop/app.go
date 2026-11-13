@@ -49,6 +49,9 @@ type App struct {
 	deadGen  map[string]int
 	epoch    int
 	attempts map[string]*reconnect.Attempt
+	// oracleIDs 是本进程打开的产品内 SQL 会话。登出时要先关掉再作废令牌，
+	// 否则关闭请求会带着已经清空的令牌失败，会话在服务端继续挂着。
+	oracleIDs map[int64]struct{}
 	// managerLink 管的是和管理服务之间的探测，不是某一条终端。
 	managerLink reconnect.Link
 	trayCtl     *tray.Controller
@@ -71,16 +74,17 @@ type App struct {
 // NewApp 创建应用对象。
 func NewApp(coreURL string) *App {
 	a := &App{
-		api:      coreapi.New(coreURL),
-		sessions: make(map[string]*term.Session),
-		desktops: make(map[string]*desk.Session),
-		sshGen:   map[string]int{},
-		deskGen:  map[string]int{},
-		sshMeta:  map[string]sshSlot{},
-		deskMeta: map[string]deskSlot{},
-		deadGen:  map[string]int{},
-		attempts: map[string]*reconnect.Attempt{},
-		trayCtl:  &tray.Controller{},
+		api:       coreapi.New(coreURL),
+		sessions:  make(map[string]*term.Session),
+		desktops:  make(map[string]*desk.Session),
+		sshGen:    map[string]int{},
+		deskGen:   map[string]int{},
+		sshMeta:   map[string]sshSlot{},
+		deskMeta:  map[string]deskSlot{},
+		deadGen:   map[string]int{},
+		attempts:  map[string]*reconnect.Attempt{},
+		oracleIDs: map[int64]struct{}{},
+		trayCtl:   &tray.Controller{},
 	}
 	a.api.SetOnSessionEnded(a.onSessionEnded)
 	return a
@@ -254,6 +258,7 @@ func (a *App) ensureOps(res *coreapi.LoginResult) error {
 // discardLogin 丢掉刚签发的会话：服务端登出，并清除内存中的用户与口令。
 func (a *App) discardLogin() {
 	a.stopSessionWatch()
+	a.closeOracleConsoles()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := a.api.Logout(ctx); err != nil {
@@ -272,6 +277,8 @@ func rolesOf(res *coreapi.LoginResult) []string {
 // Logout 登出并清理所有会话与内存中的口令。
 func (a *App) Logout() error {
 	a.stopSessionWatch()
+	// 先关 SQL 会话再作废令牌。两端同时在线时，这一端登出不能把关闭请求留到令牌清空之后。
+	a.closeOracleConsoles()
 	a.dropLocalSession()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -298,6 +305,8 @@ func (a *App) dropLocalSession() {
 // onSessionEnded 在访问令牌被作废（含被另一端登录踢下线）时清掉本地会话。
 func (a *App) onSessionEnded(msg string) {
 	a.stopSessionWatch()
+	// 令牌已经被清掉，再请求关闭只会 401。服务端在作废这一端登录时会拆掉对应的 SQL 会话。
+	a.forgetOracleAll()
 	a.dropLocalSession()
 	if strings.TrimSpace(msg) == "" {
 		msg = "已在其他端登录"

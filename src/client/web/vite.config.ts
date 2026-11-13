@@ -6,7 +6,7 @@ import vue from '@vitejs/plugin-vue'
 const MANAGER_TARGET = 'http://127.0.0.1:8080'
 
 // Web 控制台的 URL 前缀：系统不再占用根路径，所有页面都在 /bastion/* 下。
-// 与 router/index.ts 的 WEB_PREFIX、manager 侧静态托管的 BASTION_WEB_PREFIX 保持一致。
+// 与 router/appHref.ts 的 WEB_PREFIX、manager 侧静态托管的 BASTION_WEB_PREFIX 保持一致。
 const WEB_PREFIX = '/bastion/'
 
 export default defineConfig({

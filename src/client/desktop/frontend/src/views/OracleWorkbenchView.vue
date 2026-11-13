@@ -12,16 +12,17 @@ import {
   consumeDesktopOracleRequest,
   createWorkbenchState,
   endSession,
-  markOpen,
-  markSessionError,
+  nextOpenEntry,
   noteRouteLeave,
   noteRouteReturn,
+  runOracleOpen,
   runScript,
   sessionByKey,
   setColumns,
   setObjects,
   setSchemas,
   takeAllSessionIds,
+  type OracleOpenInfo,
   type WorkbenchSession,
 } from '../../../../web/src/utils/oracleWorkbench.ts'
 import {
@@ -51,8 +52,7 @@ watch(
     const pending = consumeDesktopOracleRequest(state)
     if (!pending) return
     const session = beginSession(bench, pending)
-    if ((session.status === 'open' && session.sessionId > 0) || session.busy) return
-    void connectSession(session)
+    void connectSession(session, nextOpenEntry('desktop'))
   },
 )
 
@@ -66,34 +66,50 @@ function errorText(err: unknown): string {
   return String(err || 'Oracle SQL 会话失败')
 }
 
-async function connectSession(session: WorkbenchSession): Promise<void> {
-  session.busy = true
-  session.status = 'connecting'
-  session.error = ''
+async function retry(key: string): Promise<void> {
+  const session = sessionByKey(bench, key)
+  if (!session || (session.status === 'open' && session.sessionId > 0)) return
+  await connectSession(session, nextOpenEntry('retry'))
+}
+
+async function openConsole(session: WorkbenchSession): Promise<OracleOpenInfo> {
   try {
     const info = await OpenOracleConsole(session.assetId, session.accountId)
-    markOpen(session, {
+    return {
       sessionId: Number(info?.session_id || 0),
       sessionNo: String(info?.session_no || ''),
-      assetName: String(info?.asset_name || session.assetName),
-      accountName: String(info?.account_name || session.accountName),
-    })
-    await refreshSchemas(session)
+      assetName: String(info?.asset_name || ''),
+      accountName: String(info?.account_name || ''),
+    }
   } catch (err) {
-    markSessionError(session, errorText(err))
-  } finally {
-    session.busy = false
+    throw new Error(errorText(err))
   }
 }
 
+async function connectSession(session: WorkbenchSession, entry: string): Promise<void> {
+  const result = await runOracleOpen({
+    state: bench,
+    session,
+    entry,
+    open: () => openConsole(session),
+    close: (id) => CloseOracleConsole(id).catch(() => undefined),
+  })
+  if (result !== 'opened') return
+  const current = sessionByKey(bench, session.key)
+  if (current?.status === 'open') await refreshSchemas(current)
+}
+
 async function refreshSchemas(session: WorkbenchSession): Promise<void> {
-  if (!session.sessionId) return
+  const sessionId = session.sessionId
+  if (!sessionId || session.status !== 'open') return
   session.treeLoading = true
   try {
-    const data: any = await ListOracleSchemas(session.sessionId)
+    const data: any = await ListOracleSchemas(sessionId)
+    if (session.sessionId !== sessionId || session.status !== 'open') return
     const names = Array.isArray(data?.schemas) ? data.schemas.map((item: unknown) => String(item)) : []
     setSchemas(session, names, data?.truncated === true)
   } catch (err) {
+    if (session.sessionId !== sessionId) return
     session.treeLoading = false
     session.treeError = errorText(err)
   }
@@ -183,6 +199,7 @@ async function end(key: string): Promise<void> {
     :state="bench"
     @run="run"
     @end="end"
+    @retry="retry"
     @load-schema="loadSchema"
     @load-columns="loadColumns"
   />

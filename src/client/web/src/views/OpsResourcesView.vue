@@ -98,8 +98,14 @@ function connect(row: OpsAsset): void {
 function openOracleWorkbench(accountId: number): void {
   const asset = oracleAsset.value
   if (!asset || !accountId) return
+  const account = asset.accounts?.find((item) => item.account_id === accountId)
   oracleOpen.value = false
-  void router.push(oracleWorkbenchLocation(asset.asset_id, accountId))
+  void router.push(
+    oracleWorkbenchLocation(asset.asset_id, accountId, {
+      assetName: asset.asset_name,
+      accountName: account?.account_name ?? '',
+    }),
+  )
 }
 
 onMounted(load)

@@ -23,7 +23,11 @@ test('桌面端进入 SQL 工作台视图，离开再回来会话仍在', () => 
   const nav = { view: 'workbench', oraclePending: null as null | { assetId: number; accountId: number; assetName: string; accountName: string } }
   requestDesktopOracleWorkbench(nav, { assetId: 3, accountId: 8, assetName: '财务库', accountName: 'APP' })
   assert.equal(nav.view, 'oracle')
-  assert.deepEqual(oracleWorkbenchLocation(3, 8).query, { asset: '3', account: '8' })
+  const location = oracleWorkbenchLocation(3, 8)
+  assert.equal(location.query.asset, '3')
+  assert.equal(location.query.account, '8')
+  assert.equal(location.query.assetName, '')
+  assert.match(location.query.entry, /^route-/)
   const state = createWorkbenchState()
   const session = beginSession(state, nav.oraclePending!)
   session.status = 'open'
@@ -61,4 +65,8 @@ test('桌面端用 v-show 保住工作台，本机工具仍留在运维工作台
   assert.match(workbench, /打开本机 CMD \/ sqlplus/)
   assert.equal(workbench.includes('ExecOracleSQL'), false)
   assert.equal(workbench.includes('oracle-sql'), false)
+  const oracle = readFileSync(join(here, '../views/OracleWorkbenchView.vue'), 'utf8')
+  assert.match(oracle, /runOracleOpen/)
+  assert.equal(/session\.busy\) return/.test(oracle), false)
+  assert.match(oracle, /@retry="retry"/)
 })

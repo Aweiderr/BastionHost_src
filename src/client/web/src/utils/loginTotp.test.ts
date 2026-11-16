@@ -10,7 +10,9 @@ test('缺少动态口令时展开输入框，图形验证码不展开', () => {
   assert.equal(shouldShowTotp('用户名或口令不正确'), false)
 })
 
-test('时间偏差提示写明同步失败会导致口令无效', () => {
+test('时间偏差提示写明 60 秒周期，同步失败会导致口令无效', () => {
+  assert.match(TOTP_CLOCK_HINT, /60 秒/)
   assert.match(TOTP_CLOCK_HINT, /时间/)
   assert.match(TOTP_CLOCK_HINT, /动态口令/)
+  assert.doesNotMatch(TOTP_CLOCK_HINT, /30 秒/)
 })

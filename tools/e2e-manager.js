@@ -149,7 +149,7 @@ async function main() {
   check('返回 otpauth URI', !!r.body?.data?.otpauth_uri, r.body?.data?.otpauth_uri)
   check('返回手动密钥', !!r.body?.data?.manual_secret, r.body?.data?.manual_secret)
   check('算法为 SHA1', r.body?.data?.algorithm === 'SHA1')
-  check('6 位 / 30 秒', r.body?.data?.digits === 6 && r.body?.data?.period === 30)
+  check('6 位 / 60 秒', r.body?.data?.digits === 6 && r.body?.data?.period === 60)
   const manualSecret = r.body?.data?.manual_secret
 
   // 用错误验证码确认
@@ -166,7 +166,7 @@ async function main() {
   r = await api('POST', '/api/v1/auth/login', { username: adminUser, password: newPwd })
   check('绑定后登录要求验证码', r.body?.code === 'AUTH_4003', JSON.stringify(r.body))
   r = await api('POST', '/api/v1/auth/login',
-    { username: adminUser, password: newPwd, totp_code: genTOTP(manualSecret) })
+    { username: adminUser, password: newPwd, totp_code: genTOTP(manualSecret, 1) })
   check('带验证码登录成功', r.status === 200, JSON.stringify(r.body).slice(0, 120))
 
   // ============ 10. 封存超级管理员 ============
@@ -208,8 +208,9 @@ async function main() {
   process.exit(fail > 0 ? 1 : 0)
 }
 
-// genTOTP 按 RFC 6238（HMAC-SHA1）生成验证码
-function genTOTP(base32Secret) {
+// genTOTP 按产品步长 60 秒、HMAC-SHA1 生成验证码。
+// stepOffset 为 1 时取下一片，避免确认绑定刚用过的当前片被防重放拒绝。
+function genTOTP(base32Secret, stepOffset = 0) {
   const crypto = require('crypto')
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
   let bits = ''
@@ -221,7 +222,7 @@ function genTOTP(base32Secret) {
   const bytes = []
   for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2))
   const key = Buffer.from(bytes)
-  const counter = Math.floor(Date.now() / 1000 / 30)
+  const counter = Math.floor(Date.now() / 1000 / 60) + stepOffset
   const buf = Buffer.alloc(8)
   buf.writeBigUInt64BE(BigInt(counter))
   const mac = crypto.createHmac('sha1', key).update(buf).digest()

@@ -6,9 +6,13 @@ import (
 	"time"
 )
 
-// RFC 6238 附录 B 的 SHA1 向量是 8 位。本系统对外使用 6 位，
+// RFC 6238 附录 B 的 SHA1 向量按 30 秒步长、8 位定义。
+// 产品默认步长是 60 秒，这里必须显式使用 30 秒，不能改用 TOTPPeriod。
 // 6 位值是同一动态截断对 10^6 取模的结果。
 func TestTOTPRFC6238SHA1Vectors(t *testing.T) {
+	if TOTPRFC6238Period != 30 {
+		t.Fatalf("RFC 向量步长被改成 %d", TOTPRFC6238Period)
+	}
 	secret := []byte("12345678901234567890")
 	vectors := []struct {
 		sec   int64
@@ -22,20 +26,41 @@ func TestTOTPRFC6238SHA1Vectors(t *testing.T) {
 		{20000000000, "65353130"},
 	}
 	for _, v := range vectors {
-		counter := uint64(v.sec / int64(TOTPPeriod))
+		counter := uint64(v.sec / int64(TOTPRFC6238Period))
 		got8 := hotpDigits(secret, counter, TOTPAlgoSHA1, 8)
 		if got8 != v.want8 {
 			t.Errorf("t=%d 8 位 = %s，期望 %s", v.sec, got8, v.want8)
 		}
+		at := time.Unix(v.sec, 0).UTC()
 		want6 := v.want8[len(v.want8)-TOTPDigits:]
-		got6 := GenerateTOTP(secret, time.Unix(v.sec, 0).UTC(), TOTPAlgoSHA1)
+		got6 := generateTOTPAt(secret, at, TOTPAlgoSHA1, TOTPRFC6238Period)
 		if got6 != want6 {
 			t.Errorf("t=%d 6 位 = %s，期望 %s", v.sec, got6, want6)
 		}
-		ok, step := MatchTOTP(secret, want6, TOTPAlgoSHA1, time.Unix(v.sec, 0).UTC())
+		ok, step := matchTOTPAt(secret, want6, TOTPAlgoSHA1, at, TOTPRFC6238Period)
 		if !ok || step != int64(counter) {
-			t.Errorf("t=%d MatchTOTP ok=%v step=%d，期望命中 %d", v.sec, ok, step, counter)
+			t.Errorf("t=%d 30 秒 MatchTOTP ok=%v step=%d，期望命中 %d", v.sec, ok, step, counter)
 		}
+	}
+}
+
+func TestProductTOTPPeriodIs60Seconds(t *testing.T) {
+	if TOTPPeriod != 60 {
+		t.Fatalf("产品步长 = %d，期望 60", TOTPPeriod)
+	}
+	secret := []byte("12345678901234567890")
+	uri := BuildOtpauthURI("Bastion", "zhangsan", secret, TOTPAlgoSHA1)
+	if !strings.Contains(uri, "period=60") {
+		t.Fatalf("otpauth 应声明 period=60，得到 %s", uri)
+	}
+	now := time.Unix(1_111_111_111, 0).UTC()
+	if GenerateTOTP(secret, now, TOTPAlgoSHA1) != generateTOTPAt(secret, now, TOTPAlgoSHA1, 60) {
+		t.Fatal("默认 GenerateTOTP 应等于 60 秒步长")
+	}
+	ok, step := MatchTOTP(secret, GenerateTOTP(secret, now, TOTPAlgoSHA1), TOTPAlgoSHA1, now)
+	wantStep := now.Unix() / 60
+	if !ok || step != wantStep {
+		t.Fatalf("默认校验步长 ok=%v step=%d，期望 %d", ok, step, wantStep)
 	}
 }
 
@@ -72,8 +97,8 @@ func TestTOTPWindowSkew(t *testing.T) {
 func TestTOTPDefaultAlgorithmIsSHA1(t *testing.T) {
 	secret := []byte("12345678901234567890")
 	uri := BuildOtpauthURI("Bastion", "zhangsan", secret, "")
-	if !strings.Contains(uri, "algorithm=SHA1") {
-		t.Fatalf("默认 otpauth 应声明 SHA1，得到 %s", uri)
+	if !strings.Contains(uri, "algorithm=SHA1") || !strings.Contains(uri, "period=60") {
+		t.Fatalf("默认 otpauth 应声明 SHA1 与 60 秒，得到 %s", uri)
 	}
 	now := time.Unix(59, 0).UTC()
 	if GenerateTOTP(secret, now, "") != GenerateTOTP(secret, now, TOTPAlgoSHA1) {

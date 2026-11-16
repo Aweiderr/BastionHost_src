@@ -16,14 +16,20 @@ import (
 	"time"
 )
 
-// TOTP 参数（遵循 RFC 6238，默认值与主流 App 一致）
+// TOTP 参数。
+//
+// 产品默认步长是 60 秒，并写入 otpauth 的 period，
+// 这样 Google / Microsoft Authenticator 与堡垒机按同一周期生成验证码。
+// RFC 6238 附录 B 的测试向量使用 30 秒，只在对照测试里显式传入。
 const (
-	TOTPPeriod = 30 // 时间步长（秒）
+	TOTPPeriod = 60 // 产品时间步长（秒）
 	TOTPDigits = 6  // 验证码位数
 	// TOTPSecretSize 种子长度（字节）。20 字节 = 160 位，Base32 编码后 32 字符
 	TOTPSecretSize = 20
-	// TOTPWindow 容错窗口：验证当前时间片及其前后各 1 个
+	// TOTPWindow 容错窗口：验证当前时间片及其前后各 1 个（各 60 秒）
 	TOTPWindow = 1
+	// TOTPRFC6238Period 是 RFC 6238 附录 B 的步长，不是产品默认值。
+	TOTPRFC6238Period = 30
 )
 
 // TOTP 算法
@@ -61,7 +67,7 @@ func DecodeBase32(s string) ([]byte, error) {
 //
 // 格式：
 //
-//	otpauth://totp/{issuer}:{account}?secret=...&issuer=...&algorithm=SHA1&digits=6&period=30
+//	otpauth://totp/{issuer}:{account}?secret=...&issuer=...&algorithm=SHA1&digits=6&period=60
 func BuildOtpauthURI(issuer, account string, secret []byte, algo string) string {
 	if algo == "" {
 		algo = TOTPAlgoSHA1
@@ -76,10 +82,23 @@ func BuildOtpauthURI(issuer, account string, secret []byte, algo string) string 
 	return "otpauth://totp/" + label + "?" + q.Encode()
 }
 
-// GenerateTOTP 计算指定时刻的 TOTP 验证码。
+// GenerateTOTP 按产品步长（60 秒）计算指定时刻的验证码。
 func GenerateTOTP(secret []byte, t time.Time, algo string) string {
-	counter := uint64(t.Unix() / int64(TOTPPeriod))
+	return generateTOTPAt(secret, t, algo, TOTPPeriod)
+}
+
+// generateTOTPAt 按给定步长计算验证码。period 仅供 RFC 6238 的 30 秒向量使用。
+func generateTOTPAt(secret []byte, t time.Time, algo string, period int) string {
+	period = normalizePeriod(period)
+	counter := uint64(t.Unix() / int64(period))
 	return hotp(secret, counter, algo)
+}
+
+func normalizePeriod(period int) int {
+	if period <= 0 {
+		return TOTPPeriod
+	}
+	return period
 }
 
 // VerifyTOTP 校验验证码，容忍 ±TOTPWindow 个时间片。
@@ -96,16 +115,22 @@ func VerifyTOTP(secret []byte, code string, algo string) (bool, int) {
 	return true, int(step - base)
 }
 
-// MatchTOTP 校验验证码，并返回命中的时间片计数（Unix 秒 / 30）。
+// MatchTOTP 按产品步长（60 秒）校验验证码，并返回命中的时间片计数（Unix 秒 / 60）。
 //
-// 调用方应记下这个计数，同一计数只接受一次（SRS FR-01-02）。
+// 容错是当前片及其前后各 1 片。调用方应记下这个计数，同一计数只接受一次。
 // 未命中时 ok 为 false，step 为 0。
 func MatchTOTP(secret []byte, code string, algo string, now time.Time) (bool, int64) {
+	return matchTOTPAt(secret, code, algo, now, TOTPPeriod)
+}
+
+// matchTOTPAt 按给定步长校验。period 仅供 RFC 6238 的 30 秒向量使用。
+func matchTOTPAt(secret []byte, code string, algo string, now time.Time, period int) (bool, int64) {
 	code = strings.TrimSpace(code)
 	if len(code) != TOTPDigits {
 		return false, 0
 	}
-	base := now.Unix() / int64(TOTPPeriod)
+	period = normalizePeriod(period)
+	base := now.Unix() / int64(period)
 	for _, offset := range windowOffsets() {
 		step := base + int64(offset)
 		if step < 0 {

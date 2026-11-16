@@ -90,8 +90,11 @@ func TestTOTPBindingJSONUsesBothFieldNames(t *testing.T) {
 		t.Fatalf("新旧字段应是同一份密钥: %s", raw)
 	}
 	uri, _ := m["otpauth_uri"].(string)
-	if !strings.Contains(uri, "algorithm=SHA1") || !strings.HasPrefix(uri, "otpauth://totp/") {
-		t.Fatalf("默认绑定应是 SHA1 otpauth: %s", uri)
+	if !strings.Contains(uri, "algorithm=SHA1") || !strings.Contains(uri, "period=60") || !strings.HasPrefix(uri, "otpauth://totp/") {
+		t.Fatalf("默认绑定应是 SHA1、60 秒 otpauth: %s", uri)
+	}
+	if m["period"] != float64(60) {
+		t.Fatalf("绑定响应 period = %v，期望 60", m["period"])
 	}
 	snap, ok := users.snapshot("binder")
 	if !ok || !snap.MFATotpPending || snap.MFAEnabled || snap.MFASecretCipher == "" {

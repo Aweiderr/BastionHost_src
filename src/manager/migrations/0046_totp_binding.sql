@@ -13,7 +13,7 @@ ALTER TABLE sys_user ADD COLUMN IF NOT EXISTS mfa_totp_last_step BIGINT;
 COMMENT ON COLUMN sys_user.mfa_totp_pending IS
     'true 表示已生成 TOTP 种子但尚未用动态口令确认；此时登录不要求动态口令';
 COMMENT ON COLUMN sys_user.mfa_totp_last_step IS
-    '最近一次接受的 TOTP 时间片计数（Unix 秒 / 30）。小于或等于该值的时间片拒绝，保证同一时间片只用一次';
+    '最近一次接受的 TOTP 时间片计数（Unix 秒 / 60）。小于或等于该值的时间片拒绝，保证同一时间片只用一次';
 
 -- 升级前「开始绑定」只写入种子并把 mfa_enabled 留在 false。
 -- 这些行还没有确认，标成待确认，避免被当成已经绑定。

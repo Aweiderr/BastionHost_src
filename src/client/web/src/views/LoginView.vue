@@ -11,6 +11,7 @@ import { canAccessPath, firstAllowedPath } from '@/router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { CLIENT_PACKAGES, suggestClientPackageForNavigator } from '@/utils/clientDownload'
+import { TOTP_CLOCK_HINT, shouldShowTotp } from '@/utils/loginTotp'
 
 const route = useRoute()
 const router = useRouter()
@@ -218,8 +219,8 @@ async function submit(): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : '登录失败'
     errorText.value = message
-    // 后端提示缺少动态口令时自动展开输入框
-    if (message.includes('动态口令') || message.includes('TOTP') || message.includes('二次验证')) {
+    // 后端提示缺少动态口令时自动展开输入框。原文是「需要输入动态验证码」。
+    if (shouldShowTotp(message)) {
       showTotp.value = true
     }
     // 服务端要求图形验证码（或验证码输错）：显示并刷新一张
@@ -309,6 +310,7 @@ function onMfaCancel(): void {
             inputmode="numeric"
             placeholder="认证器中的 6 位数字"
           />
+          <span class="form-hint">{{ TOTP_CLOCK_HINT }}</span>
         </div>
 
         <!-- 图形验证码：仅在连续失败达到阈值后出现 -->

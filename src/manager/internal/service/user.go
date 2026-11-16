@@ -41,6 +41,28 @@ type CreateUserRequest struct {
 	MFAType string `json:"mfa_type"`
 }
 
+// applyMFASelection 按管理员指定的类型设置 mfa_type / mfa_enabled。
+//
+// 短信和 UKey 选中即启用。动态口令要等用户自己确认种子后才启用；
+// 只把类型写成 totp 不会让登录开始要验证码。
+func applyMFASelection(u *model.User, mfaType string) {
+	if u == nil {
+		return
+	}
+	mfaType = strings.TrimSpace(mfaType)
+	if mfaType == "" {
+		mfaType = "none"
+	}
+	confirmed := auth.TOTPBindView{
+		MFAType:    u.MFAType,
+		MFAEnabled: u.MFAEnabled,
+		HasSecret:  strings.TrimSpace(u.MFASecretCipher) != "",
+		Pending:    u.MFATotpPending,
+	}.ConfirmedSecret()
+	u.MFAType = mfaType
+	u.MFAEnabled = auth.MFAEnabledForAdminType(mfaType, confirmed)
+}
+
 // validateMFAType 校验 MFA 类型与手机号的组合是否可用。
 //
 // 这里**应用层先拦一道**，而不是等数据库的 ck_user_sms_needs_phone 约束报错：
@@ -160,10 +182,6 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 	if err := validateMFAType(req.MFAType, req.Phone); err != nil {
 		return nil, err
 	}
-	mfaType := strings.TrimSpace(req.MFAType)
-	if mfaType == "" {
-		mfaType = "none"
-	}
 	u := &model.User{
 		TenantID:           0,
 		OrgID:              req.OrgID,
@@ -178,11 +196,8 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 		Status:             "active",
 		UserType:           "local",
 		Remark:             req.Remark,
-		// MFAEnabled 由类型推导，两者保持一致：
-		// 分开维护容易出现"启用了但没类型"或"有类型却没启用"的矛盾状态
-		MFAType:    mfaType,
-		MFAEnabled: mfaType != "none",
 	}
+	applyMFASelection(u, req.MFAType)
 	if err := s.userRepo.Create(ctx, u); err != nil {
 		s.writeLog(ctx, op, "system", "create_user", "user", "", req.Username, "", "", err)
 		return nil, err
@@ -261,14 +276,13 @@ func (s *UserService) UpdateUser(ctx context.Context, userID int64, req UpdateUs
 	}
 	// MFA 类型：空串表示"本次不改"，避免局部更新把已有配置抹掉。
 	// 校验用最终生效的手机号（可能是本次传入的，也可能是库里已有）。
+	// 种子保留，便于从短信切回已确认的动态令牌时不必重新扫码。
+	// totp 在没有已确认种子时不打开 mfa_enabled，避免把还没绑定的用户锁在登录页外。
 	if strings.TrimSpace(req.MFAType) != "" {
 		if err := validateMFAType(req.MFAType, u.Phone); err != nil {
 			return nil, err
 		}
-		u.MFAType = strings.TrimSpace(req.MFAType)
-		u.MFAEnabled = u.MFAType != "none"
-		// 从短信切到其它方式时，解绑原有的 TOTP 种子没有意义；
-		// 反之亦然。这里只调整类型，种子保留，便于用户切回时无需重新绑定。
+		applyMFASelection(u, req.MFAType)
 	}
 	// 若本来是短信 MFA，本次把手机号清空了，则必须拦住：
 	// 否则用户下次登录会卡在弹窗上收不到验证码

@@ -20,10 +20,12 @@ import (
 const gatewayTestPassword = "Correct#1"
 
 type memAuthUsers struct {
-	mu      sync.Mutex
-	byName  map[string]*model.User
-	success []int64
-	fails   map[int64]int
+	mu           sync.Mutex
+	byName       map[string]*model.User
+	success      []int64
+	fails        map[int64]int
+	recovery     map[int64][]memRecoveryCode
+	nextRecovery int64
 }
 
 func (m *memAuthUsers) add(u *model.User) {

@@ -137,11 +137,20 @@ export interface CurrentUser {
   /** 口令已超过有效期。与 must_change_password 一样，改完之前不能进业务页 */
   password_expired?: boolean
   mfa_enabled?: boolean
+  /** 第二因子类型。totp 且尚未启用时，账户页仍应允许自助绑定 */
+  mfa_type?: 'none' | 'totp' | 'sms' | 'ukey' | ''
 }
 
 export interface TotpStartResult {
-  secret: string
-  otpauth_url: string
+  /** 账户页原先读取的字段 */
+  secret?: string
+  otpauth_url?: string
+  /** 后端绑定接口的字段 */
+  manual_secret?: string
+  otpauth_uri?: string
+  algorithm?: string
+  digits?: number
+  period?: number
 }
 
 export interface TotpConfirmResult {

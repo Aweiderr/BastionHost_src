@@ -4,8 +4,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/url"
@@ -84,15 +87,32 @@ func GenerateTOTP(secret []byte, t time.Time, algo string) string {
 // 返回命中的时间片偏移（0 表示当前片，-1 表示上一片，1 表示下一片）；
 // 未命中返回 false。
 func VerifyTOTP(secret []byte, code string, algo string) (bool, int) {
+	now := time.Now()
+	ok, step := MatchTOTP(secret, code, algo, now)
+	if !ok {
+		return false, 0
+	}
+	base := now.Unix() / int64(TOTPPeriod)
+	return true, int(step - base)
+}
+
+// MatchTOTP 校验验证码，并返回命中的时间片计数（Unix 秒 / 30）。
+//
+// 调用方应记下这个计数，同一计数只接受一次（SRS FR-01-02）。
+// 未命中时 ok 为 false，step 为 0。
+func MatchTOTP(secret []byte, code string, algo string, now time.Time) (bool, int64) {
 	code = strings.TrimSpace(code)
 	if len(code) != TOTPDigits {
 		return false, 0
 	}
-	now := time.Now()
+	base := now.Unix() / int64(TOTPPeriod)
 	for _, offset := range windowOffsets() {
-		t := now.Add(time.Duration(offset*TOTPPeriod) * time.Second)
-		if subtleCompare(GenerateTOTP(secret, t, algo), code) {
-			return true, offset
+		step := base + int64(offset)
+		if step < 0 {
+			continue
+		}
+		if subtleCompare(hotp(secret, uint64(step), algo), code) {
+			return true, step
 		}
 	}
 	return false, 0
@@ -107,8 +127,19 @@ func windowOffsets() []int {
 	return out
 }
 
-// hotp 实现 RFC 4226 的动态截断。
+// hotp 实现 RFC 4226 的动态截断，位数固定为 TOTPDigits。
+//
+// 默认算法是 SHA1，以便 Google / Microsoft Authenticator 能直接使用。
+// TOTPAlgoSM3 只在显式传入时走国密分支，绑定链路不会改用它。
 func hotp(secret []byte, counter uint64, algo string) string {
+	return hotpDigits(secret, counter, algo, TOTPDigits)
+}
+
+// hotpDigits 同 hotp，但允许指定位数。RFC 6238 附录 B 的向量是 8 位。
+func hotpDigits(secret []byte, counter uint64, algo string, digits int) string {
+	if digits <= 0 {
+		digits = TOTPDigits
+	}
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, counter)
 
@@ -129,10 +160,10 @@ func hotp(secret []byte, counter uint64, algo string) string {
 		uint32(mac[offset+3])
 
 	mod := uint32(1)
-	for i := 0; i < TOTPDigits; i++ {
+	for i := 0; i < digits; i++ {
 		mod *= 10
 	}
-	return fmt.Sprintf("%0*d", TOTPDigits, binaryCode%mod)
+	return fmt.Sprintf("%0*d", digits, binaryCode%mod)
 }
 
 // subtleCompare 常量时间比较字符串（长度相同）。
@@ -162,4 +193,38 @@ func GenerateRecoveryCodes(n int) ([]string, error) {
 		out = append(out, hexStr[:4]+"-"+hexStr[4:])
 	}
 	return out, nil
+}
+
+// NormalizeRecoveryCode 去掉空格与连字符并转成大写，便于比对。
+func NormalizeRecoveryCode(code string) string {
+	s := strings.ToUpper(strings.TrimSpace(code))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, " ", "")
+	return s
+}
+
+// HashRecoveryCode 计算恢复码的 SHA-256 十六进制摘要。
+//
+// 恢复码是 8 位十六进制（展示时 4-4 分组）。短于 8 位的输入（例如 6 位动态口令）
+// 不是恢复码，ok 为 false。摘要可落库，明文只在确认绑定时返回一次。
+func HashRecoveryCode(code string) (string, bool) {
+	norm := NormalizeRecoveryCode(code)
+	if len(norm) != 8 {
+		return "", false
+	}
+	for _, r := range norm {
+		if (r < '0' || r > '9') && (r < 'A' || r > 'F') {
+			return "", false
+		}
+	}
+	sum := sha256.Sum256([]byte(norm))
+	return hex.EncodeToString(sum[:]), true
+}
+
+// RecoveryHashEqual 常量时间比较两个恢复码摘要。
+func RecoveryHashEqual(a, b string) bool {
+	if len(a) != len(b) || a == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

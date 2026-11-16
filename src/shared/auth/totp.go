@@ -18,17 +18,20 @@ import (
 
 // TOTP 参数。
 //
-// 产品默认步长是 60 秒，并写入 otpauth 的 period，
-// 这样 Google / Microsoft Authenticator 与堡垒机按同一周期生成验证码。
-// RFC 6238 附录 B 的测试向量使用 30 秒，只在对照测试里显式传入。
+// 产品默认步长是 30 秒（RFC 6238 默认值），并写入 otpauth 的 period。
+// Android 上的 Google Authenticator 会忽略 period，始终按 30 秒生成口令；
+// Microsoft Authenticator 通常也只支持 30 秒。步长必须与它们一致，验证码才能对上。
+// RFC 6238 附录 B 的测试向量同样是 30 秒，但对照测试必须显式传入 TOTPRFC6238Period，
+// 不能改用 TOTPPeriod。
 const (
-	TOTPPeriod = 60 // 产品时间步长（秒）
+	TOTPPeriod = 30 // 产品时间步长（秒）
 	TOTPDigits = 6  // 验证码位数
 	// TOTPSecretSize 种子长度（字节）。20 字节 = 160 位，Base32 编码后 32 字符
 	TOTPSecretSize = 20
-	// TOTPWindow 容错窗口：验证当前时间片及其前后各 1 个（各 60 秒）
+	// TOTPWindow 容错窗口：验证当前时间片及其前后各 1 个（步长 30 秒，约 ±30 秒）
 	TOTPWindow = 1
-	// TOTPRFC6238Period 是 RFC 6238 附录 B 的步长，不是产品默认值。
+	// TOTPRFC6238Period 是 RFC 6238 附录 B 的步长。
+	// 当前数值与产品默认值相同，测试仍须显式使用本常量，不能改用 TOTPPeriod。
 	TOTPRFC6238Period = 30
 )
 
@@ -67,7 +70,7 @@ func DecodeBase32(s string) ([]byte, error) {
 //
 // 格式：
 //
-//	otpauth://totp/{issuer}:{account}?secret=...&issuer=...&algorithm=SHA1&digits=6&period=60
+//	otpauth://totp/{issuer}:{account}?secret=...&issuer=...&algorithm=SHA1&digits=6&period=30
 func BuildOtpauthURI(issuer, account string, secret []byte, algo string) string {
 	if algo == "" {
 		algo = TOTPAlgoSHA1
@@ -82,7 +85,7 @@ func BuildOtpauthURI(issuer, account string, secret []byte, algo string) string 
 	return "otpauth://totp/" + label + "?" + q.Encode()
 }
 
-// GenerateTOTP 按产品步长（60 秒）计算指定时刻的验证码。
+// GenerateTOTP 按产品步长（30 秒）计算指定时刻的验证码。
 func GenerateTOTP(secret []byte, t time.Time, algo string) string {
 	return generateTOTPAt(secret, t, algo, TOTPPeriod)
 }
@@ -115,7 +118,7 @@ func VerifyTOTP(secret []byte, code string, algo string) (bool, int) {
 	return true, int(step - base)
 }
 
-// MatchTOTP 按产品步长（60 秒）校验验证码，并返回命中的时间片计数（Unix 秒 / 60）。
+// MatchTOTP 按产品步长（30 秒）校验验证码，并返回命中的时间片计数（Unix 秒 / 30）。
 //
 // 容错是当前片及其前后各 1 片。调用方应记下这个计数，同一计数只接受一次。
 // 未命中时 ok 为 false，step 为 0。

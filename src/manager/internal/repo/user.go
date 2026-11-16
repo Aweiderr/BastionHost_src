@@ -32,7 +32,7 @@ func NewUserRepo(pool *pgxpool.Pool) *UserRepo { return &UserRepo{pool: pool} }
 const userColumns = `user_id, tenant_id, org_id, username, display_name,
 	COALESCE(email,''), COALESCE(phone,''), password_hash, password_salt, password_algo,
 	password_update_time, password_expire_days, must_change_password,
-	mfa_enabled, COALESCE(mfa_secret_cipher,''), mfa_type, status, user_type,
+	mfa_enabled, COALESCE(mfa_secret_cipher,''), mfa_type, mfa_totp_pending, mfa_totp_last_step, status, user_type,
 	fail_count, locked_until, last_login_time, COALESCE(last_login_ip,''),
 	COALESCE(remark,''), create_time, update_time`
 
@@ -41,7 +41,7 @@ func scanUser(row pgx.Row) (*model.User, error) {
 	err := row.Scan(&u.UserID, &u.TenantID, &u.OrgID, &u.Username, &u.DisplayName,
 		&u.Email, &u.Phone, &u.PasswordHash, &u.PasswordSalt, &u.PasswordAlgo,
 		&u.PasswordUpdateTime, &u.PasswordExpireDays, &u.MustChangePassword,
-		&u.MFAEnabled, &u.MFASecretCipher, &u.MFAType, &u.Status, &u.UserType,
+		&u.MFAEnabled, &u.MFASecretCipher, &u.MFAType, &u.MFATotpPending, &u.MFATotpLastStep, &u.Status, &u.UserType,
 		&u.FailCount, &u.LockedUntil, &u.LastLoginTime, &u.LastLoginIP,
 		&u.Remark, &u.CreateTime, &u.UpdateTime)
 	if errors.Is(err, pgx.ErrNoRows) {

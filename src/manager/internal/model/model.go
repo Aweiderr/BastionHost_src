@@ -44,6 +44,10 @@ type User struct {
 	// 与 MFAEnabled 的分工：Enabled 表示"要不要二次认证"，Type 表示"用哪一种"。
 	// 两者都保留，是因为历史数据可能存在 enabled=true 而类型未知的情况。
 	MFAType string `json:"mfa_type"`
+	// MFATotpPending 种子已生成但尚未用动态口令确认。为 true 时登录不要求 TOTP。
+	MFATotpPending bool `json:"-"`
+	// MFATotpLastStep 最近一次接受的 TOTP 时间片。小于或等于该值的验证码拒绝。
+	MFATotpLastStep *int64 `json:"-"`
 	Status             string     `json:"status"`
 	UserType           string     `json:"user_type"`
 	FailCount          int        `json:"-"`

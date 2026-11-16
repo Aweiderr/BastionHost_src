@@ -26,6 +26,11 @@ type authUserStore interface {
 	Lock(ctx context.Context, userID int64, until time.Time) error
 	UpdatePassword(ctx context.Context, userID int64, hash, salt string) error
 	SetMFA(ctx context.Context, userID int64, enabled bool, secretCipher string) error
+	SetTOTPPending(ctx context.Context, userID int64, secretCipher string) error
+	BindTOTP(ctx context.Context, userID int64, secretCipher string, step int64, recoveryHashes []string) error
+	ListUnusedRecovery(ctx context.Context, userID int64) ([]repo.TOTPRecoveryCode, error)
+	ClearTOTP(ctx context.Context, userID int64, recoveryID int64) error
+	AcceptTOTPStep(ctx context.Context, userID int64, step int64) (bool, error)
 }
 
 // authConfigStore 是认证流程读取的系统配置。*repo.ConfigRepo 直接满足。
@@ -431,6 +436,11 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 			entry.UserID, entry.TenantID = u2.UserID, u2.TenantID
 		}
 		entry.FailReason = err.Error()
+		// 缺验证码或验证码被拒绝，说明这次尝试确实走到了动态口令。
+		// 口令错误不能标成用过 MFA，否则审计会把没拦截的登录记成已经二次认证。
+		if errors.Is(err, ErrMFARequired) || errors.Is(err, ErrMFAInvalid) {
+			entry.MFAUsed = true
+		}
 		s.writeLoginLog(ctx, entry)
 		return nil, err
 	}
@@ -459,7 +469,9 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 	}
 
 	res, err := s.issueSessionTokens(ctx, u, req.ClientType, true)
-	entry.MFAUsed = u.MFAEnabled
+	// 只有动态口令真正参与校验时才记 MFA。mfa_enabled 单独为真（类型仍是 none、
+	// 或管理员只是预置了 totp）不算用过第二因子。
+	entry.MFAUsed = totpView(u).LoginRequiresTOTP()
 	if err != nil {
 		entry.Result, entry.FailReason = "fail", err.Error()
 	} else {
@@ -847,24 +859,35 @@ func (s *AuthService) verifyUserEntry(ctx context.Context, username, password, t
 		}
 	}
 
-	// 多因素校验：**只有 TOTP 类型在这一步完成**。
+	// 多因素校验：**只有已经确认的 TOTP 在这一步完成**。
 	//
 	// 短信与 UKey 属于"挑战式"第二因子：账密通过后由 Login 生成登录挑战，
 	// 再由弹窗（短信）或客户端硬件（UKey）完成校验。
-	// 因此这里必须按类型跳过，否则短信用户会被要求输入动态口令 ——
-	// 而他们的 MFASecretCipher 为空，表现为"解密失败"这种难以理解的报错。
-	// 网关入口已在上面把这两种类型拒绝掉，不会走到“跳过即成功”。
-	if u.MFAEnabled && (u.MFAType == "" || strings.EqualFold(u.MFAType, "totp")) {
-		if totpCode == "" {
+	// 管理员把类型预置成 totp、但用户还没确认种子时，也不在这里拦截，
+	// 否则账号没有验证码可用。
+	// 网关入口已在上面把短信 / UKey 拒绝掉，不会走到“跳过即成功”。
+	if totpView(u).LoginRequiresTOTP() {
+		if strings.TrimSpace(totpCode) == "" {
 			return nil, ErrMFARequired
 		}
 		secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
 		if err != nil {
 			return nil, err
 		}
-		ok, _ := auth.VerifyTOTP(secret, totpCode, auth.TOTPAlgoSHA1)
+		ok, step := auth.MatchTOTP(secret, totpCode, auth.TOTPAlgoSHA1, time.Now())
 		if !ok {
 			return nil, s.onLoginFail(ctx, u, maxFail, lockMinutes)
+		}
+		accepted, err := s.userRepo.AcceptTOTPStep(ctx, u.UserID, step)
+		if err != nil {
+			return nil, err
+		}
+		if !accepted {
+			// 同一时间片已经用过。口令本身是对的，不能记成口令错误。
+			if err := s.countLoginFail(ctx, u, maxFail, lockMinutes); err != nil {
+				return nil, err
+			}
+			return nil, ErrMFAInvalid
 		}
 	}
 
@@ -962,7 +985,7 @@ func (s *AuthService) issueSessionTokens(ctx context.Context, u *model.User, cli
 		UserID:    u.UserID, Username: u.Username, DisplayName: u.DisplayName,
 		Roles: roles, Permissions: perms,
 		MustChangePassword: u.MustChangePassword, PasswordExpired: u.PasswordExpired(),
-		MFAEnabled: u.MFAEnabled,
+		MFAEnabled: u.MFAEnabled, MFAType: u.MFAType,
 	}
 	if s.ukey != nil {
 		res.CertExpiryHint = s.ukey.CertExpiryHint(ctx, u.UserID, 30)
@@ -1072,8 +1095,9 @@ func (s *AuthService) Logout(ctx context.Context, jti string) error {
 	return nil
 }
 
-// onLoginFail 处理登录失败：计数并按阈值锁定。
-func (s *AuthService) onLoginFail(ctx context.Context, u *model.User, maxFail, lockMinutes int) error {
+// countLoginFail 递增失败次数，达到阈值时锁定并返回 ErrAccountLocked。
+// 未锁定时返回 nil，由调用方决定对外错误。
+func (s *AuthService) countLoginFail(ctx context.Context, u *model.User, maxFail, lockMinutes int) error {
 	n, err := s.userRepo.IncrFailCount(ctx, u.UserID)
 	if err != nil {
 		return err
@@ -1081,6 +1105,14 @@ func (s *AuthService) onLoginFail(ctx context.Context, u *model.User, maxFail, l
 	if maxFail > 0 && n >= maxFail {
 		_ = s.userRepo.Lock(ctx, u.UserID, time.Now().Add(time.Duration(lockMinutes)*time.Minute))
 		return ErrAccountLocked
+	}
+	return nil
+}
+
+// onLoginFail 处理登录失败：计数并按阈值锁定。
+func (s *AuthService) onLoginFail(ctx context.Context, u *model.User, maxFail, lockMinutes int) error {
+	if err := s.countLoginFail(ctx, u, maxFail, lockMinutes); err != nil {
+		return err
 	}
 	return ErrInvalidCredential
 }
@@ -1142,7 +1174,7 @@ func (s *AuthService) Me(ctx context.Context, userID int64) (*LoginResult, error
 		UserID: u.UserID, Username: u.Username, DisplayName: u.DisplayName,
 		Roles: roles, Permissions: perms,
 		MustChangePassword: u.MustChangePassword, PasswordExpired: u.PasswordExpired(),
-		MFAEnabled: u.MFAEnabled,
+		MFAEnabled: u.MFAEnabled, MFAType: u.MFAType,
 	}, nil
 }
 
@@ -1202,27 +1234,61 @@ type TOTPBinding struct {
 	OtpauthURI string `json:"otpauth_uri"`
 	// ManualSecret 是 Base32 手动录入密钥
 	ManualSecret string `json:"manual_secret"`
-	Algorithm    string `json:"algorithm"`
-	Digits       int    `json:"digits"`
-	Period       int    `json:"period"`
+	// Secret / OtpauthURL 与上面两个字段同值。
+	// 账户页早先按这两个名字读取，只返回新名字时密钥是 undefined，绑定无法完成。
+	Secret     string `json:"secret,omitempty"`
+	OtpauthURL string `json:"otpauth_url,omitempty"`
+	Algorithm  string `json:"algorithm"`
+	Digits     int    `json:"digits"`
+	Period     int    `json:"period"`
 	// RecoveryCodes 在确认绑定时返回（仅一次）
 	RecoveryCodes []string `json:"recovery_codes,omitempty"`
 }
 
+func totpView(u *model.User) auth.TOTPBindView {
+	if u == nil {
+		return auth.TOTPBindView{}
+	}
+	return auth.TOTPBindView{
+		MFAType:    u.MFAType,
+		MFAEnabled: u.MFAEnabled,
+		HasSecret:  strings.TrimSpace(u.MFASecretCipher) != "",
+		Pending:    u.MFATotpPending,
+	}
+}
+
+func newTOTPBinding(issuer, account string, secret []byte) *TOTPBinding {
+	uri := auth.BuildOtpauthURI(issuer, account, secret, auth.TOTPAlgoSHA1)
+	manual := auth.EncodeBase32(secret)
+	return &TOTPBinding{
+		OtpauthURI:   uri,
+		ManualSecret: manual,
+		Secret:       manual,
+		OtpauthURL:   uri,
+		Algorithm:    auth.TOTPAlgoSHA1,
+		Digits:       auth.TOTPDigits,
+		Period:       auth.TOTPPeriod,
+	}
+}
+
 // StartTOTPBinding 生成 TOTP 种子并返回绑定信息。
 //
-// 此时种子尚未生效（mfa_enabled 仍为 false），需调用 ConfirmTOTPBinding 完成绑定。
+// 此时种子尚未生效（mfa_enabled 仍为 false，mfa_totp_pending 为 true），
+// 需调用 ConfirmTOTPBinding 完成绑定。默认算法是 SHA1。
 func (s *AuthService) StartTOTPBinding(ctx context.Context, userID int64, issuer string) (*TOTPBinding, error) {
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventStart); err != nil {
+		return nil, err
+	}
 	if issuer == "" {
 		issuer = "Bastion"
 	}
-	// 复用已有未确认的种子，避免重复绑定产生多个种子
+	// 复用已有未确认的种子，避免重复点「开始绑定」产生多个种子。
 	var secret []byte
-	if u.MFASecretCipher != "" && !u.MFAEnabled {
+	if u.MFATotpPending && u.MFASecretCipher != "" && !u.MFAEnabled {
 		if b, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher); err == nil {
 			secret = b
 		}
@@ -1236,49 +1302,110 @@ func (s *AuthService) StartTOTPBinding(ctx context.Context, userID int64, issuer
 		if err != nil {
 			return nil, err
 		}
-		if err := s.userRepo.SetMFA(ctx, userID, false, cipher); err != nil {
+		if err := s.userRepo.SetTOTPPending(ctx, userID, cipher); err != nil {
 			return nil, err
 		}
 	}
-	return &TOTPBinding{
-		OtpauthURI:   auth.BuildOtpauthURI(issuer, u.Username, secret, auth.TOTPAlgoSHA1),
-		ManualSecret: auth.EncodeBase32(secret),
-		Algorithm:    auth.TOTPAlgoSHA1,
-		Digits:       auth.TOTPDigits,
-		Period:       auth.TOTPPeriod,
-	}, nil
+	return newTOTPBinding(issuer, u.Username, secret), nil
 }
 
 // ConfirmTOTPBinding 用一次验证码确认绑定，并返回一次性恢复码。
+//
+// 成功后 mfa_type=totp、mfa_enabled=true，恢复码以摘要落库，
+// 这次验证码占用的时间片不能再用于登录。
 func (s *AuthService) ConfirmTOTPBinding(ctx context.Context, userID int64, code string) (*TOTPBinding, error) {
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	if u.MFASecretCipher == "" {
-		return nil, fmt.Errorf("请先发起绑定以生成种子")
+	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventConfirm); err != nil {
+		return nil, err
 	}
 	secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
 	if err != nil {
 		return nil, err
 	}
-	ok, _ := auth.VerifyTOTP(secret, code, auth.TOTPAlgoSHA1)
+	ok, step := auth.MatchTOTP(secret, code, auth.TOTPAlgoSHA1, time.Now())
 	if !ok {
 		return nil, ErrMFAInvalid
 	}
-	if err := s.userRepo.SetMFA(ctx, userID, true, u.MFASecretCipher); err != nil {
-		return nil, err
+	if u.MFATotpLastStep != nil && step <= *u.MFATotpLastStep {
+		return nil, ErrMFAInvalid
 	}
 	codes, err := auth.GenerateRecoveryCodes(10)
 	if err != nil {
 		return nil, err
 	}
+	hashes := make([]string, 0, len(codes))
+	for _, c := range codes {
+		h, ok := auth.HashRecoveryCode(c)
+		if !ok {
+			return nil, fmt.Errorf("生成恢复码失败")
+		}
+		hashes = append(hashes, h)
+	}
+	if err := s.userRepo.BindTOTP(ctx, userID, u.MFASecretCipher, step, hashes); err != nil {
+		return nil, err
+	}
 	return &TOTPBinding{RecoveryCodes: codes}, nil
 }
 
-// UnbindTOTP 解绑动态令牌。
-func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64) error {
-	return s.userRepo.SetMFA(ctx, userID, false, "")
+// UnbindTOTP 解绑动态令牌。会话不够，必须提供当前动态口令或未使用的恢复码。
+func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return fmt.Errorf("解绑需要当前动态口令或未使用的恢复码")
+	}
+	u, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventUnbind); err != nil {
+		return err
+	}
+	if totpCodeLooksLikeDigits(code) {
+		secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
+		if err != nil {
+			return err
+		}
+		ok, step := auth.MatchTOTP(secret, code, auth.TOTPAlgoSHA1, time.Now())
+		if ok {
+			if u.MFATotpLastStep != nil && step <= *u.MFATotpLastStep {
+				return ErrMFAInvalid
+			}
+			return s.userRepo.ClearTOTP(ctx, userID, 0)
+		}
+	}
+	if hash, ok := auth.HashRecoveryCode(code); ok {
+		rows, err := s.userRepo.ListUnusedRecovery(ctx, userID)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if auth.RecoveryHashEqual(hash, row.CodeHash) {
+				if err := s.userRepo.ClearTOTP(ctx, userID, row.ID); err != nil {
+					if errors.Is(err, repo.ErrRecoveryCodeUsed) {
+						return ErrMFAInvalid
+					}
+					return err
+				}
+				return nil
+			}
+		}
+	}
+	return ErrMFAInvalid
+}
+
+func totpCodeLooksLikeDigits(code string) bool {
+	if len(code) != auth.TOTPDigits {
+		return false
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // CryptoHelper 暴露密码服务辅助层（供 API 层做自检等操作）。

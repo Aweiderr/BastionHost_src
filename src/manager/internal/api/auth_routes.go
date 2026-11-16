@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"bastion.local/manager/internal/service"
 	"bastion.local/shared/errcode"
@@ -257,14 +258,25 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]any{
 		"bound":          true,
 		"recovery_codes": res.RecoveryCodes,
-		"message":        "动态令牌绑定成功。恢复码仅显示一次，请离线妥善保存。",
+		"message":        "动态令牌绑定成功。恢复码仅显示一次，请离线妥善保存；认证器丢失时可用恢复码自助解绑。",
 	})
 }
 
-// handleTOTPUnbind 解绑动态令牌。
+// handleTOTPUnbind 解绑动态令牌。有效会话不够，请求体里必须带当前动态口令或恢复码。
 func (s *Server) handleTOTPUnbind(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
-	if err := s.auth.UnbindTOTP(r.Context(), claims.UserID); err != nil {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" {
+		httpx.Fail(w, errcode.New(errcode.ErrBadRequest, "解绑需要当前动态口令或未使用的恢复码"))
+		return
+	}
+	if err := s.auth.UnbindTOTP(r.Context(), claims.UserID, req.Code); err != nil {
 		writeServiceError(w, err)
 		return
 	}

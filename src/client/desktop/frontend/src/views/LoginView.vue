@@ -308,6 +308,7 @@ function copyDeviceId() {
       <label v-if="showTOTP" class="field">
         <span>动态令牌（6 位）</span>
         <input v-model="totp" maxlength="6" placeholder="例如 123456" @keyup.enter="submit" />
+        <p class="hint">动态口令每 60 秒更换一次。请确保本机与认证器的时间准确，时间不同步时验证会失败。</p>
       </label>
 
       <label v-if="captchaNeeded" class="field">

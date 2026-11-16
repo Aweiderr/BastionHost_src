@@ -9,17 +9,19 @@
     "build": "vue-tsc --noEmit && vite build",
     "build:only": "vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test src/api/http.passwordExpired.test.ts src/utils/clipboard.test.ts src/utils/clientDownload.test.ts src/utils/commandOrigin.test.ts src/utils/constants.session.test.ts src/utils/scheduleUrl.test.ts src/utils/oracleConnect.test.ts src/utils/oracleWorkbench.test.ts src/utils/desktopFrame.test.ts src/utils/desktopClipboard.test.ts src/utils/graphicalRecord.test.ts src/views/oracleAccountForm.test.ts src/views/auditSessionLink.test.ts src/router/appHref.test.ts"
+    "test": "node --experimental-strip-types --test src/api/http.passwordExpired.test.ts src/api/totpBind.test.ts src/utils/clipboard.test.ts src/utils/clientDownload.test.ts src/utils/commandOrigin.test.ts src/utils/constants.session.test.ts src/utils/loginTotp.test.ts src/utils/scheduleUrl.test.ts src/utils/oracleConnect.test.ts src/utils/oracleWorkbench.test.ts src/utils/desktopFrame.test.ts src/utils/desktopClipboard.test.ts src/utils/graphicalRecord.test.ts src/views/oracleAccountForm.test.ts src/views/auditSessionLink.test.ts src/router/appHref.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "pinia": "^2.3.0",
+    "qrcode": "^1.5.4",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "~5.6.3",
     "vite": "^5.4.11",

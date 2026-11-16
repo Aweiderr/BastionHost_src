@@ -136,6 +136,7 @@ export const useAuthStore = defineStore('auth', () => {
       must_change_password: result.must_change_password,
       password_expired: Boolean(result.password_expired),
       mfa_enabled: result.mfa_enabled,
+      mfa_type: result.mfa_type,
     }
     persist()
   }

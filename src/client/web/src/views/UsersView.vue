@@ -181,7 +181,7 @@ const form = reactive({
 /** MFA 选项：文案要说清这是**第二因子**，而不是"选择登录方式" */
 const MFA_OPTIONS = [
   { value: 'none', label: '不启用', hint: '仅账号 + 口令' },
-  { value: 'totp', label: '动态口令（TOTP）', hint: '认证器 App；强因子，推荐管理员使用' },
+  { value: 'totp', label: '动态口令（TOTP）', hint: '认证器 App。完成绑定前登录不要求动态口令，用户可在账户页自行绑定' },
   { value: 'sms', label: '短信验证码', hint: '需先填写手机号；弱因子，建议用于运维人员' },
   { value: 'ukey', label: 'UKey 证书', hint: '需配套客户端与硬件，建议用于管理员' },
 ]

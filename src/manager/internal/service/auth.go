@@ -277,8 +277,12 @@ var (
 	ErrAccountDisabled = errors.New("账号已停用")
 	// ErrMFARequired 需要多因素认证
 	ErrMFARequired = errors.New("需要输入动态验证码")
-	// ErrMFAInvalid 验证码不正确
-	ErrMFAInvalid = errors.New("验证码不正确")
+	// ErrMFAInvalid 动态口令不正确。
+	//
+	// 只用于已确认的动态令牌（登录重放、绑定确认、解绑）。
+	// 短信仍说「验证码不正确」，图形验证码仍说「图形验证码不正确」，
+	// 避免登录页把动态口令失败和图形验证码失败看成同一句。
+	ErrMFAInvalid = errors.New("动态口令不正确")
 	// ErrPasswordExpired 口令已过期
 	ErrPasswordExpired = errors.New("口令已过期，请先修改口令")
 	// ErrGatewayMFAUnsupported 表示 SSH / SFTP / Oracle 完成不了该账号的第二因子。

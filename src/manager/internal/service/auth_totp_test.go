@@ -163,6 +163,8 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		Username: "totp-bind", Password: gatewayTestPassword, TOTPCode: nowCode,
 	}); !errors.Is(err, ErrMFAInvalid) {
 		t.Fatalf("确认绑定用过的验证码不能再登录，得到 %v", err)
+	} else if err.Error() != "动态口令不正确" {
+		t.Fatalf("重放动态口令应对用户说动态口令不正确，得到 %q", err.Error())
 	}
 	res, err := svc.Login(ctx, LoginRequest{
 		Username: "totp-bind", Password: gatewayTestPassword, TOTPCode: nextCode, ClientIP: "10.1.0.2",

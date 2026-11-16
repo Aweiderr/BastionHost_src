@@ -7,7 +7,7 @@ import (
 )
 
 // RFC 6238 附录 B 的 SHA1 向量按 30 秒步长、8 位定义。
-// 产品默认步长是 60 秒，这里必须显式使用 30 秒，不能改用 TOTPPeriod。
+// 产品默认步长现在也是 30 秒，这里仍必须显式使用 TOTPRFC6238Period，不能改用 TOTPPeriod。
 // 6 位值是同一动态截断对 10^6 取模的结果。
 func TestTOTPRFC6238SHA1Vectors(t *testing.T) {
 	if TOTPRFC6238Period != 30 {
@@ -44,21 +44,21 @@ func TestTOTPRFC6238SHA1Vectors(t *testing.T) {
 	}
 }
 
-func TestProductTOTPPeriodIs60Seconds(t *testing.T) {
-	if TOTPPeriod != 60 {
-		t.Fatalf("产品步长 = %d，期望 60", TOTPPeriod)
+func TestProductTOTPPeriodIs30Seconds(t *testing.T) {
+	if TOTPPeriod != 30 {
+		t.Fatalf("产品步长 = %d，期望 30", TOTPPeriod)
 	}
 	secret := []byte("12345678901234567890")
 	uri := BuildOtpauthURI("Bastion", "zhangsan", secret, TOTPAlgoSHA1)
-	if !strings.Contains(uri, "period=60") {
-		t.Fatalf("otpauth 应声明 period=60，得到 %s", uri)
+	if !strings.Contains(uri, "period=30") {
+		t.Fatalf("otpauth 应声明 period=30，得到 %s", uri)
 	}
 	now := time.Unix(1_111_111_111, 0).UTC()
-	if GenerateTOTP(secret, now, TOTPAlgoSHA1) != generateTOTPAt(secret, now, TOTPAlgoSHA1, 60) {
-		t.Fatal("默认 GenerateTOTP 应等于 60 秒步长")
+	if GenerateTOTP(secret, now, TOTPAlgoSHA1) != generateTOTPAt(secret, now, TOTPAlgoSHA1, 30) {
+		t.Fatal("默认 GenerateTOTP 应等于 30 秒步长")
 	}
 	ok, step := MatchTOTP(secret, GenerateTOTP(secret, now, TOTPAlgoSHA1), TOTPAlgoSHA1, now)
-	wantStep := now.Unix() / 60
+	wantStep := now.Unix() / 30
 	if !ok || step != wantStep {
 		t.Fatalf("默认校验步长 ok=%v step=%d，期望 %d", ok, step, wantStep)
 	}
@@ -97,8 +97,8 @@ func TestTOTPWindowSkew(t *testing.T) {
 func TestTOTPDefaultAlgorithmIsSHA1(t *testing.T) {
 	secret := []byte("12345678901234567890")
 	uri := BuildOtpauthURI("Bastion", "zhangsan", secret, "")
-	if !strings.Contains(uri, "algorithm=SHA1") || !strings.Contains(uri, "period=60") {
-		t.Fatalf("默认 otpauth 应声明 SHA1 与 60 秒，得到 %s", uri)
+	if !strings.Contains(uri, "algorithm=SHA1") || !strings.Contains(uri, "period=30") {
+		t.Fatalf("默认 otpauth 应声明 SHA1 与 30 秒，得到 %s", uri)
 	}
 	now := time.Unix(59, 0).UTC()
 	if GenerateTOTP(secret, now, "") != GenerateTOTP(secret, now, TOTPAlgoSHA1) {

@@ -244,7 +244,7 @@ function close(): void {
               height="180"
               style="display: block; background: #fff; padding: 8px; border-radius: 4px"
             />
-            <span class="form-hint">请扫描二维码或导入下方 otpauth 地址，认证器会按 60 秒周期生成口令。只手抄密钥时，请把认证器的更新周期也设为 60 秒。</span>
+            <span class="form-hint">请扫描二维码或导入下方 otpauth 地址，认证器会按 30 秒周期生成口令。手抄密钥时使用认证器默认的 30 秒更新周期即可。</span>
           </div>
           <div class="form-item">
             <label class="form-label">密钥（手动录入认证器）</label>

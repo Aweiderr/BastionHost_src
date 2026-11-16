@@ -14,7 +14,7 @@ test('graphic captcha errors are not treated as TOTP', () => {
 })
 
 test('dynamic token errors still reveal the TOTP field', () => {
-  for (const message of ['需要输入动态验证码', '验证码不正确', '需要多因素认证']) {
+  for (const message of ['需要输入动态验证码', '动态口令不正确', '需要多因素认证']) {
     assert.equal(isGraphicCaptchaMessage(message), false, message)
     assert.equal(shouldShowTotp(message), true, message)
   }

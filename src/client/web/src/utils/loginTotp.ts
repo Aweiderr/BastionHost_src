@@ -7,6 +7,7 @@ export const TOTP_CLOCK_HINT =
  *
  * 图形验证码的错误也含「验证码」，不能据此把动态口令输入框打开。
  * 服务端要求动态口令时的原文是「需要输入动态验证码」。
+ * 校验失败时的原文是「动态口令不正确」，与图形验证码、短信验证码分开。
  */
 export function shouldShowTotp(message: string): boolean {
   if (message.includes('图形验证码')) return false

@@ -50,7 +50,7 @@ var defaultMessages = map[Code]string{
 	ErrInvalidCredential:     "用户名或口令不正确",
 	ErrAccountLocked:         "账号已被锁定",
 	ErrMFARequired:           "需要完成多因素认证",
-	ErrMFAInvalid:            "验证码不正确",
+	ErrMFAInvalid:            "动态口令不正确",
 	ErrTokenExpired:          "登录已过期，请重新登录",
 	ErrTokenInvalid:          "令牌无效",
 	ErrNoGrant:               "未获得该资产或账号的授权",

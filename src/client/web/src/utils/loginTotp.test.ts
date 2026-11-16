@@ -4,7 +4,7 @@ import { TOTP_CLOCK_HINT, shouldShowTotp } from './loginTotp.ts'
 
 test('缺少动态口令时展开输入框，图形验证码不展开', () => {
   assert.equal(shouldShowTotp('需要输入动态验证码'), true)
-  assert.equal(shouldShowTotp('验证码不正确'), true)
+  assert.equal(shouldShowTotp('动态口令不正确'), true)
   assert.equal(shouldShowTotp('请输入图形验证码'), false)
   assert.equal(shouldShowTotp('图形验证码不正确'), false)
   assert.equal(shouldShowTotp('用户名或口令不正确'), false)

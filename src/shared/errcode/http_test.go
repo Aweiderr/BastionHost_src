@@ -22,6 +22,11 @@ func TestErrToStatusPasswordExpiredIsForbidden(t *testing.T) {
 	if got := MessageOf(ErrGatewayMFAUnsupported); !strings.Contains(got, "Web 控制台") {
 		t.Fatalf("ErrGatewayMFAUnsupported 文案 = %q", got)
 	}
+	// 登录页把这段原文原样展示。必须和图形验证码「图形验证码不正确」、
+	// 短信「验证码不正确」区分开，只改动态口令失败这一句。
+	if got := MessageOf(ErrMFAInvalid); got != "动态口令不正确" {
+		t.Fatalf("ErrMFAInvalid 文案 = %q", got)
+	}
 	if ErrGatewayMFAUnsupported == ErrInvalidCredential {
 		t.Fatal("网关二次认证拒绝不能与口令错误共用错误码")
 	}

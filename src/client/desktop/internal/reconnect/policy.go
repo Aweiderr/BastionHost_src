@@ -2,12 +2,24 @@
 //
 // 意外断开最多自动再试一次。手动重连每次点击只拨一次，进行中的拨号
 // 不会再排下一次，因此失败不会变成循环。登录失效不按“会话还在”处理。
+// 管理员强制中断不是意外断开：不能自动重连，也不能用手动重连把这次掐断找回来。
 package reconnect
 
 import (
 	"strings"
 	"sync"
 )
+
+// AdminKillCode 是网关用来区分管理员强制中断和网络断开的编码。
+const AdminKillCode = "admin_kill"
+
+// AdminKillText 是界面和手动重连被拒绝时使用的说明。
+const AdminKillText = "会话已被管理员强制中断，不能重连"
+
+// IsAdminKill 判断这次结束是不是管理员强制中断。
+func IsAdminKill(reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(reason), AdminKillCode)
+}
 
 // Outcome 是一次“要不要现在拨号”的决定。
 type Outcome struct {
@@ -21,6 +33,9 @@ type Attempt struct {
 	mu       sync.Mutex
 	autoUsed bool
 	inflight bool
+	// blocked 表示这条会话已被管理员强制中断。
+	// 自动重连和手动重连都不再拨号。
+	blocked bool
 }
 
 // UnexpectedClose 在会话不是用户主动关掉时调用。
@@ -31,6 +46,9 @@ func (a *Attempt) UnexpectedClose() Outcome {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.blocked {
+		return Outcome{Reason: AdminKillText}
+	}
 	if a.inflight {
 		return Outcome{Busy: true, Reason: "正在重连"}
 	}
@@ -49,11 +67,37 @@ func (a *Attempt) Manual() Outcome {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.blocked {
+		return Outcome{Reason: AdminKillText}
+	}
 	if a.inflight {
 		return Outcome{Busy: true, Reason: "正在重连，请稍候"}
 	}
 	a.inflight = true
 	return Outcome{Start: true}
+}
+
+// ForcedInterrupt 记下管理员强制中断。
+// 这一条会话之后不能自动重连，也不能手动重连。
+func (a *Attempt) ForcedInterrupt() Outcome {
+	if a == nil {
+		return Outcome{Reason: AdminKillText}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.blocked = true
+	a.autoUsed = true
+	return Outcome{Reason: AdminKillText}
+}
+
+// Blocked 表示这条会话已经被管理员强制中断。
+func (a *Attempt) Blocked() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.blocked
 }
 
 // Finish 结束这一次拨号。成功或失败都要调用，否则下一次点击会被挡住。

@@ -23,6 +23,46 @@ func TestUnexpectedCloseAutosOnce(t *testing.T) {
 	}
 }
 
+func TestAdminKillBlocksAutoAndManual(t *testing.T) {
+	var a Attempt
+	got := a.ForcedInterrupt()
+	if got.Start || got.Reason == "" {
+		t.Fatalf("forced = %+v", got)
+	}
+	auto := a.UnexpectedClose()
+	if auto.Start || auto.Busy {
+		t.Fatalf("auto after admin kill = %+v", auto)
+	}
+	manual := a.Manual()
+	if manual.Start || manual.Reason == "" {
+		t.Fatalf("manual after admin kill = %+v", manual)
+	}
+	if !IsAdminKill("admin_kill") || !IsAdminKill(" ADMIN_KILL ") {
+		t.Fatal("admin kill code was not recognized")
+	}
+	if IsAdminKill("remote_closed") || IsAdminKill("killed") || IsAdminKill("gateway_shutdown") || IsAdminKill("timeout") {
+		t.Fatal("network drop or gateway restart must stay reconnectable")
+	}
+}
+
+func TestManualStillWorksAfterUnexpectedClose(t *testing.T) {
+	var a Attempt
+	first := a.UnexpectedClose()
+	if !first.Start {
+		t.Fatal(first)
+	}
+	a.Finish()
+	again := a.UnexpectedClose()
+	if again.Start {
+		t.Fatal("second unexpected close must not auto")
+	}
+	manual := a.Manual()
+	if !manual.Start {
+		t.Fatalf("manual after a drop = %+v", manual)
+	}
+	a.Finish()
+}
+
 func TestManualDoesNotLoop(t *testing.T) {
 	var a Attempt
 	got := a.Manual()

@@ -18,3 +18,11 @@ test('只有已经结束的终端或图形会话才出现手动重连', () => {
   assert.equal(offerManualReconnect('oracle', 'closed'), false)
   assert.equal(offerManualReconnect('unsupported', 'closed'), false)
 })
+
+test('管理员强制中断后不提供手动重连', () => {
+  assert.equal(offerManualReconnect('ssh', 'closed', true), false)
+  assert.equal(offerManualReconnect('desktop', 'closed', true), false)
+  assert.equal(offerManualReconnect('vnc', 'closed', true), false)
+  assert.equal(offerManualReconnect('ssh', 'closed', false), true)
+  assert.equal(offerManualReconnect('desktop', 'closed', false), true)
+})

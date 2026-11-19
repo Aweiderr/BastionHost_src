@@ -207,7 +207,8 @@ func (a *App) Login(username, password, totp, captchaID, captchaCode string) (*c
 		a.discardLogin()
 		return nil, err
 	}
-	// 口令只在允许继续时记下：MFA 通过后建会话仍需用它连 SSH 网关
+	// 口令只留在本次登录内存里。连 SSH 网关用的是下面签发的访问令牌，
+	// 不再把口令或已经用过的动态令牌送到 :2222。
 	a.mu.Lock()
 	a.password = password
 	if res != nil && !res.MFARequired {

@@ -14,7 +14,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// sshSlot 记下一条终端还能不能原样重连。口令仍只放在 App.password 里。
+// sshSlot 记下一条终端还能不能原样重连。
+// 重连使用 API 客户端上仍有效的访问令牌，不重新输入动态令牌。
 type sshSlot struct {
 	assetName   string
 	accountName string
@@ -116,12 +117,19 @@ func (a *App) ReconnectSession(key string) error {
 
 func (a *App) dialSSH(key string, slot sshSlot) (*SessionBrief, error) {
 	a.mu.Lock()
-	user, password := a.user, a.password
+	user := a.user
+	api := a.api
 	a.mu.Unlock()
 	if user == nil {
 		return nil, fmt.Errorf("尚未登录")
 	}
-	if password == "" {
+	// 登录（含 TOTP）已经签发访问令牌。网关用这枚令牌换身份，
+	// 与 WebSSH 相同，不再把登录口令或已消费的动态令牌送去 :2222。
+	token := ""
+	if api != nil {
+		token = api.Token()
+	}
+	if token == "" {
 		return nil, fmt.Errorf("登录凭据已失效，请重新登录")
 	}
 	if strings.TrimSpace(slot.assetName) == "" {
@@ -160,7 +168,7 @@ func (a *App) dialSSH(key string, slot sshSlot) (*SessionBrief, error) {
 		a.onSSHClosed(key, epoch, gen, sess, reason)
 	}
 	sess, err = term.Dial(a.ctx, term.Options{
-		Gateway: gateway, Login: login, Password: password,
+		Gateway: gateway, Login: login, Password: token,
 		Cols: slot.cols, Rows: slot.rows, OnData: onData, OnClose: onClose,
 	})
 	if err != nil {
@@ -170,7 +178,7 @@ func (a *App) dialSSH(key string, slot sshSlot) (*SessionBrief, error) {
 		}
 		if alt != "" && alt != gateway {
 			sess, err = term.Dial(a.ctx, term.Options{
-				Gateway: alt, Login: login, Password: password,
+				Gateway: alt, Login: login, Password: token,
 				Cols: slot.cols, Rows: slot.rows, OnData: onData, OnClose: onClose,
 			})
 			gateway = alt

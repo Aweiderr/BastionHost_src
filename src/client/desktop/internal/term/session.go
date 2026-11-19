@@ -28,7 +28,9 @@ type Options struct {
 	Gateway string
 	// Login 是登录名，支持 `用户名@资产标识`；资产标识可用资产名、ID 或主机地址
 	Login string
-	// Password 是堡垒机账号口令（可含动态令牌，形如 `口令:123456`）
+	// Password 是交给 SSH 网关的认证材料，放在 SSH 口令字段里。
+	// 已登录的桌面客户端传仍有效的访问令牌，不再附带动态令牌。
+	// 外部客户端仍传登录口令，或「口令:验证码」。
 	Password string
 	Cols     int
 	Rows     int

@@ -5,7 +5,8 @@
 //
 //	provider = mock    → 不真正下发，验证码写入日志（测试环境，零成本、零审批）
 //	provider = gateway → 通用 HTTP 网关（企业统一消息平台 / 云服务商代理）
-//	provider = aliyun / tencent / smpp → 预留，按需接入
+//	provider = tencent → 腾讯云短信 SendSms（2021-01-11，TC3-HMAC-SHA256）
+//	provider = aliyun / smpp → 预留，按需接入
 //
 // 关于定位的说明：短信是**弱认证因子**（SIM 交换、短信嗅探、伪基站均可突破），
 // 因此本包服务于"运维人员的便捷 MFA"这一场景；管理员应保留 UKey / TOTP 等强因子。
@@ -85,6 +86,40 @@ type Config struct {
 	GatewayToken string
 	// GatewayTemplate 默认模板标识
 	GatewayTemplate string
+
+	// ---- tencent 后端（腾讯云短信 SendSms 2021-01-11）----
+	//
+	// 凭证和发送参数只从环境变量进入，由管理服务入口装配到这里。
+	// sys_config 的 sms.provider 不参与选择后端。
+	//
+	// 旧版短信 SDK 的 App Key（BASTION_SMS_TENCENT_APP_KEY）不在此列：
+	// SendSms 用 SecretId/SecretKey 做 TC3 签名，发送不需要 App Key。
+	// 不把用不到的密钥读进进程；若将来要做状态回调验签，再单独接入。
+
+	// TencentSecretID 云 API 密钥 SecretId（BASTION_SMS_TENCENT_SECRET_ID）
+	TencentSecretID string
+	// TencentSecretKey 云 API 密钥 SecretKey（BASTION_SMS_TENCENT_SECRET_KEY）
+	TencentSecretKey string
+	// TencentSDKAppID 短信应用 SdkAppId（BASTION_SMS_TENCENT_SDK_APP_ID）。
+	// 这是控制台里的应用 ID，不是签名 ID。
+	TencentSDKAppID string
+	// TencentSignName 短信签名内容，即已审核通过的签名文本
+	// （BASTION_SMS_TENCENT_SIGN_NAME），不是数字 SignId。
+	TencentSignName string
+	// TencentTemplateID 已审核通过的正文模板 ID（BASTION_SMS_TENCENT_TEMPLATE_ID）
+	TencentTemplateID string
+	// TencentRegion 地域，空则 ap-guangzhou（BASTION_SMS_TENCENT_REGION）
+	TencentRegion string
+	// TencentTemplateParams 模板变量布局（BASTION_SMS_TENCENT_TEMPLATE_PARAMS）。
+	//
+	// 客户模板正文不在本仓库，不能写成某一家的固定文案。
+	// 腾讯云 TemplateParamSet 按模板占位符的顺序传值：
+	//   - 空或 code（默认）：只传验证码。多数验证码模板只有一个占位符。
+	//   - code,minutes：再传有效期分钟数。接口文档的双变量示例就是
+	//     「验证码 + 一个数字」，常见模板里第二个占位符是分钟。
+	//     分钟数来自本次 SendRequest.TTL（管理端填的是 sms.code.ttl_seconds，
+	//     默认 300 秒即 5 分钟），不是写死的客户模板。
+	TencentTemplateParams string
 }
 
 // IsProd 判断是否为生产环境。
@@ -125,7 +160,9 @@ func New(cfg Config) (Provider, error) {
 			template: cfg.GatewayTemplate,
 			client:   &http.Client{Timeout: 10 * time.Second},
 		}, nil
-	case "aliyun", "tencent", "smpp":
+	case "tencent":
+		return newTencentProvider(cfg)
+	case "aliyun", "smpp":
 		// 预留：接入时在此实现，业务代码无需改动
 		return nil, fmt.Errorf("短信后端 %q 尚未实现，请先使用 mock 或 gateway", cfg.Provider)
 	default:

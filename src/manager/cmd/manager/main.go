@@ -263,16 +263,37 @@ func main() {
 		//                      / gateway / aliyun / tencent
 		// BASTION_ENV          = dev / test / prod
 		//
+		// 腾讯云（provider=tencent）另需这些环境变量，缺任一必填项则拒绝启动：
+		//   BASTION_SMS_TENCENT_SECRET_ID / SECRET_KEY / SDK_APP_ID
+		//   BASTION_SMS_TENCENT_SIGN_NAME（签名正文，不是数字 SignId）
+		//   BASTION_SMS_TENCENT_TEMPLATE_ID
+		// 可选：
+		//   BASTION_SMS_TENCENT_REGION（默认 ap-guangzhou）
+		//   BASTION_SMS_TENCENT_TEMPLATE_PARAMS（默认 code，只传验证码；
+		//     code,minutes 时第二个模板参数是本次验证码有效期的分钟数）
+		// BASTION_SMS_TENCENT_APP_KEY 故意不读：SendSms（2021-01-11）用
+		// SecretKey 做 TC3 签名，发送用不到旧版 App Key。
+		//
+		// sys_config 的 sms.provider 只是配置表里的说明项，代码不读取它来选后端。
+		// 唯一的选择入口是 BASTION_SMS_PROVIDER。
+		//
 		// 注意：provider=bypass 且 BASTION_ENV=prod 时 sms.New 会返回错误，
 		// 管理服务将**拒绝启动** —— 宁可起不来，也不能对外提供可绕过的认证。
 		smsProvider, smsErr := sms.New(sms.Config{
-			Provider:        os.Getenv("BASTION_SMS_PROVIDER"),
-			Env:             os.Getenv("BASTION_ENV"),
-			Debug:           cfg.Debug,
-			FixedCode:       os.Getenv("BASTION_SMS_FIXED_CODE"),
-			GatewayURL:      os.Getenv("BASTION_SMS_GATEWAY_URL"),
-			GatewayToken:    os.Getenv("BASTION_SMS_GATEWAY_TOKEN"),
-			GatewayTemplate: os.Getenv("BASTION_SMS_TEMPLATE"),
+			Provider:              os.Getenv("BASTION_SMS_PROVIDER"),
+			Env:                   os.Getenv("BASTION_ENV"),
+			Debug:                 cfg.Debug,
+			FixedCode:             os.Getenv("BASTION_SMS_FIXED_CODE"),
+			GatewayURL:            os.Getenv("BASTION_SMS_GATEWAY_URL"),
+			GatewayToken:          os.Getenv("BASTION_SMS_GATEWAY_TOKEN"),
+			GatewayTemplate:       os.Getenv("BASTION_SMS_TEMPLATE"),
+			TencentSecretID:       os.Getenv("BASTION_SMS_TENCENT_SECRET_ID"),
+			TencentSecretKey:      os.Getenv("BASTION_SMS_TENCENT_SECRET_KEY"),
+			TencentSDKAppID:       os.Getenv("BASTION_SMS_TENCENT_SDK_APP_ID"),
+			TencentSignName:       os.Getenv("BASTION_SMS_TENCENT_SIGN_NAME"),
+			TencentTemplateID:     os.Getenv("BASTION_SMS_TENCENT_TEMPLATE_ID"),
+			TencentRegion:         os.Getenv("BASTION_SMS_TENCENT_REGION"),
+			TencentTemplateParams: os.Getenv("BASTION_SMS_TENCENT_TEMPLATE_PARAMS"),
 		})
 		if smsErr != nil {
 			slog.Error("短信服务装配失败", "err", smsErr)

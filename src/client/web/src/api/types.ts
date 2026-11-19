@@ -104,6 +104,10 @@ export interface LoginResult {
   // 校验通过后调用 /auth/mfa/verify 才能拿到令牌。
   mfa_required?: boolean
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey'
+  /** 指定了动态令牌但尚未绑定。没有 access_token，step_up_proof 只能用于绑定。 */
+  enrollment_required?: boolean
+  step_up_proof?: string
+  step_up_expires?: string
   /** 登录挑战标识，索取验证码与提交校验都要带上 */
   challenge_id?: string
   /**
@@ -137,7 +141,7 @@ export interface CurrentUser {
   /** 口令已超过有效期。与 must_change_password 一样，改完之前不能进业务页 */
   password_expired?: boolean
   mfa_enabled?: boolean
-  /** 第二因子类型。totp 且尚未启用时，账户页仍应允许自助绑定 */
+  /** 第二因子类型。totp 尚未确认时登录不签发令牌，需用 step_up_proof 完成绑定 */
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey' | ''
 }
 

@@ -28,6 +28,7 @@ import (
 
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
+	"bastion.local/shared/auth"
 	bastioncrypto "bastion.local/shared/crypto"
 	"bastion.local/shared/crypto/cert"
 )
@@ -72,6 +73,8 @@ const (
 const (
 	// ukeyMFAType 是 sys_user.mfa_type / sys_login_challenge.mfa_type 的取值
 	ukeyMFAType = "ukey"
+	// ukeyStepUpChallenge 只用于管理员核验自己的 UKey，不能拿去换登录令牌。
+	ukeyStepUpChallenge = "ukey_stepup"
 	// ukeySignDataPrefix 是签名原文的用途前缀。
 	//
 	// 必须有前缀：客户端签名的那串字节一旦被复用到别处（例如某个"签名即登录"的
@@ -649,6 +652,29 @@ type UKeyService struct {
 	loginLog   *repo.LoginLogRepo
 	// revocation 进程内 CRL/OCSP 缓存。只服务外部 CA 证书。
 	revocation *revocationChecker
+	// factorGuard 核验证书绑定/吊销。未设置时这些写操作拒绝，避免绕过身份核验。
+	factorGuard factorGuard
+}
+
+// factorGuard 由认证服务实现。证书写操作必须先消费一次性证明。
+type factorGuard interface {
+	AuthorizeFactorChange(ctx context.Context, actor, target int64, action, proof string) error
+	PrivilegedCertRevokeBlocked(ctx context.Context, userID int64) (bool, error)
+}
+
+// SetFactorGuard 注入因子变更核验。生产环境必须调用。
+func (s *UKeyService) SetFactorGuard(g factorGuard) {
+	if s == nil {
+		return
+	}
+	s.factorGuard = g
+}
+
+func (s *UKeyService) authorizeCertChange(ctx context.Context, actor, target int64, action, proof string) error {
+	if s == nil || s.factorGuard == nil {
+		return fmt.Errorf("证书变更缺少身份核验，已拒绝")
+	}
+	return s.factorGuard.AuthorizeFactorChange(ctx, actor, target, action, proof)
 }
 
 // NewUKeyService 创建 UKey 服务。
@@ -695,7 +721,7 @@ type UKeyChallenge struct {
 // 入口凭据，若只凭用户名就能领取，接口本身就成了账号探测与签名服务。
 // 未标明客户端时按 web 记录。登录主路径应使用 IssueLoginChallenge。
 func (s *UKeyService) IssueChallenge(ctx context.Context, u *model.User, clientIP, userAgent string) (*UKeyChallenge, error) {
-	return s.issueChallenge(ctx, u, clientIP, userAgent, "", true)
+	return s.issueChallenge(ctx, u, clientIP, userAgent, "", true, ukeyMFAType)
 }
 
 // IssueLoginChallenge 与 IssueChallenge 相同，但记下发起登录的客户端。
@@ -703,7 +729,14 @@ func (s *UKeyService) IssueChallenge(ctx context.Context, u *model.User, clientI
 // 第二因子通过后要按这个类型签发令牌：桌面登录不能在验签时被改记成 web，
 // 否则互斥会踢错一端。
 func (s *UKeyService) IssueLoginChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string) (*UKeyChallenge, error) {
-	return s.issueChallenge(ctx, u, clientIP, userAgent, clientType, true)
+	return s.issueChallenge(ctx, u, clientIP, userAgent, clientType, true, ukeyMFAType)
+}
+
+// IssueStepUpChallenge 为“核验操作者本人的 UKey”下发挑战。
+//
+// 挑战类型不是 ukey，登录接口不会把它当成第二因子。
+func (s *UKeyService) IssueStepUpChallenge(ctx context.Context, u *model.User, clientIP, userAgent string) (*UKeyChallenge, error) {
+	return s.issueChallenge(ctx, u, clientIP, userAgent, "web", true, ukeyStepUpChallenge)
 }
 
 // IssueCertIssueChallenge 为"提交公钥签发证书"下发持有证明挑战。
@@ -721,11 +754,11 @@ func (s *UKeyService) IssueCertIssueChallenge(ctx context.Context, userID int64,
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法为其签发证书", u.Username)
 	}
-	return s.issueChallenge(ctx, u, clientIP, userAgent, "", false)
+	return s.issueChallenge(ctx, u, clientIP, userAgent, "", false, ukeyMFAType)
 }
 
-// issueChallenge 是两类挑战（登录 / 签发持有证明）的公共实现。
-func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string, requireEnabled bool) (*UKeyChallenge, error) {
+// issueChallenge 是挑战（登录 / 签发持有证明 / 身份核验）的公共实现。
+func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string, requireEnabled bool, mfaType string) (*UKeyChallenge, error) {
 	if u == nil {
 		return nil, ErrInvalidCredential
 	}
@@ -756,8 +789,11 @@ func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientI
 	if strings.TrimSpace(clientType) == "" {
 		clientType = "web"
 	}
+	if mfaType == "" {
+		mfaType = ukeyMFAType
+	}
 	c := &repo.LoginChallenge{
-		ChallengeID: id, UserID: u.UserID, Username: u.Username, MFAType: ukeyMFAType,
+		ChallengeID: id, UserID: u.UserID, Username: u.Username, MFAType: mfaType,
 		Nonce: nonce, SignData: signData,
 		ClientIP: clientIP, UserAgent: userAgent, ClientType: clientType,
 		ExpireTime: time.Now().Add(ttl),
@@ -769,7 +805,7 @@ func (s *UKeyService) issueChallenge(ctx context.Context, u *model.User, clientI
 		"challenge_id", id, "ip", clientIP, "ttl_seconds", int(ttl.Seconds()))
 	return &UKeyChallenge{
 		ChallengeID: id, SignData: signData, SrcData: SrcDataOf(signData), Nonce: nonce,
-		MFAType: ukeyMFAType, ExpireTime: c.ExpireTime, TTLSeconds: int(ttl.Seconds()),
+		MFAType: mfaType, ExpireTime: c.ExpireTime, TTLSeconds: int(ttl.Seconds()),
 	}, nil
 }
 
@@ -820,11 +856,20 @@ type UKeyLoginRequest struct {
 // VerifyLogin 校验 UKey 断言；通过后返回用户，由调用方（认证服务）发放令牌。
 //
 // 本方法**不签发令牌**：签发是认证服务的职责，UKey 只是第二因子的一种。
+// VerifyStepUp 校验身份核验用的 UKey 签名。不记登录成功，也不签发令牌。
+func (s *UKeyService) VerifyStepUp(ctx context.Context, req UKeyLoginRequest, clientIP string) (*model.User, *repo.CertRecord, error) {
+	return s.verifyUKeyChallenge(ctx, req, clientIP, ukeyStepUpChallenge, false)
+}
+
 func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, clientIP string) (*model.User, *repo.CertRecord, error) {
+	return s.verifyUKeyChallenge(ctx, req, clientIP, ukeyMFAType, true)
+}
+
+func (s *UKeyService) verifyUKeyChallenge(ctx context.Context, req UKeyLoginRequest, clientIP, mfaType string, asLogin bool) (*model.User, *repo.CertRecord, error) {
 	if !s.Enabled(ctx) {
 		return nil, nil, ErrUKeyNotEnabled
 	}
-	c, err := s.loadPendingUKeyChallenge(ctx, req.ChallengeID, clientIP)
+	c, err := s.loadPendingChallenge(ctx, req.ChallengeID, clientIP, mfaType)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -941,8 +986,8 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 		return nil, nil, ErrAccountDisabled
 	}
 	if !u.MFAEnabled || u.MFAType != ukeyMFAType {
-		slog.Warn("账号当前未启用 UKey 二次认证，拒绝本次登录",
-			"username", u.Username, "mfa_type", u.MFAType, "mfa_enabled", u.MFAEnabled)
+		slog.Warn("账号当前未启用 UKey 二次认证，拒绝本次校验",
+			"username", u.Username, "mfa_type", u.MFAType, "mfa_enabled", u.MFAEnabled, "login", asLogin)
 		return nil, nil, ErrUKeyLoginRejected
 	}
 
@@ -954,6 +999,10 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 		return nil, nil, ErrUKeyLoginRejected
 	}
 
+	if !asLogin {
+		slog.Info("UKey 身份核验通过", "username", u.Username, "challenge_id", c.ChallengeID, "ip", clientIP)
+		return u, bound, nil
+	}
 	_ = s.users.UpdateLoginSuccess(ctx, u.UserID, clientIP)
 	slog.Info("UKey 二次认证通过", "username", u.Username,
 		"challenge_id", c.ChallengeID, "serial", res.Identity.SerialNumber, "ip", clientIP)
@@ -981,6 +1030,10 @@ func (s *UKeyService) VerifyLogin(ctx context.Context, req UKeyLoginRequest, cli
 // 混成一句"挑战无效"会让客户端与排障都只能靠猜——而这两种情况的处置
 // 完全不同（前者重新登录，后者说明有人在重复提交同一份签名）。
 func (s *UKeyService) loadPendingUKeyChallenge(ctx context.Context, challengeID, clientIP string) (*repo.LoginChallenge, error) {
+	return s.loadPendingChallenge(ctx, challengeID, clientIP, ukeyMFAType)
+}
+
+func (s *UKeyService) loadPendingChallenge(ctx context.Context, challengeID, clientIP, mfaType string) (*repo.LoginChallenge, error) {
 	if s.challenges == nil {
 		return nil, fmt.Errorf("登录挑战组件未启用")
 	}
@@ -992,8 +1045,8 @@ func (s *UKeyService) loadPendingUKeyChallenge(ctx context.Context, challengeID,
 		// 查不到：ID 拼错、被清理任务删除，或来自另一个环境
 		return nil, ErrUKeyChallengeInvalid
 	}
-	if c.MFAType != ukeyMFAType {
-		// 用短信/TOTP 的挑战 ID 来换 UKey 原文属于误用，按"不存在"处理
+	if c.MFAType != mfaType {
+		// 短信挑战、登录挑战和身份核验挑战不能互换。
 		return nil, ErrUKeyChallengeInvalid
 	}
 	switch c.Status {
@@ -1441,6 +1494,39 @@ func caRecord(ca *cert.CA, name string, parentCertID *int64, trustedRoot bool, c
 // UserID 为 0 表示"没有可追溯的操作人"（例如后台任务或单元测试），
 // 此时写 NULL 而不是 0：0 在 sys_user 里不是一个合法用户，
 // 写进去会让联表取添加人时得到空串，但语义上却"看起来有值"。
+func firstProof(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
+}
+
+func (s *UKeyService) authorizeRevoke(ctx context.Context, rec *repo.CertRecord, op OperatorContext) error {
+	if rec == nil {
+		return fmt.Errorf("证书不存在")
+	}
+	if rec.CertType == repo.CertTypeClient && rec.OwnerID != nil {
+		if err := s.authorizeCertChange(ctx, op.UserID, *rec.OwnerID, auth.StepUpUKeyRevoke, op.StepUpProof); err != nil {
+			return err
+		}
+		blocked, err := s.factorGuard.PrivilegedCertRevokeBlocked(ctx, *rec.OwnerID)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			n, err := s.certs.CountActiveByOwner(ctx, 0, ukeyUserOwnerType, *rec.OwnerID)
+			if err != nil {
+				return err
+			}
+			if n <= 1 {
+				return fmt.Errorf("UKey 约束已启用，不能吊销管理员最后一张仍有效的证书")
+			}
+		}
+		return nil
+	}
+	return s.authorizeCertChange(ctx, op.UserID, 0, auth.StepUpUKeyCARevoke, op.StepUpProof)
+}
+
 func creatorID(op OperatorContext) *int64 {
 	if op.UserID == 0 {
 		return nil
@@ -1455,11 +1541,12 @@ func creatorID(op OperatorContext) *int64 {
 
 // RegisterCertRequest 是登记（绑定）用户 UKey 证书的请求。
 type RegisterCertRequest struct {
-	UserID     int64  `json:"user_id"`
-	CertPEM    string `json:"cert_pem"`
-	CertSource string `json:"cert_source"`
-	CertName   string `json:"cert_name"`
-	Remark     string `json:"remark"`
+	StepUpProof string `json:"step_up_proof"`
+	UserID      int64  `json:"user_id"`
+	CertPEM     string `json:"cert_pem"`
+	CertSource  string `json:"cert_source"`
+	CertName    string `json:"cert_name"`
+	Remark      string `json:"remark"`
 }
 
 // RegisterCert 登记并绑定一张客户端证书。
@@ -1484,6 +1571,9 @@ func (s *UKeyService) RegisterCert(ctx context.Context, req RegisterCertRequest,
 	u, err := s.users.GetByID(ctx, req.UserID)
 	if err != nil || u == nil {
 		return nil, fmt.Errorf("用户不存在")
+	}
+	if err := s.authorizeCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof)); err != nil {
+		return nil, err
 	}
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法绑定证书", u.Username)
@@ -1802,6 +1892,9 @@ func (s *UKeyService) RevokeCert(ctx context.Context, certID int64, reason strin
 	if rec.Status == repo.CertStatusRevoked {
 		return rec, nil // 幂等
 	}
+	if err := s.authorizeRevoke(ctx, rec, op); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		reason = "管理员吊销证书"
 	}
@@ -1841,6 +1934,7 @@ func (s *UKeyService) ListCACerts(ctx context.Context) ([]*repo.CertRecord, erro
 
 // IssueUserCertRequest 是签发用户 UKey 证书的请求。
 type IssueUserCertRequest struct {
+	StepUpProof  string `json:"step_up_proof"`
 	UserID       int64  `json:"user_id"`
 	CSRPEM       string `json:"csr_pem"`
 	CommonName   string `json:"common_name"`
@@ -1862,6 +1956,9 @@ func (s *UKeyService) IssueUserCert(ctx context.Context, req IssueUserCertReques
 	u, err := s.users.GetByID(ctx, req.UserID)
 	if err != nil || u == nil {
 		return nil, fmt.Errorf("用户不存在")
+	}
+	if err := s.authorizeCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof)); err != nil {
+		return nil, err
 	}
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法签发证书", u.Username)
@@ -1939,6 +2036,7 @@ func (s *UKeyService) IssueUserCert(ctx context.Context, req IssueUserCertReques
 // 与用户绑定、一次性且短时效，签名必须能用所提交的那把公钥验过。
 // 这一步把"抄一个公钥"重新变回"证明持有私钥"。
 type IssueByPublicKeyRequest struct {
+	StepUpProof string `json:"step_up_proof"`
 	UserID      int64  `json:"user_id"`
 	ChallengeID string `json:"challenge_id"`
 	// PublicKey 公钥（base64）：SPKI DER / 65 字节未压缩点 / 64 字节 X||Y 均可
@@ -1973,6 +2071,9 @@ func (s *UKeyService) IssueUserCertByPublicKey(ctx context.Context, req IssueByP
 	u, err := s.users.GetByID(ctx, req.UserID)
 	if err != nil || u == nil {
 		return nil, fmt.Errorf("用户不存在")
+	}
+	if err := s.authorizeCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof)); err != nil {
+		return nil, err
 	}
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法签发证书", u.Username)

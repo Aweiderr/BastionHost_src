@@ -346,6 +346,43 @@ func (r *UserRepo) Update(ctx context.Context, u *model.User) error {
 	return nil
 }
 
+// UpdateWithMFAAudit 在同一事务里更新用户并写入因子变更审计。
+//
+// 审计写不进去时，用户资料也不会改。ev 为 nil 时与 Update 相同。
+func (r *UserRepo) UpdateWithMFAAudit(ctx context.Context, u *model.User, ev *MFAAuditEvent) error {
+	if ev == nil {
+		return r.Update(ctx, u)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if u.MFAType == "" {
+		u.MFAType = "none"
+	}
+	tag, err := tx.Exec(ctx, `UPDATE sys_user SET
+		display_name=$2, email=$3, phone=$4, org_id=$5, status=$6,
+		password_expire_days=$7, remark=$8, mfa_enabled=$9, mfa_type=$10, update_time=now()
+		WHERE user_id=$1`,
+		u.UserID, u.DisplayName, nullIfEmpty(u.Email), nullIfEmpty(u.Phone), u.OrgID,
+		u.Status, u.PasswordExpireDays, nullIfEmpty(u.Remark), u.MFAEnabled, u.MFAType)
+	if err != nil {
+		return fmt.Errorf("更新用户失败: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_mfa_change
+		(actor_id, actor_name, target_id, target_name, action, old_method, new_method, result, reason, client_ip)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'success',$8,$9)`,
+		nullIfZero(ev.ActorID), nullIfEmpty(ev.ActorName), nullIfZero(ev.TargetID), nullIfEmpty(ev.TargetName),
+		ev.Action, nullIfEmpty(ev.OldMethod), nullIfEmpty(ev.NewMethod), nullIfEmpty(ev.Reason), nullIfEmpty(ev.ClientIP)); err != nil {
+		return fmt.Errorf("写入因子变更审计失败: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // Delete 删除用户（同时解除角色关联）。
 func (r *UserRepo) Delete(ctx context.Context, userID int64) error {
 	tx, err := r.pool.Begin(ctx)

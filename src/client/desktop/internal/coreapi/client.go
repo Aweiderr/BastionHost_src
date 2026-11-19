@@ -235,6 +235,8 @@ type LoginResult struct {
 	ChallengeID        string   `json:"challenge_id,omitempty"`
 	PhoneMasked        string   `json:"phone_masked,omitempty"`
 	MFAHint            string   `json:"mfa_hint,omitempty"`
+	EnrollmentRequired bool     `json:"enrollment_required,omitempty"`
+	StepUpProof        string   `json:"step_up_proof,omitempty"`
 }
 
 // Account 是可运维账号。

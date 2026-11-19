@@ -7,10 +7,11 @@ import (
 
 // TOTP 绑定阶段。
 //
-// 登录是否要求动态口令只看阶段，不看「管理员有没有把类型选成 totp」。
-// 没有已确认种子时要求输入验证码，用户会被锁在门外。
+// LoginRequiresTOTP 只在种子已经确认时为 true。
+// 管理员已经指定 totp、但种子还没确认时，本状态机不要求输入验证码
+// （用户还没有码）。登录政策不会因此签发会话，而是走绑定流程。
 const (
-	// TOTPPhaseUnbound 未绑定。管理员可以预置类型，但登录仍只校验口令。
+	// TOTPPhaseUnbound 未绑定。指定类型仍是 totp 时，登录不能退回仅口令。
 	TOTPPhaseUnbound = "unbound"
 	// TOTPPhasePending 已生成种子，用户还没用动态口令确认。
 	TOTPPhasePending = "pending"
@@ -113,7 +114,8 @@ func ApplyTOTPBind(v TOTPBindView, event string) (TOTPBindState, error) {
 		if st.Phase == TOTPPhaseActive {
 			return st, fmt.Errorf("动态令牌已绑定，请先解绑")
 		}
-		if st.MFAType == "sms" || st.MFAType == "ukey" {
+		// 已有的种子或证书不能把账号改成动态令牌。只有管理员指定 totp 才能开始绑定。
+		if st.MFAType != "totp" {
 			return st, fmt.Errorf("当前账号的二次认证不是动态令牌，请联系管理员调整后再绑定")
 		}
 		st.Phase = TOTPPhasePending
@@ -124,6 +126,9 @@ func ApplyTOTPBind(v TOTPBindView, event string) (TOTPBindState, error) {
 	case TOTPEventConfirm:
 		if st.Phase == TOTPPhaseActive {
 			return st, fmt.Errorf("动态令牌已绑定")
+		}
+		if st.MFAType != "totp" {
+			return st, fmt.Errorf("当前账号的二次认证不是动态令牌，确认绑定不能改写指定因子")
 		}
 		if !st.HasSecret {
 			return st, fmt.Errorf("请先发起绑定以生成种子")
@@ -138,7 +143,9 @@ func ApplyTOTPBind(v TOTPBindView, event string) (TOTPBindState, error) {
 		if st.Phase != TOTPPhaseActive {
 			return st, fmt.Errorf("尚未绑定动态令牌")
 		}
-		return TOTPBindState{Phase: TOTPPhaseUnbound, MFAType: "none"}, nil
+		// 解绑清掉种子和恢复码，但管理员指定的 totp 还在。
+		// 不能因此变成仅口令登录；用户需重新绑定。
+		return TOTPBindState{Phase: TOTPPhaseUnbound, MFAType: "totp"}, nil
 	case TOTPEventPreset:
 		if st.Phase == TOTPPhaseActive {
 			return st, nil

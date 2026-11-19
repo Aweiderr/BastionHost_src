@@ -40,7 +40,7 @@ func totpCodes(t *testing.T, helper *CryptoHelper, cipher string) (nowCode, next
 	return nowCode, nextCode
 }
 
-func TestAdminPresetTOTPDoesNotLockLogin(t *testing.T) {
+func TestAdminPresetTOTPDoesNotIssueSession(t *testing.T) {
 	users := &memAuthUsers{}
 	u := hashedUser(t, 41, "preset", "none", false)
 	applyMFASelection(u, "totp")
@@ -52,23 +52,32 @@ func TestAdminPresetTOTPDoesNotLockLogin(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.Login(ctx, LoginRequest{Username: "preset", Password: gatewayTestPassword, ClientIP: "10.0.0.8"})
-	if err != nil || res.AccessToken == "" {
-		t.Fatalf("未绑定种子时登录不应要求动态口令: %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AccessToken != "" || !res.EnrollmentRequired || res.StepUpProof == "" || res.MFAType != "totp" {
+		t.Fatalf("未绑定种子时只能进入绑定，不能签发令牌: %+v", res)
 	}
 	entries := logs.snapshot()
-	if len(entries) != 1 || entries[0].Result != "success" || entries[0].MFAUsed {
-		t.Fatalf("未强制 MFA 的成功登录不应记 MFAUsed: %+v", entries)
+	if len(entries) != 1 || entries[0].Result != "fail" || entries[0].FailReason != reasonTOTPNotEnrolled || entries[0].MFAUsed {
+		t.Fatalf("未完成绑定不应记成登录成功: %+v", entries)
 	}
-	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.9"); err != nil {
-		t.Fatalf("网关入口同样不应锁死未绑定账号: %v", err)
+	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.9"); !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("网关不能因尚未绑定就只凭口令进入: %v", err)
 	}
 }
 
 func TestTOTPBindingJSONUsesBothFieldNames(t *testing.T) {
 	users := &memAuthUsers{}
-	users.add(hashedUser(t, 42, "binder", "none", false))
+	u := hashedUser(t, 42, "binder", "none", false)
+	applyMFASelection(u, "totp")
+	users.add(u)
 	svc, _, _ := newTOTPAuth(t, users)
-	got, err := svc.StartTOTPBinding(context.Background(), 42, "Bastion")
+	login, err := svc.Login(context.Background(), LoginRequest{Username: "binder", Password: gatewayTestPassword})
+	if err != nil || login.StepUpProof == "" {
+		t.Fatalf("开始绑定需要登录时签发的证明: %v", err)
+	}
+	got, err := svc.StartTOTPBinding(context.Background(), 42, "Bastion", login.StepUpProof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,22 +113,24 @@ func TestTOTPBindingJSONUsesBothFieldNames(t *testing.T) {
 
 func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 	users := &memAuthUsers{}
-	users.add(hashedUser(t, 43, "totp-bind", "none", false))
+	u := hashedUser(t, 43, "totp-bind", "none", false)
+	applyMFASelection(u, "totp")
+	users.add(u)
 	svc, logs, helper := newTOTPAuth(t, users)
 	ctx := context.Background()
 
-	if _, err := svc.StartTOTPBinding(ctx, 43, ""); err != nil {
+	enroll, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword})
+	if err != nil || enroll.AccessToken != "" || !enroll.EnrollmentRequired {
+		t.Fatalf("确认前不能拿到会话: %+v %v", enroll, err)
+	}
+	started, err := svc.StartTOTPBinding(ctx, 43, "", enroll.StepUpProof)
+	if err != nil {
 		t.Fatal(err)
 	}
 	pending, _ := users.snapshot("totp-bind")
 	nowCode, nextCode := totpCodes(t, helper, pending.MFASecretCipher)
 
-	// 待确认期间登录仍只校验口令。
-	if _, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword}); err != nil {
-		t.Fatalf("确认前登录失败: %v", err)
-	}
-
-	confirmed, err := svc.ConfirmTOTPBinding(ctx, 43, nowCode)
+	confirmed, err := svc.ConfirmTOTPBinding(ctx, 43, nowCode, started.StepUpProof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,57 +199,62 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		t.Fatalf("网关口令登录在绑定后必须要求动态口令，得到 %v", err)
 	}
 
-	if err := svc.UnbindTOTP(ctx, 43, ""); err == nil {
+	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, ""); err == nil {
 		t.Fatal("空验证码不能解绑")
 	}
-	if err := svc.UnbindTOTP(ctx, 43, "000000"); !errors.Is(err, ErrMFAInvalid) {
+	if err := svc.UnbindTOTP(ctx, 43, "", confirmed.RecoveryCodes[0]); err == nil {
+		t.Fatal("没有口令不能解绑")
+	}
+	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, "000000"); !errors.Is(err, ErrMFAInvalid) {
 		t.Fatalf("错误动态口令不能解绑，得到 %v", err)
 	}
-	if err := svc.UnbindTOTP(ctx, 43, "AAAA-BBBB"); !errors.Is(err, ErrMFAInvalid) {
+	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, "AAAA-BBBB"); !errors.Is(err, ErrMFAInvalid) {
 		t.Fatalf("错误恢复码不能解绑，得到 %v", err)
 	}
 	still, _ := users.snapshot("totp-bind")
 	if !still.MFAEnabled || still.MFAType != "totp" {
 		t.Fatal("失败的解绑不应改掉绑定状态")
 	}
-	if err := svc.UnbindTOTP(ctx, 43, confirmed.RecoveryCodes[0]); err != nil {
+	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, confirmed.RecoveryCodes[0]); err != nil {
 		t.Fatalf("恢复码应能自助解绑: %v", err)
 	}
-	if err := svc.UnbindTOTP(ctx, 43, confirmed.RecoveryCodes[1]); err == nil {
+	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, confirmed.RecoveryCodes[1]); err == nil {
 		t.Fatal("解绑后不能再用另一枚恢复码")
 	}
 	after, _ := users.snapshot("totp-bind")
-	if after.MFAEnabled || after.MFAType != "none" || after.MFASecretCipher != "" || after.MFATotpPending {
-		t.Fatalf("解绑后应清除种子并关闭 MFA: %+v", after)
+	if after.MFAEnabled || after.MFAType != "totp" || after.MFASecretCipher != "" || after.MFATotpPending {
+		t.Fatalf("解绑后应清除种子并保持指定因子: %+v", after)
 	}
-	if _, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.5"}); err != nil {
-		t.Fatalf("解绑后登录不应再要求动态口令: %v", err)
-	}
-	for _, e := range logs.snapshot() {
-		if e.ClientIP == "10.1.0.5" && (e.Result != "success" || e.MFAUsed) {
-			t.Fatalf("解绑后的成功登录不应记 MFAUsed: %+v", e)
-		}
+	again, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.5"})
+	if err != nil || again.AccessToken != "" || !again.EnrollmentRequired {
+		t.Fatalf("解绑后应重新进入绑定而不是仅口令登录: %+v %v", again, err)
 	}
 }
 
 func TestTOTPUnbindAcceptsFreshCode(t *testing.T) {
 	users := &memAuthUsers{}
-	users.add(hashedUser(t, 44, "unbind-otp", "totp", false))
+	u := hashedUser(t, 44, "unbind-otp", "totp", false)
+	users.add(u)
 	svc, _, helper := newTOTPAuth(t, users)
 	ctx := context.Background()
-	if _, err := svc.StartTOTPBinding(ctx, 44, "Bastion"); err != nil {
+	enroll, err := svc.Login(ctx, LoginRequest{Username: "unbind-otp", Password: gatewayTestPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := svc.StartTOTPBinding(ctx, 44, "Bastion", enroll.StepUpProof)
+	if err != nil {
 		t.Fatal(err)
 	}
 	snap, _ := users.snapshot("unbind-otp")
 	nowCode, nextCode := totpCodes(t, helper, snap.MFASecretCipher)
-	if _, err := svc.ConfirmTOTPBinding(ctx, 44, nowCode); err != nil {
+	if _, err := svc.ConfirmTOTPBinding(ctx, 44, nowCode, started.StepUpProof); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.UnbindTOTP(ctx, 44, nextCode); err != nil {
+	if err := svc.UnbindTOTP(ctx, 44, gatewayTestPassword, nextCode); err != nil {
 		t.Fatalf("未使用过的动态口令应能解绑: %v", err)
 	}
-	if _, _, _, err := svc.Authenticate(ctx, "unbind-otp", gatewayTestPassword, "", "10.2.0.1"); err != nil {
-		t.Fatalf("解绑后网关只凭口令应通过: %v", err)
+	if _, _, _, err := svc.Authenticate(ctx, "unbind-otp", gatewayTestPassword, "", "10.2.0.1"); !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("解绑后网关不能只凭口令通过: %v", err)
 	}
 }
 

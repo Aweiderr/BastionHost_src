@@ -26,6 +26,7 @@ type memAuthUsers struct {
 	fails        map[int64]int
 	recovery     map[int64][]memRecoveryCode
 	nextRecovery int64
+	roles        map[int64][]string
 }
 
 func (m *memAuthUsers) add(u *model.User) {
@@ -64,7 +65,23 @@ func (m *memAuthUsers) GetByID(_ context.Context, userID int64) (*model.User, er
 	return nil, repo.ErrNotFound
 }
 
-func (m *memAuthUsers) ListRoles(context.Context, int64) ([]string, error) {
+func (m *memAuthUsers) setRoles(userID int64, roles []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.roles == nil {
+		m.roles = map[int64][]string{}
+	}
+	m.roles[userID] = append([]string(nil), roles...)
+}
+
+func (m *memAuthUsers) ListRoles(_ context.Context, userID int64) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.roles != nil {
+		if roles, ok := m.roles[userID]; ok {
+			return append([]string(nil), roles...), nil
+		}
+	}
 	return []string{"operator"}, nil
 }
 
@@ -237,13 +254,13 @@ func TestGatewayRejectsUKeyAndSMSPassword(t *testing.T) {
 		t.Fatalf("口令错误应计失败，得到 %d", users.failCount(11))
 	}
 
-	if _, _, _, err := svc.Authenticate(ctx, "ukey-off", gatewayTestPassword, "", "10.0.0.8"); err != nil {
-		t.Fatalf("未启用二次认证的账号不应被网关拒绝: %v", err)
+	if _, _, _, err := svc.Authenticate(ctx, "ukey-off", gatewayTestPassword, "", "10.0.0.8"); !errors.Is(err, ErrGatewayMFAUnsupported) {
+		t.Fatalf("已指定 UKey 时，enabled 为 false 也不能只凭口令进入网关: %v", err)
 	}
 
 	entries := logs.snapshot()
-	if len(entries) != 4 {
-		t.Fatalf("应只为两次 UKey 与两次短信拒绝写登录审计，得到 %#v", entries)
+	if len(entries) != 5 {
+		t.Fatalf("两次 UKey、两次短信，以及未启用标志的 UKey，都应留下拒绝审计，得到 %#v", entries)
 	}
 	for _, entry := range entries {
 		if entry.Result != "fail" || entry.ClientType != "gateway" || !entry.MFAUsed {

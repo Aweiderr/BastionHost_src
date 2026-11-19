@@ -175,6 +175,10 @@ async function submit() {
       captchaNeeded.value ? captchaId.value : '',
       captchaNeeded.value ? captchaCode.value.trim() : '',
     )
+    if (p?.enrollment_required) {
+      rejectLogin(p?.mfa_hint || '动态令牌尚未绑定，本次未登录')
+      return
+    }
     if (p?.mfa_required && p?.challenge_id) {
       mfaChallenge.value = p.challenge_id
       mfaHint.value = p.mfa_hint || `请输入发往 ${p.phone_masked || '手机'} 的验证码`

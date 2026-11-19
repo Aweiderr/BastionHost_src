@@ -73,6 +73,12 @@ type AuthService struct {
 	// loginEnded 在某一端登录会话作废后调用（被另一端踢下线，或这一端登出）。
 	// 用来拆掉该端打开、但令牌已经作废所以客户端来不及关闭的 SQL 会话。
 	loginEnded func(ctx context.Context, userID int64, clientType string)
+	// stepUps 是 MFA 变更的一次性证明。默认在进程内，启动后换成数据库。
+	stepUps stepUpStore
+	// mfaAudit 记录因子变更的成功和拒绝。
+	mfaAudit mfaAuditor
+	// mfaReady 列出打开强制开关前要核对的账号。单测可以为空。
+	mfaReady *repo.MFAPolicyStore
 }
 
 // kickFlags 是登录互斥的两个开关。
@@ -223,6 +229,8 @@ func NewAuthService(
 		roleRepo: roleRepo,
 		tm:       tm, cfg: cfg, crypto: cryptoHelper,
 		sessions: auth.NewMemorySessionStore(),
+		stepUps:  newMemoryStepUp(),
+		mfaAudit: &memoryAudit{},
 	}
 	// 具体类型的 nil 不能直接塞进接口，否则 != nil 为真，随后按指针调用会崩溃。
 	if userRepo != nil {
@@ -309,6 +317,54 @@ func (e *gatewayMFAUnsupportedError) Error() string {
 
 func (e *gatewayMFAUnsupportedError) Unwrap() error { return ErrGatewayMFAUnsupported }
 
+func loginDenyError(reason string) error {
+	switch reason {
+	case reasonPrivilegedDenied:
+		return ErrPrivilegedUKeyRequired
+	case reasonTOTPNotEnrolled:
+		return ErrTOTPNotEnrolled
+	default:
+		return ErrFactorRequired
+	}
+}
+
+// rejectLoginPolicy 在口令正确之后拒绝还不该进入系统的情况。
+//
+// Web 上「指定了 totp 但还没绑定」不在这里拒绝，登录接口会改发绑定证明。
+// 网关没有绑定步骤，同一种情况直接拒绝，避免只凭口令进入 SSH / SFTP / Oracle。
+func (s *AuthService) rejectLoginPolicy(ctx context.Context, u *model.User, clientIP string, gateway bool) error {
+	if u == nil {
+		return ErrInvalidCredential
+	}
+	priv, err := s.userPrivileged(ctx, u.UserID)
+	if err != nil {
+		return err
+	}
+	outcome := auth.DecideLogin(u.MFAType, totpView(u).LoginRequiresTOTP(), priv,
+		s.privilegedUKeyEnforce(ctx), s.requireAssignedFactor(ctx))
+	if outcome.DenyReason == "" && !(gateway && outcome.Enrollment) {
+		return nil
+	}
+	reason := outcome.DenyReason
+	if reason == "" {
+		reason = reasonTOTPNotEnrolled
+	}
+	if gateway {
+		// Web 登录的失败日志由 Login 统一补记，这里只补网关入口。
+		s.writeLoginLog(ctx, repo.LoginLogInput{
+			TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
+			LoginType: "password+" + auth.NormalizeFactor(u.MFAType), ClientType: "gateway",
+			ClientIP: clientIP, Result: "fail", FailReason: reason, MFAUsed: false,
+		})
+	}
+	_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+		ActorID: u.UserID, ActorName: u.Username, TargetID: u.UserID, TargetName: u.Username,
+		Action: "login", OldMethod: auth.NormalizeFactor(u.MFAType),
+		Result: "denied", Reason: reason, ClientIP: clientIP,
+	})
+	return loginDenyError(reason)
+}
+
 func gatewayMFALabel(mfaType string) string {
 	switch mfaType {
 	case "ukey":
@@ -325,18 +381,18 @@ func gatewayMFALabel(mfaType string) string {
 
 // gatewayChallengeMFA 在网关入口拒绝挑战式第二因子。
 //
-// 空类型和 totp 仍按动态令牌处理（口令后附 6 位验证码）。
-// none 表示没有第二因子。其余已启用的类型（短信、UKey，以及以后新增的挑战式因子）
-// 在 SSH / SFTP / Oracle 上没有后续校验，必须拒绝。Web 登录不走这里。
+// 指定了短信或 UKey 就必须拒绝，不能因为 mfa_enabled 还是 false 就只凭口令放行。
+// 空类型、none 和 totp 不在这里拒绝：totp 仍是口令后附 6 位验证码，
+// 未绑定的 totp 由调用方单独拒绝。Web 登录不走这里。
 func gatewayChallengeMFA(u *model.User) error {
-	if u == nil || !u.MFAEnabled {
+	if u == nil {
 		return nil
 	}
-	switch strings.ToLower(strings.TrimSpace(u.MFAType)) {
-	case "", "totp", "none":
-		return nil
+	switch auth.NormalizeFactor(u.MFAType) {
+	case auth.FactorSMS, auth.FactorUKey:
+		return &gatewayMFAUnsupportedError{Type: auth.NormalizeFactor(u.MFAType)}
 	default:
-		return &gatewayMFAUnsupportedError{Type: strings.ToLower(strings.TrimSpace(u.MFAType))}
+		return nil
 	}
 }
 
@@ -397,6 +453,11 @@ type LoginResult struct {
 	ChallengeExpireTime time.Time `json:"challenge_expire_time,omitempty"`
 	// MFAHint 给用户看的提示语，例如"验证码已发送至 138****8000"
 	MFAHint string `json:"mfa_hint,omitempty"`
+	// EnrollmentRequired 表示管理员已指定动态令牌，但种子还没确认。
+	// 此时没有访问令牌。StepUpProof 只能用来开始并确认绑定。
+	EnrollmentRequired bool      `json:"enrollment_required,omitempty"`
+	StepUpProof        string    `json:"step_up_proof,omitempty"`
+	StepUpExpires      time.Time `json:"step_up_expires,omitempty"`
 }
 
 // Login 执行登录。
@@ -450,26 +511,49 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 	}
 	entry.UserID, entry.TenantID = u.UserID, u.TenantID
 
-	// ---- 3. 按用户配置的 MFA 类型决定下一步 ----
-	if u.MFAEnabled {
-		switch u.MFAType {
-		case "sms":
-			// 进入第二因子：**这里不算一次成功登录**。
-			// 只有 VerifyMFA 校验通过才算（并标记 mfa_used），
-			// 否则"发出验证码"会被记成一串成功登录。
-			return s.issueSmsChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
-		case "ukey":
-			// UKey 与短信同属"挑战式"第二因子：账密通过后下发一次性挑战原文，
-			// 客户端用 UKey 私钥对它签名，再调 /auth/ukey/login 换取令牌。
-			// **这里同样不签发令牌**：账密只是第一因子，
-			// 真正证明"操作者持有那把私钥"的是签名校验那一步。
-			//
-			// 早先这里直接返回"Web 端无法完成 UKey 认证"，等于把功能做成了死路；
-			// 现在改走挑战流程后，Web 端与桌面客户端用的是同一条服务端链路。
-			return s.issueUKeyChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
-		case "totp", "":
-			// TOTP 已在 verifyUser 内校验，走到这里说明已通过
+	// ---- 3. 只接受账号上指定的那一种因子，不能改用另一种或退回仅口令 ----
+	priv, perr := s.userPrivileged(ctx, u.UserID)
+	if perr != nil {
+		return nil, perr
+	}
+	outcome := auth.DecideLogin(u.MFAType, totpView(u).LoginRequiresTOTP(), priv,
+		s.privilegedUKeyEnforce(ctx), s.requireAssignedFactor(ctx))
+	if outcome.DenyReason != "" {
+		entry.Result, entry.FailReason = "fail", outcome.DenyReason
+		s.writeLoginLog(ctx, entry)
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: u.UserID, ActorName: u.Username, TargetID: u.UserID, TargetName: u.Username,
+			Action: "login", OldMethod: auth.NormalizeFactor(u.MFAType),
+			Result: "denied", Reason: outcome.DenyReason, ClientIP: req.ClientIP,
+		})
+		return nil, loginDenyError(outcome.DenyReason)
+	}
+	switch outcome.Challenge {
+	case auth.FactorSMS:
+		// 进入第二因子：**这里不算一次成功登录**。
+		// 只有 VerifyMFA 校验通过才算（并标记 mfa_used），
+		// 否则"发出验证码"会被记成一串成功登录。
+		return s.issueSmsChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
+	case auth.FactorUKey:
+		// UKey 与短信同属"挑战式"第二因子：账密通过后下发一次性挑战原文，
+		// 客户端用 UKey 私钥对它签名，再调 /auth/ukey/login 换取令牌。
+		// **这里同样不签发令牌**。已有的动态令牌种子不能改走这条路。
+		return s.issueUKeyChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
+	}
+	if outcome.Enrollment {
+		raw, exp, err := s.issueProof(ctx, u.UserID, u.UserID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
+		if err != nil {
+			return nil, err
 		}
+		entry.Result, entry.FailReason = "fail", reasonTOTPNotEnrolled
+		entry.MFAUsed = false
+		s.writeLoginLog(ctx, entry)
+		return &LoginResult{
+			UserID: u.UserID, Username: u.Username, DisplayName: u.DisplayName,
+			MFARequired: true, MFAType: auth.FactorTOTP, EnrollmentRequired: true,
+			StepUpProof: raw, StepUpExpires: exp,
+			MFAHint: "管理员已指定动态令牌，但尚未完成绑定。本次不签发登录令牌，请使用 step_up_proof 完成绑定后再登录。",
+		}, nil
 	}
 
 	res, err := s.issueSessionTokens(ctx, u, req.ClientType, true)
@@ -647,6 +731,10 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 
 	switch c.MFAType {
 	case "sms":
+		// 挑战发出后因子若被改掉，这条短信不能再换成令牌。
+		if auth.NormalizeFactor(u.MFAType) != auth.FactorSMS {
+			return nil, "", fmt.Errorf("账号的第二因子已变更，请重新登录")
+		}
 		// 校验码与挑战绑定：一个验证码只能用于它所属的那次登录
 		if err := s.sms.Verify(ctx, smsutil.NormalizePhone(u.Phone), code, "mfa", challengeID); err != nil {
 			n, _ := s.challenges.BumpAttempts(ctx, c.ChallengeID)
@@ -851,6 +939,9 @@ func (s *AuthService) verifyUserEntry(ctx context.Context, username, password, t
 		return nil, s.onLoginFail(ctx, u, maxFail, lockMinutes)
 	}
 
+	if err := s.rejectLoginPolicy(ctx, u, clientIP, gateway); err != nil {
+		return nil, err
+	}
 	if gateway {
 		if err := gatewayChallengeMFA(u); err != nil {
 			s.writeLoginLog(ctx, repo.LoginLogInput{
@@ -1247,6 +1338,9 @@ type TOTPBinding struct {
 	Period     int    `json:"period"`
 	// RecoveryCodes 在确认绑定时返回（仅一次）
 	RecoveryCodes []string `json:"recovery_codes,omitempty"`
+	// StepUpProof 只用于紧接着的确认绑定，不能登录。
+	StepUpProof   string    `json:"step_up_proof,omitempty"`
+	StepUpExpires time.Time `json:"step_up_expires,omitempty"`
 }
 
 func totpView(u *model.User) auth.TOTPBindView {
@@ -1277,14 +1371,27 @@ func newTOTPBinding(issuer, account string, secret []byte) *TOTPBinding {
 
 // StartTOTPBinding 生成 TOTP 种子并返回绑定信息。
 //
-// 此时种子尚未生效（mfa_enabled 仍为 false，mfa_totp_pending 为 true），
-// 需调用 ConfirmTOTPBinding 完成绑定。默认算法是 SHA1。
-func (s *AuthService) StartTOTPBinding(ctx context.Context, userID int64, issuer string) (*TOTPBinding, error) {
+// proof 必须是 totp_enroll：口令登录时发给尚未绑定的账号，或身份核验签发。
+// 旧的访问令牌本身不能开始绑定。此时种子尚未生效。
+func (s *AuthService) StartTOTPBinding(ctx context.Context, userID int64, issuer, proof string) (*TOTPBinding, error) {
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.ConsumeFactorProof(ctx, proof, userID, userID, auth.StepUpTOTPEnroll, auth.FactorTOTP); err != nil {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+			Action: auth.StepUpTOTPEnroll, OldMethod: auth.NormalizeFactor(u.MFAType),
+			Result: "denied", Reason: reasonMissingStepUp,
+		})
+		return nil, err
+	}
 	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventStart); err != nil {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+			Action: auth.StepUpTOTPEnroll, OldMethod: auth.NormalizeFactor(u.MFAType),
+			Result: "denied", Reason: reasonPolicyDenied,
+		})
 		return nil, err
 	}
 	if issuer == "" {
@@ -1310,19 +1417,40 @@ func (s *AuthService) StartTOTPBinding(ctx context.Context, userID int64, issuer
 			return nil, err
 		}
 	}
-	return newTOTPBinding(issuer, u.Username, secret), nil
+	confirmProof, exp, err := s.issueProof(ctx, userID, userID, auth.StepUpTOTPConfirm, auth.FactorTOTP)
+	if err != nil {
+		return nil, err
+	}
+	binding := newTOTPBinding(issuer, u.Username, secret)
+	binding.StepUpProof = confirmProof
+	binding.StepUpExpires = exp
+	return binding, nil
 }
 
 // ConfirmTOTPBinding 用一次验证码确认绑定，并返回一次性恢复码。
 //
-// 成功后 mfa_type=totp、mfa_enabled=true，恢复码以摘要落库，
-// 这次验证码占用的时间片不能再用于登录。
-func (s *AuthService) ConfirmTOTPBinding(ctx context.Context, userID int64, code string) (*TOTPBinding, error) {
+// proof 必须是开始绑定时签发的 totp_confirm，且账号的指定因子已经是 totp。
+// 确认不会把短信或 UKey 改成动态令牌。成功后 mfa_enabled=true，
+// 恢复码以摘要落库，这次验证码占用的时间片不能再用于登录。
+func (s *AuthService) ConfirmTOTPBinding(ctx context.Context, userID int64, code, proof string) (*TOTPBinding, error) {
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.ConsumeFactorProof(ctx, proof, userID, userID, auth.StepUpTOTPConfirm, auth.FactorTOTP); err != nil {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+			Action: auth.StepUpTOTPConfirm, OldMethod: auth.NormalizeFactor(u.MFAType),
+			Result: "denied", Reason: reasonMissingStepUp,
+		})
+		return nil, err
+	}
 	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventConfirm); err != nil {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+			Action: auth.StepUpTOTPConfirm, OldMethod: auth.NormalizeFactor(u.MFAType),
+			Result: "denied", Reason: reasonPolicyDenied,
+		})
 		return nil, err
 	}
 	secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
@@ -1351,18 +1479,41 @@ func (s *AuthService) ConfirmTOTPBinding(ctx context.Context, userID int64, code
 	if err := s.userRepo.BindTOTP(ctx, userID, u.MFASecretCipher, step, hashes); err != nil {
 		return nil, err
 	}
+	if err := s.auditMFA(ctx, repo.MFAAuditEvent{
+		ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+		Action: auth.StepUpTOTPConfirm, OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
+		Result: "success", Reason: "totp_confirmed",
+	}); err != nil {
+		return nil, err
+	}
 	return &TOTPBinding{RecoveryCodes: codes}, nil
 }
 
-// UnbindTOTP 解绑动态令牌。会话不够，必须提供当前动态口令或未使用的恢复码。
-func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, code string) error {
+// UnbindTOTP 解绑动态令牌。
+//
+// 访问令牌不够。必须同时提供当前口令，以及当前动态口令或未使用的恢复码。
+// 解绑后指定因子仍是 totp，种子被清除，不能改成仅口令登录。
+// 恢复码仍然只用一次；用过的时间片不能再登录。丢失认证器且没有未过期会话时，
+// 恢复码不能代替登录，需要管理员在核验自己的因子后重新发起绑定。
+func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, password, code string) error {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return fmt.Errorf("解绑需要当前动态口令或未使用的恢复码")
 	}
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("解绑需要当前口令")
+	}
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return err
+	}
+	if !auth.VerifyPassword(password, u.PasswordHash, u.PasswordSalt) {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+			Action: "totp_unbind", OldMethod: auth.NormalizeFactor(u.MFAType),
+			Result: "denied", Reason: reasonBadPassword,
+		})
+		return ErrInvalidCredential
 	}
 	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventUnbind); err != nil {
 		return err
@@ -1377,7 +1528,14 @@ func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, code string)
 			if u.MFATotpLastStep != nil && step <= *u.MFATotpLastStep {
 				return ErrMFAInvalid
 			}
-			return s.userRepo.ClearTOTP(ctx, userID, 0)
+			if err := s.userRepo.ClearTOTP(ctx, userID, 0); err != nil {
+				return err
+			}
+			return s.auditMFA(ctx, repo.MFAAuditEvent{
+				ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+				Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
+				Result: "success", Reason: "totp_unbound",
+			})
 		}
 	}
 	if hash, ok := auth.HashRecoveryCode(code); ok {
@@ -1393,7 +1551,11 @@ func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, code string)
 					}
 					return err
 				}
-				return nil
+				return s.auditMFA(ctx, repo.MFAAuditEvent{
+					ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+					Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
+					Result: "success", Reason: "recovery_code_unbound",
+				})
 			}
 		}
 	}

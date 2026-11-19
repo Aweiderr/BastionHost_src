@@ -105,6 +105,7 @@ interface SessionTab {
   protocol: string
   kind: SessionKind
   status: TabStatus
+  adminKill: boolean
   message: string
   width: number
   height: number
@@ -169,7 +170,16 @@ onMounted(async () => {
   EventsOn('term:closed', (payload: any) => {
     if (!payload?.key) return
     const tab = tabs.value.find((t) => t.key === payload.key)
-    if (!tab || tab.kind !== 'ssh' || tab.status === 'closed') return
+    if (!tab || tab.kind !== 'ssh') return
+    if (payload.adminKill) {
+      tab.adminKill = true
+      tab.status = 'closed'
+      tab.message = String(payload.reason || '会话已被管理员强制中断，不能重连')
+      if (!payload.quiet) notify(`${tab.assetName} 的会话已被管理员强制中断`, 'info')
+      return
+    }
+    if (tab.status === 'closed') return
+    tab.adminKill = false
     tab.status = 'closed'
     if (payload.reason) tab.message = String(payload.reason)
     if (!payload.quiet) notify(`${tab.assetName} 的会话已结束（${payload.reason || '未知原因'}）`, 'info')
@@ -210,7 +220,18 @@ onMounted(async () => {
   EventsOn('desk:closed', (payload: any) => {
     if (!payload?.key) return
     const tab = tabs.value.find((t) => t.key === payload.key)
-    if (!tab || tab.kind !== 'desktop' || tab.status === 'closed') return
+    if (!tab || tab.kind !== 'desktop') return
+    if (payload.adminKill) {
+      tab.adminKill = true
+      tab.credOpen = false
+      tab.credPassword = ''
+      tab.status = 'closed'
+      tab.message = String(payload.reason || '会话已被管理员强制中断，不能重连')
+      if (!payload.quiet) notify(`${tab.assetName} 的图形会话已被管理员强制中断`, 'info')
+      return
+    }
+    if (tab.status === 'closed') return
+    tab.adminKill = false
     tab.credOpen = false
     tab.credPassword = ''
     tab.status = 'closed'
@@ -454,11 +475,16 @@ function handleDeskControl(key: string, raw: string) {
   if (payload.type === 'exit') {
     tab.credOpen = false
     tab.credPassword = ''
+    if (payload.reason === 'admin_kill') {
+      tab.adminKill = true
+      tab.message = '会话已被管理员强制中断，不能重连'
+    }
     if (tab.status !== 'closed') {
       const wasUp = tab.status === 'connected' || tab.status === 'connecting'
       tab.status = 'closed'
       if (!tab.message) tab.message = '图形会话已结束'
-      if (wasUp) notify(`${tab.assetName} 的图形会话已结束`, 'info')
+      if (wasUp && !tab.adminKill) notify(`${tab.assetName} 的图形会话已结束`, 'info')
+      if (wasUp && tab.adminKill) notify(`${tab.assetName} 的图形会话已被管理员强制中断`, 'info')
     }
   }
 }
@@ -488,6 +514,7 @@ async function connect(acc?: Account) {
     protocol: kind === 'ssh' ? 'ssh' : (asset.protocol || '').trim().toLowerCase(),
     kind,
     status: kind === 'unsupported' ? 'unsupported' : kind === 'oracle' ? 'guide' : 'connecting',
+    adminKill: false,
     message: kind === 'unsupported' ? unsupportedExplanation(asset.protocol) : '',
     width: 1280,
     height: 720,
@@ -979,7 +1006,7 @@ function connectLabel(_protocol: string) {
 
 async function reconnectTab(key: string) {
   const tab = tabs.value.find((t) => t.key === key)
-  if (!tab || !offerManualReconnect(tab.kind, tab.status)) return
+  if (!tab || !offerManualReconnect(tab.kind, tab.status, tab.adminKill)) return
   if (!tryEnter(reconnectGate)) return
   tab.status = 'connecting'
   try {
@@ -1182,7 +1209,7 @@ function onOracleAccount(tab: SessionTab) {
         </template>
         <span class="spacer"></span>
         <button
-          v-if="activeTab && offerManualReconnect(activeTab.kind, activeTab.status)"
+          v-if="activeTab && offerManualReconnect(activeTab.kind, activeTab.status, activeTab.adminKill)"
           class="primary sm"
           @click="reconnectTab(activeTab.key)"
         >
@@ -1381,7 +1408,7 @@ function onOracleAccount(tab: SessionTab) {
             <div v-if="t.status !== 'connected' && !t.credOpen" class="desk-wait">
               <p class="desk-wait-msg">{{ desktopWaitText(t) }}</p>
               <button
-                v-if="offerManualReconnect(t.kind, t.status)"
+                v-if="offerManualReconnect(t.kind, t.status, t.adminKill)"
                 class="primary sm"
                 type="button"
                 @click="reconnectTab(t.key)"

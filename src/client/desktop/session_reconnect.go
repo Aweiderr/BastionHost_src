@@ -196,7 +196,7 @@ func (a *App) dialSSH(key string, slot sshSlot) (*SessionBrief, error) {
 	a.mu.Unlock()
 	if dead {
 		_ = sess.Close()
-		return nil, fmt.Errorf("会话刚建立就断开了")
+		return nil, a.deadDialError("ssh:" + key)
 	}
 	return &SessionBrief{
 		Key: key, AssetID: slot.assetID, Asset: slot.assetName, Account: slot.accountName,
@@ -215,10 +215,19 @@ func (a *App) onSSHClosed(key string, epoch, gen int, sess *term.Session, reason
 	if !registered {
 		a.deadGen[key] = gen
 		a.mu.Unlock()
+		if reconnect.IsAdminKill(reason) {
+			a.noteAdminKill("ssh:" + key)
+		}
 		return
 	}
 	delete(a.sessions, key)
 	a.mu.Unlock()
+
+	if reconnect.IsAdminKill(reason) {
+		a.noteAdminKill("ssh:" + key)
+		a.emit("term:closed", killedEvent(key))
+		return
+	}
 
 	out := a.attempt("ssh:" + key).UnexpectedClose()
 	if !out.Start {
@@ -238,6 +247,10 @@ func (a *App) onSSHClosed(key string, epoch, gen int, sess *term.Session, reason
 
 func (a *App) autoRedialSSH(key string) {
 	defer a.attempt("ssh:" + key).Finish()
+	if a.attempt("ssh:" + key).Blocked() {
+		a.emit("term:closed", killedEvent(key))
+		return
+	}
 	a.emit("term:reconnecting", map[string]any{"key": key, "message": "终端连接已断开，正在重连一次"})
 	a.mu.Lock()
 	a.ensureLiveLocked()
@@ -248,6 +261,10 @@ func (a *App) autoRedialSSH(key string) {
 		return
 	}
 	if _, err := a.dialSSH(key, slot); err != nil {
+		if a.attempt("ssh:" + key).Blocked() {
+			a.emit("term:closed", killedEvent(key))
+			return
+		}
 		a.failSSH(key, err)
 		return
 	}
@@ -255,6 +272,10 @@ func (a *App) autoRedialSSH(key string) {
 	died := a.deadGen[key] != 0 && a.deadGen[key] == a.sshGen[key]
 	a.mu.Unlock()
 	if died {
+		if a.attempt("ssh:" + key).Blocked() {
+			a.emit("term:closed", killedEvent(key))
+			return
+		}
 		a.failSSH(key, fmt.Errorf("会话刚建立就断开了"))
 		return
 	}
@@ -382,14 +403,14 @@ func (a *App) dialDesktop(key string, slot deskSlot) (*SessionBrief, error) {
 	a.mu.Unlock()
 	if dead {
 		_ = sess.Close()
-		return nil, fmt.Errorf("图形会话刚建立就断开了")
+		return nil, a.deadDialError("desk:" + key)
 	}
 	sess.Start()
 	a.mu.Lock()
 	dead = a.deadGen["d:"+key] == gen || epoch != a.epoch
 	a.mu.Unlock()
 	if dead {
-		return nil, fmt.Errorf("图形会话刚建立就断开了")
+		return nil, a.deadDialError("desk:" + key)
 	}
 	return &SessionBrief{
 		Key: key, AssetID: slot.assetID, Gateway: desktopURL,
@@ -417,10 +438,19 @@ func (a *App) onDesktopClosed(key string, epoch, gen int, sess *desk.Session, re
 	if !registered {
 		a.deadGen["d:"+key] = gen
 		a.mu.Unlock()
+		if reconnect.IsAdminKill(reason) {
+			a.noteAdminKill("desk:" + key)
+		}
 		return
 	}
 	delete(a.desktops, key)
 	a.mu.Unlock()
+
+	if reconnect.IsAdminKill(reason) {
+		a.noteAdminKill("desk:" + key)
+		a.emit("desk:closed", killedEvent(key))
+		return
+	}
 
 	out := a.attempt("desk:" + key).UnexpectedClose()
 	if !out.Start {
@@ -440,6 +470,10 @@ func (a *App) onDesktopClosed(key string, epoch, gen int, sess *desk.Session, re
 
 func (a *App) autoRedialDesktop(key string) {
 	defer a.attempt("desk:" + key).Finish()
+	if a.attempt("desk:" + key).Blocked() {
+		a.emit("desk:closed", killedEvent(key))
+		return
+	}
 	a.emit("desk:reconnecting", map[string]any{"key": key, "message": "图形会话已断开，正在重连一次"})
 	a.mu.Lock()
 	a.ensureLiveLocked()
@@ -450,6 +484,10 @@ func (a *App) autoRedialDesktop(key string) {
 		return
 	}
 	if _, err := a.dialDesktop(key, slot); err != nil {
+		if a.attempt("desk:" + key).Blocked() {
+			a.emit("desk:closed", killedEvent(key))
+			return
+		}
 		a.failDesktop(key, err)
 		return
 	}
@@ -457,10 +495,36 @@ func (a *App) autoRedialDesktop(key string) {
 	died := a.deadGen["d:"+key] != 0 && a.deadGen["d:"+key] == a.deskGen[key]
 	a.mu.Unlock()
 	if died {
+		if a.attempt("desk:" + key).Blocked() {
+			a.emit("desk:closed", killedEvent(key))
+			return
+		}
 		a.failDesktop(key, fmt.Errorf("图形会话刚建立就断开了"))
 		return
 	}
 	a.emit("desk:reconnected", map[string]any{"key": key, "message": "图形会话已重连，登录仍然有效"})
+}
+
+func (a *App) noteAdminKill(id string) {
+	a.attempt(id).ForcedInterrupt()
+}
+
+func (a *App) deadDialError(id string) error {
+	if a.attempt(id).Blocked() {
+		return fmt.Errorf("%s", reconnect.AdminKillText)
+	}
+	if strings.HasPrefix(id, "desk:") {
+		return fmt.Errorf("图形会话刚建立就断开了")
+	}
+	return fmt.Errorf("会话刚建立就断开了")
+}
+
+func killedEvent(key string) map[string]any {
+	return map[string]any{
+		"key":       key,
+		"reason":    reconnect.AdminKillText,
+		"adminKill": true,
+	}
 }
 
 func (a *App) noteDesktopResize(key, text string) {

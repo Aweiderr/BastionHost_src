@@ -122,22 +122,36 @@ func Dial(ctx context.Context, opt Options) (*Session, error) {
 	// 它在某些时序下会立刻返回，导致前端刚连上就弹出"会话已结束"、
 	// 状态标签又变回未连接（实际通道仍然是通的）。
 	go func() {
+		// 管理员强制中断会在关通道前写入 AdminKillMark。
+		// 这里只在输出结束后看这一次的字节，不另起 Wait，避免会话刚建立就被判结束。
+		finder := newMarkFinder(AdminKillMark)
 		buf := make([]byte, 8192)
+		emit := func(p []byte) {
+			if len(p) == 0 || s.onData == nil {
+				return
+			}
+			chunk := make([]byte, len(p))
+			copy(chunk, p)
+			s.onData(chunk)
+		}
 		for {
 			n, err := stdout.Read(buf)
-			if n > 0 && s.onData != nil {
-				chunk := make([]byte, n)
-				copy(chunk, buf[:n])
-				s.onData(chunk)
+			if n > 0 {
+				emit(finder.push(buf[:n]))
 			}
 			if err != nil {
+				emit(finder.flush())
 				if err != io.EOF {
 					slog.Debug("网关输出结束", "err", err)
 				}
-				break
+				reason := "remote_closed"
+				if finder.killed {
+					reason = "admin_kill"
+				}
+				s.finish(reason)
+				return
 			}
 		}
-		s.finish("remote_closed")
 	}()
 
 	return s, nil

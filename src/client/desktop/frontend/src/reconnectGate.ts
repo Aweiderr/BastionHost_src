@@ -17,6 +17,7 @@ export function leave(gate: ClickGate): void {
   gate.busy = false
 }
 
-export function offerManualReconnect(kind: string, status: string): boolean {
+export function offerManualReconnect(kind: string, status: string, adminKill = false): boolean {
+  if (adminKill) return false
   return (kind === 'ssh' || kind === 'desktop') && status === 'closed'
 }

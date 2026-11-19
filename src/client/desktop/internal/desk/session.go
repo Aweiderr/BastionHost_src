@@ -8,8 +8,10 @@ package desk
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,24 +105,54 @@ func (s *Session) Start() {
 }
 
 func (s *Session) loop(ctx context.Context, onControl, onFrame func([]byte)) {
+	reason := "closed"
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Error("图形会话读取中断", "err", rec)
 		}
-		s.finish()
+		s.finish(reason)
 	}()
 	for {
 		typ, data, err := s.conn.Read(ctx)
 		if err != nil {
+			if reason != "admin_kill" {
+				if next := closeReason(err); next != "" {
+					reason = next
+				}
+			}
 			return
 		}
 		switch typ {
 		case websocket.MessageText:
+			if controlAdminKill(data) {
+				reason = "admin_kill"
+			}
 			call(onControl, data)
 		case websocket.MessageBinary:
 			call(onFrame, data)
 		}
 	}
+}
+
+// closeReason 从对端关闭帧里取出管理员强制中断。
+// 没有这段原因时仍用 closed，网络断开和网关重启走原来的意外断开。
+func closeReason(err error) string {
+	var ce websocket.CloseError
+	if errors.As(err, &ce) && strings.EqualFold(strings.TrimSpace(ce.Reason), "admin_kill") {
+		return "admin_kill"
+	}
+	return ""
+}
+
+func controlAdminKill(data []byte) bool {
+	var msg struct {
+		Type   string `json:"type"`
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(data, &msg) != nil {
+		return false
+	}
+	return msg.Type == "exit" && strings.EqualFold(strings.TrimSpace(msg.Reason), "admin_kill")
 }
 
 func call(fn func([]byte), data []byte) {
@@ -135,7 +167,7 @@ func call(fn func([]byte), data []byte) {
 	fn(append([]byte(nil), data...))
 }
 
-func (s *Session) finish() {
+func (s *Session) finish(reason string) {
 	s.mu.Lock()
 	s.closed = true
 	conn := s.conn
@@ -146,12 +178,15 @@ func (s *Session) finish() {
 	if s.onClose == nil {
 		return
 	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "closed"
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Error("图形会话结束回调异常", "err", rec)
 		}
 	}()
-	s.onClose("closed")
+	s.onClose(reason)
 }
 
 // WriteText 把一条 JSON 控制消息写回代理（键鼠或手动口令）。

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 )
 
@@ -108,11 +109,19 @@ func (s *Server) KillSession(sessionID int64, reason string) (bool, error) {
 	if ls == nil {
 		return false, nil
 	}
-	if reason == "" {
-		reason = "admin_kill"
+	// 管理面可能带上管理员填写的原文。掐断信号固定用 admin_kill，
+	// 桌面客户端才能把它和网络断开、网关重启、空闲超时分开。
+	// 原文只记日志，不改编码。
+	detail := strings.TrimSpace(reason)
+	if detail == "" {
+		detail = endAdminKill
 	}
-	if err := ls.kill(reason); err != nil {
+	if err := ls.kill(endAdminKill); err != nil {
+		slog.Info("会话强制中断时关闭连接失败", "session_id", sessionID, "detail", detail, "err", err)
 		return true, err
+	}
+	if detail != endAdminKill {
+		slog.Info("会话强制中断附带理由", "session_id", sessionID, "detail", detail)
 	}
 	return true, nil
 }

@@ -233,7 +233,7 @@ func (s *Server) handleDesktop(ctx context.Context, c *websocket.Conn, remoteIP 
 		SessionID: sess.SessionID, SessionNo: sess.SessionNo,
 		UserID: ident.UserID, Username: ident.Username, AssetID: auth.AssetID,
 	}
-	live.addCloser(closeFunc(func() error { return c.Close(websocket.StatusGoingAway, "killed") }))
+	live.addCloser(closeFunc(func() error { return closeKilledDesktop(c, live) }))
 	s.registerLive(live)
 	defer s.unregisterLive(sess.SessionID)
 

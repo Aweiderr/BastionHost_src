@@ -54,6 +54,9 @@ const (
 	// endTimeout 是空闲超时。与 ops_session.status 用同一个编码，
 	// 审计结束原因字典也认 timeout，不再另造 idle_timeout。
 	endTimeout = "timeout"
+	// endAdminKill 是管理员强制中断。自由文本理由不进这个编码，
+	// 否则桌面客户端无法把它和网络断开分开。
+	endAdminKill = "admin_kill"
 )
 
 // 录像状态
@@ -768,7 +771,9 @@ func (s *Server) runShell(ctx context.Context, ident *identity, ch ssh.Channel,
 		SessionID: sess.SessionID, SessionNo: sess.SessionNo,
 		UserID: ident.UserID, Username: ident.Username, AssetID: asset.AssetID,
 	}
-	live.addCloser(ch)
+	// 管理员强制中断时先写标记再关通道。空闲超时和网关重启不写，
+	// 桌面客户端仍按意外断开最多自动重连一次。
+	live.addCloser(sshKillCloser{live: live, ch: ch})
 	activity.set(live.touch)
 	s.registerLive(live)
 	defer s.unregisterLive(sess.SessionID)

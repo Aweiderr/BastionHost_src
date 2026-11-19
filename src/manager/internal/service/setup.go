@@ -53,14 +53,14 @@ func NewSetupService(
 
 // SetupStatus 是初始化状态。
 type SetupStatus struct {
-	Initialized bool               `json:"initialized"`
-	CurrentStep string             `json:"current_step,omitempty"`
-	NextAction  string             `json:"next_action"`
-	Steps       []model.InitRecord `json:"steps"`
-	AdminCount  int                `json:"admin_count"`
-	SuperSealed bool               `json:"super_admin_sealed"`
-	DeviceName  string             `json:"device_name,omitempty"`
-	CryptoInfo  map[string]string  `json:"crypto_info"`
+	Initialized   bool                 `json:"initialized"`
+	CurrentStep   string               `json:"current_step,omitempty"`
+	NextAction    string               `json:"next_action"`
+	Steps         []model.InitRecord   `json:"steps"`
+	AdminCount    int                  `json:"admin_count"`
+	SuperSealed   bool                 `json:"super_admin_sealed"`
+	DeviceName    string               `json:"device_name,omitempty"`
+	CryptoInfo    map[string]string    `json:"crypto_info"`
 }
 
 // Status 查询初始化状态。
@@ -125,14 +125,14 @@ type InitRequest struct {
 
 // InitResult 是初始化结果。
 type InitResult struct {
-	UserID   int64                  `json:"user_id"`
-	Username string                 `json:"username"`
-	Steps    []string               `json:"completed_steps"`
-	KeyID    string                 `json:"device_key_id,omitempty"`
-	SelfTest *crypto.SelfTestResult `json:"self_test,omitempty"`
+	UserID      int64             `json:"user_id"`
+	Username    string            `json:"username"`
+	Steps       []string          `json:"completed_steps"`
+	KeyID       string            `json:"device_key_id,omitempty"`
+	SelfTest    *crypto.SelfTestResult `json:"self_test,omitempty"`
 	// SetupToken 是初始化阶段临时令牌，用于紧接着创建三员
-	SetupToken  string `json:"setup_token"`
-	SetupExpire int64  `json:"setup_token_expire_sec"`
+	SetupToken  string            `json:"setup_token"`
+	SetupExpire int64             `json:"setup_token_expire_sec"`
 }
 
 // Initialize 执行初始化：设备证书 → 密码模块自检 → 创建超级管理员。
@@ -525,7 +525,7 @@ func (s *SetupService) CreateAdmins(ctx context.Context, req CreateAdminsRequest
 	}
 
 	detail, _ := json.Marshal(map[string]any{
-		"created":  res.Created,
+		"created": res.Created,
 		"operator": operatorName,
 	})
 	if err := s.initRepo.MarkSuccess(ctx, model.InitStepAdmins, string(detail), &operatorID, operatorName); err != nil {

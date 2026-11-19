@@ -230,9 +230,9 @@ type TestCommandRequest struct {
 
 // TestCommandResult 是命令测试结果。
 type TestCommandResult struct {
-	Command     string           `json:"command"`
-	Normalized  string           `json:"normalized"`
-	CommandName string           `json:"command_name"`
+	Command     string          `json:"command"`
+	Normalized  string          `json:"normalized"`
+	CommandName string          `json:"command_name"`
 	Decision    *policy.Decision `json:"decision"`
 }
 

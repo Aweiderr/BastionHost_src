@@ -90,7 +90,7 @@ func TestLoginAllowsOperator(t *testing.T) {
 		t.Fatal("profile not stored")
 	}
 	if app.password != "secret" {
-		t.Fatal("password should stay in memory for the gateway")
+		t.Fatal("password should stay in memory after login")
 	}
 	if app.api.Token() != "tok-ops" {
 		t.Fatalf("token = %q", app.api.Token())

@@ -331,11 +331,21 @@ func (s *Server) release() {
 }
 
 // authenticate 处理 SSH 口令认证。
+//
+// 桌面客户端登录成功后，把仍有效的访问令牌放在 SSH 口令字段里，
+// 与 WebSSH 把同一枚令牌交给 VerifyToken 是同一条授权。这里必须先按
+// 原始字符串校验令牌，再拆「口令:验证码」：令牌里可以出现冒号，
+// 提前拆分会把令牌截断。令牌对不上才回落到外部客户端的口令或口令:验证码。
+// 没有会话的 MobaXterm 等客户端不会持有这枚令牌，TOTP 账号仍然不能只凭口令进入。
 func (s *Server) authenticate(ctx context.Context, meta ssh.ConnMetadata, raw string) (*ssh.Permissions, error) {
 	user, assetHint := parseLoginName(meta.User())
-	pwd, totp := splitPassword(raw)
 	remoteIP := hostOf(meta.RemoteAddr().String())
 
+	if perm, handled, err := s.authenticateSessionToken(ctx, user, assetHint, remoteIP, raw); handled {
+		return perm, err
+	}
+
+	pwd, totp := splitPassword(raw)
 	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	id, err := s.client.VerifyOps(actx, user, pwd, totp, remoteIP)
@@ -349,6 +359,36 @@ func (s *Server) authenticate(ctx context.Context, meta ssh.ConnMetadata, raw st
 			return nil, &ssh.BannerError{Message: msg, Err: errors.New(msg)}
 		}
 		return nil, fmt.Errorf("%s", msg)
+	}
+	return s.permitIdent(id, assetHint, remoteIP, user)
+}
+
+// authenticateSessionToken 用 SSH 口令字段里的访问令牌换运维身份。
+//
+// handled 为 false 表示这段字符串不是有效会话令牌，调用方继续走口令认证。
+// 令牌有效但登录名对不上时直接拒绝，不再把令牌当作另一个账号的口令去试。
+func (s *Server) authenticateSessionToken(ctx context.Context, user, assetHint, remoteIP, raw string) (*ssh.Permissions, bool, error) {
+	if s == nil || s.client == nil || strings.TrimSpace(raw) == "" {
+		return nil, false, nil
+	}
+	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	id, err := s.client.VerifyToken(actx, raw)
+	if err != nil || id == nil || strings.TrimSpace(id.Username) == "" {
+		return nil, false, nil
+	}
+	if strings.TrimSpace(id.Username) != user {
+		slog.Info("SSH 会话令牌与登录名不一致", "user", user, "remote", remoteIP)
+		return nil, true, fmt.Errorf("用户名或口令错误")
+	}
+	perm, err := s.permitIdent(id, assetHint, remoteIP, user)
+	return perm, true, err
+}
+
+// permitIdent 在身份已经确认后检查运维权限并写入连接扩展。
+func (s *Server) permitIdent(id *managerclient.OpsIdentity, assetHint, remoteIP, user string) (*ssh.Permissions, error) {
+	if id == nil {
+		return nil, fmt.Errorf("用户名或口令错误")
 	}
 	if !hasPermission(id.Permissions, "ops:session:connect") {
 		slog.Info("SSH 认证被拒：缺少会话权限", "user", user, "remote", remoteIP)

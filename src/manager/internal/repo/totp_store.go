@@ -40,7 +40,7 @@ func (r *UserRepo) BindTOTP(ctx context.Context, userID int64, secretCipher stri
 
 	tag, err := tx.Exec(ctx, `UPDATE sys_user
 		SET mfa_enabled=true, mfa_type='totp', mfa_secret_cipher=$2,
-		    mfa_totp_pending=false, mfa_totp_last_step=$3, update_time=now()
+		    mfa_totp_pending=false, mfa_totp_last_step=$3, mfa_factor_activated=true, update_time=now()
 		WHERE user_id=$1 AND mfa_type='totp'`, userID, secretCipher, step)
 	if err != nil {
 		return fmt.Errorf("确认动态令牌失败: %w", err)

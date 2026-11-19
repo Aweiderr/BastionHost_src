@@ -23,30 +23,67 @@ func TestPrivilegedRolesFollowBuiltinModel(t *testing.T) {
 
 func TestDecideLoginUsesAssignedFactorOnly(t *testing.T) {
 	cases := []struct {
-		name    string
-		factor  string
-		ready   bool
-		priv    bool
-		enforce bool
-		require bool
-		want    LoginOutcome
+		name      string
+		factor    string
+		ready     bool
+		activated bool
+		priv      bool
+		enforce   bool
+		require   bool
+		want      LoginOutcome
 	}{
-		{"totp ready", FactorTOTP, true, false, false, false, LoginOutcome{IssueSession: true}},
-		{"totp enroll", FactorTOTP, false, false, false, false, LoginOutcome{Enrollment: true}},
-		{"sms", FactorSMS, false, false, false, false, LoginOutcome{Challenge: FactorSMS}},
-		{"ukey", FactorUKey, false, false, false, false, LoginOutcome{Challenge: FactorUKey}},
-		{"legacy none", FactorNone, false, false, false, false, LoginOutcome{IssueSession: true}},
-		{"none blocked", FactorNone, false, false, false, true, LoginOutcome{DenyReason: "factor_not_assigned"}},
-		{"priv totp while off", FactorTOTP, true, true, false, false, LoginOutcome{IssueSession: true}},
-		{"priv totp while on", FactorTOTP, true, true, true, false, LoginOutcome{DenyReason: "privileged_ukey_required"}},
-		{"priv ukey while on", FactorUKey, false, true, true, false, LoginOutcome{Challenge: FactorUKey}},
-		{"operator any", FactorSMS, false, false, true, true, LoginOutcome{Challenge: FactorSMS}},
+		{"totp ready", FactorTOTP, true, false, false, false, false, LoginOutcome{IssueSession: true}},
+		{"totp enroll", FactorTOTP, false, false, false, false, false, LoginOutcome{Enrollment: true}},
+		{"totp rebound", FactorTOTP, false, true, false, false, false, LoginOutcome{DenyReason: "totp_rebind_blocked"}},
+		{"sms disabled flag", FactorSMS, false, false, false, false, false, LoginOutcome{Challenge: FactorSMS}},
+		{"ukey disabled flag", FactorUKey, false, false, false, false, false, LoginOutcome{Challenge: FactorUKey}},
+		{"legacy none", FactorNone, false, false, false, false, false, LoginOutcome{IssueSession: true}},
+		{"none blocked", FactorNone, false, false, false, false, true, LoginOutcome{DenyReason: "factor_not_assigned"}},
+		{"none but activated", FactorNone, false, true, false, false, false, LoginOutcome{DenyReason: "factor_not_assigned"}},
+		{"priv totp while off", FactorTOTP, true, true, true, false, false, LoginOutcome{IssueSession: true}},
+		{"priv totp while on", FactorTOTP, true, true, true, true, false, LoginOutcome{DenyReason: "privileged_ukey_required"}},
+		{"priv ukey while on", FactorUKey, false, true, true, true, false, LoginOutcome{Challenge: FactorUKey}},
+		{"operator any", FactorSMS, false, false, false, true, true, LoginOutcome{Challenge: FactorSMS}},
 	}
 	for _, tc := range cases {
-		got := DecideLogin(tc.factor, tc.ready, tc.priv, tc.enforce, tc.require)
+		got := DecideLogin(tc.factor, tc.ready, tc.activated, tc.priv, tc.enforce, tc.require)
 		if got != tc.want {
 			t.Fatalf("%s: got %+v want %+v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestBootstrapOnlyForNeverEnrolled(t *testing.T) {
+	ok, reason := BootstrapEligible(FactorState{})
+	if !ok || reason != "" {
+		t.Fatalf("空白账号应可引导: %v %s", ok, reason)
+	}
+	cases := []struct {
+		name string
+		st   FactorState
+		want string
+	}{
+		{"assigned totp", FactorState{Type: FactorTOTP}, "factor_assigned"},
+		{"totp pending", FactorState{Type: FactorTOTP, Pending: true, HasSecret: true}, "factor_assigned"},
+		{"totp was confirmed", FactorState{Type: FactorTOTP, Activated: true}, "factor_assigned"},
+		{"sms no phone", FactorState{Type: FactorSMS, Enabled: true}, "factor_assigned"},
+		{"ukey revoked", FactorState{Type: FactorUKey, Enabled: true, Activated: true}, "factor_assigned"},
+		{"ukey flag off", FactorState{Type: FactorUKey}, "factor_assigned"},
+		{"none with secret", FactorState{HasSecret: true}, "factor_state_inconsistent"},
+		{"none activated", FactorState{Activated: true}, "factor_state_inconsistent"},
+		{"none enabled", FactorState{Enabled: true}, "factor_state_inconsistent"},
+	}
+	for _, tc := range cases {
+		ok, reason := BootstrapEligible(tc.st)
+		if ok || reason != tc.want {
+			t.Fatalf("%s: ok=%v reason=%s", tc.name, ok, reason)
+		}
+	}
+	if !TOTPPasswordEnroll(FactorState{Type: FactorTOTP}) {
+		t.Fatal("从未确认的 totp 应允许口令绑定")
+	}
+	if TOTPPasswordEnroll(FactorState{Type: FactorTOTP, Activated: true}) {
+		t.Fatal("曾确认过的 totp 不能再只凭口令绑定")
 	}
 }
 

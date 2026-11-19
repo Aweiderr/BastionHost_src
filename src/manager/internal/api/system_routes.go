@@ -15,7 +15,6 @@ import (
 	"bastion.local/manager/internal/config"
 	"bastion.local/manager/internal/netcfg"
 	"bastion.local/manager/internal/repo"
-	"bastion.local/manager/internal/service"
 	"bastion.local/shared/httpx"
 	"bastion.local/shared/sysinfo"
 )
@@ -668,11 +667,7 @@ func (s *Server) handleMFAEnforcement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := claimsFrom(r)
-	if err := s.auth.ConsumeFactorProof(r.Context(), req.StepUpProof, claims.UserID, claims.UserID, service.EnforcementAction, ""); err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	res, err := s.auth.SetMFAEnforcement(r.Context(), req.RequireAssignedFactor, req.PrivilegedUKeyEnforce, claims.UserID)
+	res, err := s.auth.SetMFAEnforcement(r.Context(), req.RequireAssignedFactor, req.PrivilegedUKeyEnforce, claims.UserID, req.StepUpProof, claims.Username, clientIP(r))
 	if err != nil {
 		writeServiceError(w, err)
 		if res != nil {

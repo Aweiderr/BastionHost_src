@@ -23,6 +23,6 @@ test('旧字段名仍然优先', () => {
 })
 
 test('空响应不会把 undefined 当成密钥', () => {
-  assert.deepEqual(readTotpStart(undefined), { secret: '', otpauthUrl: '' })
-  assert.deepEqual(readTotpStart({}), { secret: '', otpauthUrl: '' })
+  assert.deepEqual(readTotpStart(undefined), { secret: '', otpauthUrl: '', stepUpProof: '' })
+  assert.deepEqual(readTotpStart({}), { secret: '', otpauthUrl: '', stepUpProof: '' })
 })

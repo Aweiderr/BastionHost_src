@@ -5,6 +5,7 @@ import QRCode from 'qrcode'
 import Modal from '@/components/Modal.vue'
 import { changePassword, totpConfirm, totpStart, totpUnbind } from '@/api/auth'
 import { readTotpStart } from '@/api/totpBind'
+import { requestStepUp } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { TOTP_CLOCK_HINT } from '@/utils/loginTotp'
@@ -63,6 +64,8 @@ const totpSecret = ref('')
 const totpUrl = ref('')
 const totpQr = ref('')
 const totpCode = ref('')
+const totpPassword = ref('')
+const confirmProof = ref('')
 const totpBusy = ref(false)
 const recoveryCodes = ref<string[]>([])
 
@@ -86,7 +89,14 @@ function resetTotpForm(): void {
 async function startTotp(): Promise<void> {
   totpBusy.value = true
   try {
-    const parsed = readTotpStart(await totpStart())
+    const proof = await requestStepUp({
+      action: 'totp_enroll',
+      targetUserId: auth.user?.user_id ?? 0,
+      newFactor: 'totp',
+      title: '确认是您本人在绑定动态令牌',
+    })
+    const parsed = readTotpStart(await totpStart(proof))
+    confirmProof.value = parsed.stepUpProof || ''
     if (!parsed.secret || !parsed.otpauthUrl) {
       app.error('未获取到绑定密钥，请重试')
       return
@@ -117,7 +127,7 @@ async function confirmTotp(): Promise<void> {
   }
   totpBusy.value = true
   try {
-    const result = await totpConfirm(totpCode.value)
+    const result = await totpConfirm(totpCode.value, confirmProof.value)
     const codes = result.recovery_codes ?? []
     app.success('动态令牌已绑定。请离线保存恢复码，认证器丢失时可用它自助解绑')
     resetTotpForm()
@@ -129,13 +139,13 @@ async function confirmTotp(): Promise<void> {
 }
 
 async function unbindTotp(): Promise<void> {
-  if (!totpCode.value.trim()) {
-    app.error('解绑需要输入当前动态口令或恢复码')
+  if (!totpPassword.value || !totpCode.value.trim()) {
+    app.error('解绑需要当前口令，以及动态口令或恢复码')
     return
   }
   totpBusy.value = true
   try {
-    await totpUnbind(totpCode.value.trim())
+    await totpUnbind(totpPassword.value, totpCode.value.trim())
     app.success('已解绑动态令牌')
     resetTotpForm()
     await auth.fetchMe()
@@ -221,7 +231,7 @@ function close(): void {
       </div>
 
       <p v-if="!totpActive && mfaType === 'totp'" class="form-hint mb-16">
-        管理员已指定动态口令。完成绑定前，登录仍只校验口令。
+        管理员已指定动态口令。完成绑定前不会签发登录令牌。若以前绑定过，不能只凭口令重绑。
       </p>
       <p v-if="otherMfa" class="form-hint mb-16">
         当前账号使用的是{{ mfaType === 'sms' ? '短信验证码' : 'UKey 证书' }}，不能在这里改绑动态令牌。如需更换，请联系管理员。
@@ -264,9 +274,13 @@ function close(): void {
 
       <div v-else-if="totpActive" class="form-grid single">
         <div class="form-item">
+          <label class="form-label">当前口令<span class="required">*</span></label>
+          <input v-model="totpPassword" class="input" type="password" autocomplete="current-password" />
+        </div>
+        <div class="form-item">
           <label class="form-label">动态口令或恢复码<span class="required">*</span></label>
           <input v-model="totpCode" class="input" maxlength="32" placeholder="6 位动态口令，或 XXXX-XXXX 恢复码" />
-          <span class="form-hint">{{ TOTP_CLOCK_HINT }} 解绑必须校验当前动态口令或未使用的恢复码。</span>
+          <span class="form-hint">{{ TOTP_CLOCK_HINT }} 解绑必须同时校验当前口令和动态口令或恢复码。解绑后不会变成仅口令登录。</span>
         </div>
       </div>
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/smx509"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"bastion.local/manager/internal/model"
@@ -675,6 +676,13 @@ type allowFactorGuard struct{}
 
 func (allowFactorGuard) AuthorizeFactorChange(context.Context, int64, int64, string, string) error {
 	return nil
+}
+
+func (allowFactorGuard) CommitFactorChange(_ context.Context, _, _ int64, _, _ string, mutate func(pgx.Tx) error) error {
+	if mutate == nil {
+		return nil
+	}
+	return mutate(nil)
 }
 
 func (allowFactorGuard) PrivilegedCertRevokeBlocked(context.Context, int64) (bool, error) {

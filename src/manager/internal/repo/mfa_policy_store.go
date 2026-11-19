@@ -71,6 +71,41 @@ func (s *MFAPolicyStore) InsertStepUp(ctx context.Context, row MFAStepUp) error 
 	return nil
 }
 
+// ConsumeAnd 在同一事务里消费证明并执行变更。变更失败时证明仍可用。
+func (s *MFAPolicyStore) ConsumeAnd(ctx context.Context, hash string, actor, target int64, action, factor string, fn func(tx pgx.Tx) error) error {
+	if s == nil || s.pool == nil {
+		return ErrStepUpRejected
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := consumeStepUpTx(ctx, tx, hash, actor, target, action, factor); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func consumeStepUpTx(ctx context.Context, tx pgx.Tx, hash string, actor, target int64, action, factor string) error {
+	tag, err := tx.Exec(ctx, `UPDATE sys_mfa_stepup
+		SET used_at = now()
+		WHERE proof_hash = $1 AND actor_id = $2 AND target_id = $3
+		  AND action = $4 AND factor = $5 AND kind = 'proof'
+		  AND used_at IS NULL AND expires_at > now()`,
+		hash, actor, target, action, factor)
+	if err != nil {
+		return fmt.Errorf("消费身份核验失败: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrStepUpRejected
+	}
+	return nil
+}
+
 // ConsumeStepUp 原子消费一条证明。并发时只有一方成功。
 func (s *MFAPolicyStore) ConsumeStepUp(ctx context.Context, hash string, actor, target int64, action, factor string) error {
 	if s == nil || s.pool == nil {

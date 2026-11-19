@@ -48,6 +48,7 @@ func (m *memAuthUsers) BindTOTP(_ context.Context, userID int64, secretCipher st
 	}
 	u.MFAEnabled = true
 	u.MFAType = "totp"
+	u.MFAFactorActivated = true
 	u.MFASecretCipher = secretCipher
 	u.MFATotpPending = false
 	stepCopy := step

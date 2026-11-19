@@ -283,13 +283,15 @@ func (s *Server) handleTOTPUnbind(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, errcode.New(errcode.ErrBadRequest, "解绑需要当前口令，以及当前动态口令或未使用的恢复码"))
 		return
 	}
-	if err := s.auth.UnbindTOTP(r.Context(), claims.UserID, req.Password, req.Code); err != nil {
+	proof, err := s.auth.UnbindTOTP(r.Context(), claims.UserID, req.Password, req.Code)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	httpx.OK(w, map[string]any{
-		"unbound": true,
-		"message": "动态令牌已解绑。账号仍指定动态令牌，不会退回仅口令登录；请重新绑定后再登录。恢复码已作废。",
+		"unbound":       true,
+		"step_up_proof": proof,
+		"message":       "动态令牌已解绑。账号仍指定动态令牌。请立即用返回的证明重新绑定；关闭后不能只凭口令再领一次。",
 	})
 }
 

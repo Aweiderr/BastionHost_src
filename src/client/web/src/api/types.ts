@@ -291,6 +291,8 @@ export interface UserPayload {
   password_expire_days?: number
   /** 第二因子类型；创建时可选，更新时为空表示不修改 */
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey'
+  /** 修改因子、手机号或新授予管理员角色时的一次性身份核验 */
+  step_up_proof?: string
 }
 
 export interface UserQuery extends PageQuery {
@@ -829,6 +831,7 @@ export interface UKeyExpiringCertsResult {
 }
 
 export interface UKeyRegisterPayload {
+  step_up_proof?: string
   user_id: number
   /** PEM 文本；中间件给的是 base64(DER)，需先转换 */
   cert_pem: string
@@ -838,6 +841,7 @@ export interface UKeyRegisterPayload {
 }
 
 export interface UKeyIssuePayload {
+  step_up_proof?: string
   user_id: number
   csr_pem: string
   common_name?: string
@@ -902,6 +906,7 @@ export interface UKeyCAStatus {
  * 证明"调用方持有对应私钥"，详见后端 IssueUserCertByPublicKey 的说明。
  */
 export interface UKeyIssueByPubkeyPayload {
+  step_up_proof?: string
   user_id: number
   challenge_id: string
   /** base64：65 字节未压缩点 04||X||Y / 64 字节 X||Y / SPKI DER 三者皆可 */

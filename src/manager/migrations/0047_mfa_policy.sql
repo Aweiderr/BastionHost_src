@@ -55,6 +55,19 @@ COMMENT ON TABLE audit_mfa_change IS
 CREATE INDEX IF NOT EXISTS idx_mfa_change_target
     ON audit_mfa_change (target_id, create_time DESC);
 
+-- 因子曾经生效过。解绑、吊销或清空手机号都不清除。
+-- 仅“从未指定且从未生效”的账号可以用口令换变更证明。
+ALTER TABLE sys_user ADD COLUMN IF NOT EXISTS mfa_factor_activated BOOLEAN NOT NULL DEFAULT false;
+
+COMMENT ON COLUMN sys_user.mfa_factor_activated IS
+    '第二因子曾经生效。true 后不能再只凭口令重新绑定或降级。初次指定但尚未确认的动态令牌保持 false。';
+
+UPDATE sys_user
+   SET mfa_factor_activated = true
+ WHERE mfa_factor_activated = false
+   AND mfa_type IN ('totp', 'sms', 'ukey')
+   AND mfa_enabled = true;
+
 INSERT INTO sys_config (tenant_id, config_key, config_value, value_type, category, description) VALUES
  (0, 'mfa.login.require_assigned_factor', 'false', 'bool', 'auth',
   '为 true 时，尚未指定 UKey/动态令牌/短信的账号不能只凭口令登录 Web 或桌面。默认 false，避免把现有账号锁在门外。打开前请先看就绪检查。'),

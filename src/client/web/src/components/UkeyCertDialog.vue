@@ -36,6 +36,7 @@ import {
 import type { UKeyCAStatus, UKeyCertRecord, UKeyCertSource, UKeyCertStatus } from '@/api/types'
 import Modal from '@/components/Modal.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { requestStepUp } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { formatTime } from '@/utils/format'
 import {
@@ -383,8 +384,15 @@ async function issueAndWrite(): Promise<void> {
     // 必须签服务端下发的 src_data 原样字符串：中间件把它当数据本身签
     const signature = await sign(ch.src_data, algTypeForCert(base64))
 
+    progressText.value = '正在确认操作者身份…'
+    const stepUpProof = await requestStepUp({
+      action: 'ukey_bind',
+      targetUserId: props.userId,
+      title: '确认是您本人在签发 UKey 证书',
+    })
     progressText.value = '正在签发证书…'
     const record = await issueUKeyCertByPubkey({
+      step_up_proof: stepUpProof,
       user_id: props.userId,
       challenge_id: ch.challenge_id,
       public_key: publicKey,
@@ -492,7 +500,13 @@ async function bindExisting(): Promise<void> {
     progressText.value = '正在提交证书…'
     // cert_source 由前端按颁发者自动判断，不让用户选
     const source = guessCertSource()
+    const stepUpProof = await requestStepUp({
+      action: 'ukey_bind',
+      targetUserId: props.userId,
+      title: '确认是您本人在绑定 UKey 证书',
+    })
     await registerUKeyCert({
+      step_up_proof: stepUpProof,
       user_id: props.userId,
       cert_pem: certPem.value,
       cert_source: source,
@@ -541,7 +555,12 @@ function openRevoke(cert: UKeyCertRecord): void {
 async function doRevoke(cert: UKeyCertRecord): Promise<void> {
   revokingId.value = cert.cert_id
   try {
-    await revokeUKeyCert(cert.cert_id, revokeReason.value.trim() || '管理员吊销')
+    const stepUpProof = await requestStepUp({
+      action: cert.cert_type === 'ca' ? 'ukey_ca_revoke' : 'ukey_revoke',
+      targetUserId: cert.cert_type === 'ca' ? 0 : props.userId,
+      title: '确认是您本人在吊销证书',
+    })
+    await revokeUKeyCert(cert.cert_id, revokeReason.value.trim() || '管理员吊销', stepUpProof)
     app.success('证书已吊销')
     revokeTargetId.value = null
     await load()

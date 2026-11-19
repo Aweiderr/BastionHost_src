@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
 	"bastion.local/shared/auth"
@@ -105,6 +107,24 @@ func (m *memoryStepUp) ConsumeProof(_ context.Context, hash string, actor, targe
 	}
 	if row.ActorID != actor || row.TargetID != target || row.Action != action || row.Factor != factor {
 		return repo.ErrStepUpRejected
+	}
+	row.Used = true
+	m.rows[hash] = row
+	return nil
+}
+
+func (m *memoryStepUp) commit(hash string, actor, target int64, action, factor string, fn func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[hash]
+	if !ok || row.Used || row.Kind != stepUpKindProof || time.Now().After(row.Expires) {
+		return repo.ErrStepUpRejected
+	}
+	if row.ActorID != actor || row.TargetID != target || row.Action != action || row.Factor != factor {
+		return repo.ErrStepUpRejected
+	}
+	if err := fn(); err != nil {
+		return err
 	}
 	row.Used = true
 	m.rows[hash] = row
@@ -301,15 +321,36 @@ func (s *AuthService) issueProof(ctx context.Context, actor, target int64, actio
 
 // ConsumeFactorProof 消费一条与操作者、目标、动作和因子都一致的证明。
 func (s *AuthService) ConsumeFactorProof(ctx context.Context, raw string, actor, target int64, action, factor string) error {
+	return s.CommitWithProof(ctx, raw, actor, target, action, factor, func(pgx.Tx) error { return nil })
+}
+
+// CommitWithProof 在证明仍有效时执行 mutate。mutate 失败则证明不被消费。
+// 数据库实现里，消费与 mutate 在同一个事务中，因此不会先记下成功再写失败。
+func (s *AuthService) CommitWithProof(ctx context.Context, raw string, actor, target int64, action, factor string, mutate func(tx pgx.Tx) error) error {
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	if raw == "" || mutate == nil {
 		return ErrStepUpRejected
 	}
-	err := s.ensureStepUp().ConsumeProof(ctx, hashStepUp(raw), actor, target, action, proofFactor(factor))
-	if err != nil {
+	factor = proofFactor(factor)
+	sum := hashStepUp(raw)
+	if db, ok := s.stepUps.(dbStepUpStore); ok {
+		return mapStepUpErr(db.store.ConsumeAnd(ctx, sum, actor, target, action, factor, mutate))
+	}
+	mem, ok := s.ensureStepUp().(*memoryStepUp)
+	if !ok {
 		return ErrStepUpRejected
 	}
-	return nil
+	return mapStepUpErr(mem.commit(sum, actor, target, action, factor, func() error { return mutate(nil) }))
+}
+
+func mapStepUpErr(err error) error {
+	if err == nil || errors.Is(err, ErrStepUpRejected) {
+		return err
+	}
+	if errors.Is(err, repo.ErrStepUpRejected) {
+		return ErrStepUpRejected
+	}
+	return err
 }
 
 // StepUpRequest 是管理员或用户为自己发起的新鲜身份核验。
@@ -376,8 +417,8 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		return nil, deny(reasonBadPassword)
 	}
 	if req.Action == auth.StepUpTOTPEnroll {
-		if req.TargetUserID != actor.UserID || auth.NormalizeFactor(actor.MFAType) != auth.FactorTOTP || totpView(actor).LoginRequiresTOTP() {
-			return nil, deny(reasonWrongTarget)
+		if req.TargetUserID != actor.UserID || !auth.TOTPPasswordEnroll(factorState(actor)) {
+			return nil, deny("totp_rebind_blocked")
 		}
 		raw, exp, err := s.issueProof(ctx, actor.UserID, actor.UserID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
 		if err != nil {
@@ -388,7 +429,7 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 	switch auth.NormalizeFactor(actor.MFAType) {
 	case auth.FactorTOTP:
 		if !totpView(actor).LoginRequiresTOTP() {
-			return s.bootstrapStepUp(ctx, actor, req, auditBase)
+			return nil, deny("totp_unavailable")
 		}
 		if strings.TrimSpace(req.TOTPCode) == "" {
 			return nil, deny(reasonFactorMismatch)
@@ -410,6 +451,9 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		}
 		return s.finishStepUpProof(ctx, actor, req)
 	case auth.FactorSMS:
+		if !smsutil.ValidPhone(smsutil.NormalizePhone(actor.Phone)) {
+			return nil, deny("factor_unavailable")
+		}
 		if strings.TrimSpace(req.SMSCode) == "" {
 			return s.startSMSStepUp(ctx, actor, req)
 		}
@@ -420,7 +464,25 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		}
 		return s.finishUKeyStepUp(ctx, actor, req)
 	default:
+		ok, why := auth.BootstrapEligible(factorState(actor))
+		if !ok {
+			return nil, deny(why)
+		}
+		if s.requireAssignedFactor(ctx) {
+			return nil, deny(reasonFactorNotAssigned)
+		}
 		return s.bootstrapStepUp(ctx, actor, req, auditBase)
+	}
+}
+
+func factorState(u *model.User) auth.FactorState {
+	if u == nil {
+		return auth.FactorState{}
+	}
+	return auth.FactorState{
+		Type: u.MFAType, Enabled: u.MFAEnabled,
+		HasSecret: strings.TrimSpace(u.MFASecretCipher) != "",
+		Pending:   u.MFATotpPending, Activated: u.MFAFactorActivated,
 	}
 }
 
@@ -428,7 +490,7 @@ func allowedStepUpAction(action string) bool {
 	switch action {
 	case auth.StepUpTOTPEnroll, auth.StepUpMFAAssign, auth.StepUpMFAPhone,
 		auth.StepUpGrantPrivileged, auth.StepUpUKeyBind, auth.StepUpUKeyRevoke, auth.StepUpUKeyCARevoke,
-		auth.StepUpEnforcement:
+		auth.StepUpEnforcement, auth.StepUpTOTPReopen:
 		return true
 	default:
 		return false
@@ -436,11 +498,6 @@ func allowedStepUpAction(action string) bool {
 }
 
 func (s *AuthService) bootstrapStepUp(ctx context.Context, actor *model.User, req StepUpRequest, auditBase repo.MFAAuditEvent) (*StepUpResult, error) {
-	if s.requireAssignedFactor(ctx) {
-		auditBase.Reason = reasonFactorNotAssigned
-		_ = s.auditMFA(ctx, auditBase)
-		return nil, ErrStepUpRejected
-	}
 	raw, exp, err := s.issueProof(ctx, actor.UserID, req.TargetUserID, req.Action, req.NewFactor)
 	if err != nil {
 		return nil, err
@@ -569,7 +626,21 @@ func (s *AuthService) finishUKeyStepUp(ctx context.Context, actor *model.User, r
 	return s.finishStepUpProof(ctx, actor, req)
 }
 
-// AuthorizeFactorChange 供用户证书绑定和吊销调用。
+// CommitFactorChange 把证书写入放进证明事务。写入失败时证明仍可再用。
+func (s *AuthService) CommitFactorChange(ctx context.Context, actor, target int64, action, proof string, mutate func(tx pgx.Tx) error) error {
+	if err := s.CommitWithProof(ctx, proof, actor, target, action, "", mutate); err != nil {
+		if errors.Is(err, ErrStepUpRejected) {
+			_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+				ActorID: actor, TargetID: target, Action: action,
+				Result: "denied", Reason: reasonMissingStepUp,
+			})
+		}
+		return err
+	}
+	return nil
+}
+
+// AuthorizeFactorChange 供只需要消费证明、没有额外写入的调用保留。
 func (s *AuthService) AuthorizeFactorChange(ctx context.Context, actor, target int64, action, proof string) error {
 	if err := s.ConsumeFactorProof(ctx, proof, actor, target, action, ""); err != nil {
 		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
@@ -581,11 +652,11 @@ func (s *AuthService) AuthorizeFactorChange(ctx context.Context, actor, target i
 	return nil
 }
 
-// PrivilegedCertRevokeBlocked 在约束已启用时，拒绝吊销管理员最后一张有效 UKey 证书。
+// PrivilegedCertRevokeBlocked 拒绝吊销会让管理员失去 UKey 的最后一张证书。
+//
+// 约束开启时，任何管理员档 UKey 账号都不能失去最后一张有效证书。
+// 约束关闭时，只拦住“最后一名仍能登录的管理员”。
 func (s *AuthService) PrivilegedCertRevokeBlocked(ctx context.Context, userID int64) (bool, error) {
-	if !s.privilegedUKeyEnforce(ctx) {
-		return false, nil
-	}
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil || u == nil {
 		return false, err
@@ -593,9 +664,29 @@ func (s *AuthService) PrivilegedCertRevokeBlocked(ctx context.Context, userID in
 	if auth.NormalizeFactor(u.MFAType) != auth.FactorUKey {
 		return false, nil
 	}
-	ok, err := s.userPrivileged(ctx, userID)
+	priv, err := s.userPrivileged(ctx, userID)
+	if err != nil || !priv {
+		return false, err
+	}
+	if s.privilegedUKeyEnforce(ctx) {
+		return true, nil
+	}
+	if s.mfaReady == nil {
+		return false, nil
+	}
+	others, err := s.userRepoCountPrivileged(ctx, userID)
 	if err != nil {
 		return false, err
 	}
-	return ok, nil
+	return others == 0, nil
+}
+
+func (s *AuthService) userRepoCountPrivileged(ctx context.Context, exclude int64) (int, error) {
+	counter, ok := s.userRepo.(interface {
+		CountUsablePrivilegedExcept(ctx context.Context, excludeID int64, requireAssigned bool) (int, error)
+	})
+	if !ok {
+		return 1, nil
+	}
+	return counter.CountUsablePrivilegedExcept(ctx, exclude, s.requireAssignedFactor(ctx))
 }

@@ -199,26 +199,26 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		t.Fatalf("网关口令登录在绑定后必须要求动态口令，得到 %v", err)
 	}
 
-	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, ""); err == nil {
+	if _, err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, ""); err == nil {
 		t.Fatal("空验证码不能解绑")
 	}
-	if err := svc.UnbindTOTP(ctx, 43, "", confirmed.RecoveryCodes[0]); err == nil {
+	if _, err := svc.UnbindTOTP(ctx, 43, "", confirmed.RecoveryCodes[0]); err == nil {
 		t.Fatal("没有口令不能解绑")
 	}
-	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, "000000"); !errors.Is(err, ErrMFAInvalid) {
+	if _, err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, "000000"); !errors.Is(err, ErrMFAInvalid) {
 		t.Fatalf("错误动态口令不能解绑，得到 %v", err)
 	}
-	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, "AAAA-BBBB"); !errors.Is(err, ErrMFAInvalid) {
+	if _, err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, "AAAA-BBBB"); !errors.Is(err, ErrMFAInvalid) {
 		t.Fatalf("错误恢复码不能解绑，得到 %v", err)
 	}
 	still, _ := users.snapshot("totp-bind")
 	if !still.MFAEnabled || still.MFAType != "totp" {
 		t.Fatal("失败的解绑不应改掉绑定状态")
 	}
-	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, confirmed.RecoveryCodes[0]); err != nil {
+	if _, err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, confirmed.RecoveryCodes[0]); err != nil {
 		t.Fatalf("恢复码应能自助解绑: %v", err)
 	}
-	if err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, confirmed.RecoveryCodes[1]); err == nil {
+	if _, err := svc.UnbindTOTP(ctx, 43, gatewayTestPassword, confirmed.RecoveryCodes[1]); err == nil {
 		t.Fatal("解绑后不能再用另一枚恢复码")
 	}
 	after, _ := users.snapshot("totp-bind")
@@ -226,8 +226,11 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		t.Fatalf("解绑后应清除种子并保持指定因子: %+v", after)
 	}
 	again, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.5"})
-	if err != nil || again.AccessToken != "" || !again.EnrollmentRequired {
-		t.Fatalf("解绑后应重新进入绑定而不是仅口令登录: %+v %v", again, err)
+	if again != nil && again.AccessToken != "" {
+		t.Fatalf("解绑后不能签发登录令牌: %+v", again)
+	}
+	if !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("曾确认过的动态令牌不能只凭口令重新绑定: %v", err)
 	}
 }
 
@@ -250,11 +253,16 @@ func TestTOTPUnbindAcceptsFreshCode(t *testing.T) {
 	if _, err := svc.ConfirmTOTPBinding(ctx, 44, nowCode, started.StepUpProof); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.UnbindTOTP(ctx, 44, gatewayTestPassword, nextCode); err != nil {
+	if _, err := svc.UnbindTOTP(ctx, 44, gatewayTestPassword, nextCode); err != nil {
 		t.Fatalf("未使用过的动态口令应能解绑: %v", err)
 	}
 	if _, _, _, err := svc.Authenticate(ctx, "unbind-otp", gatewayTestPassword, "", "10.2.0.1"); !errors.Is(err, ErrTOTPNotEnrolled) {
 		t.Fatalf("解绑后网关不能只凭口令通过: %v", err)
+	}
+	if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+		ActorID: 44, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign, TargetUserID: 44, NewFactor: auth.FactorSMS,
+	}); err == nil {
+		t.Fatal("已生效过的动态令牌丢失后不能改用口令换变更证明")
 	}
 }
 

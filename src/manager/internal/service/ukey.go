@@ -25,6 +25,7 @@ import (
 
 	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/smx509"
+	"github.com/jackc/pgx/v5"
 
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
@@ -656,9 +657,10 @@ type UKeyService struct {
 	factorGuard factorGuard
 }
 
-// factorGuard 由认证服务实现。证书写操作必须先消费一次性证明。
+// factorGuard 由认证服务实现。证书写入和证明消费在同一次提交里完成。
 type factorGuard interface {
 	AuthorizeFactorChange(ctx context.Context, actor, target int64, action, proof string) error
+	CommitFactorChange(ctx context.Context, actor, target int64, action, proof string, mutate func(tx pgx.Tx) error) error
 	PrivilegedCertRevokeBlocked(ctx context.Context, userID int64) (bool, error)
 }
 
@@ -670,11 +672,11 @@ func (s *UKeyService) SetFactorGuard(g factorGuard) {
 	s.factorGuard = g
 }
 
-func (s *UKeyService) authorizeCertChange(ctx context.Context, actor, target int64, action, proof string) error {
+func (s *UKeyService) commitCertChange(ctx context.Context, actor, target int64, action, proof string, mutate func(tx pgx.Tx) error) error {
 	if s == nil || s.factorGuard == nil {
 		return fmt.Errorf("证书变更缺少身份核验，已拒绝")
 	}
-	return s.factorGuard.AuthorizeFactorChange(ctx, actor, target, action, proof)
+	return s.factorGuard.CommitFactorChange(ctx, actor, target, action, proof, mutate)
 }
 
 // NewUKeyService 创建 UKey 服务。
@@ -1506,9 +1508,6 @@ func (s *UKeyService) authorizeRevoke(ctx context.Context, rec *repo.CertRecord,
 		return fmt.Errorf("证书不存在")
 	}
 	if rec.CertType == repo.CertTypeClient && rec.OwnerID != nil {
-		if err := s.authorizeCertChange(ctx, op.UserID, *rec.OwnerID, auth.StepUpUKeyRevoke, op.StepUpProof); err != nil {
-			return err
-		}
 		blocked, err := s.factorGuard.PrivilegedCertRevokeBlocked(ctx, *rec.OwnerID)
 		if err != nil {
 			return err
@@ -1519,12 +1518,12 @@ func (s *UKeyService) authorizeRevoke(ctx context.Context, rec *repo.CertRecord,
 				return err
 			}
 			if n <= 1 {
-				return fmt.Errorf("UKey 约束已启用，不能吊销管理员最后一张仍有效的证书")
+				return fmt.Errorf("不能吊销这名管理员最后一张有效 UKey 证书，否则没有管理员能继续登录或满足 UKey 约束")
 			}
 		}
 		return nil
 	}
-	return s.authorizeCertChange(ctx, op.UserID, 0, auth.StepUpUKeyCARevoke, op.StepUpProof)
+	return nil
 }
 
 func creatorID(op OperatorContext) *int64 {
@@ -1571,9 +1570,6 @@ func (s *UKeyService) RegisterCert(ctx context.Context, req RegisterCertRequest,
 	u, err := s.users.GetByID(ctx, req.UserID)
 	if err != nil || u == nil {
 		return nil, fmt.Errorf("用户不存在")
-	}
-	if err := s.authorizeCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof)); err != nil {
-		return nil, err
 	}
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法绑定证书", u.Username)
@@ -1664,7 +1660,9 @@ func (s *UKeyService) RegisterCert(ctx context.Context, req RegisterCertRequest,
 		Remark:          remark,
 		UnverifiedChain: !chainVerified,
 	}
-	if err := s.certs.Create(ctx, rec); err != nil {
+	if err := s.commitCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof), func(pgx.Tx) error {
+		return s.certs.Create(ctx, rec)
+	}); err != nil {
 		return nil, err
 	}
 	detail := fmt.Sprintf("%s 绑定证书 %s（序列号 %s，来源 %s）", u.Username, name, id.SerialNumber, source)
@@ -1898,7 +1896,15 @@ func (s *UKeyService) RevokeCert(ctx context.Context, certID int64, reason strin
 	if strings.TrimSpace(reason) == "" {
 		reason = "管理员吊销证书"
 	}
-	if err := s.certs.Revoke(ctx, certID, reason); err != nil {
+	action := auth.StepUpUKeyCARevoke
+	target := int64(0)
+	if rec.CertType == repo.CertTypeClient && rec.OwnerID != nil {
+		action = auth.StepUpUKeyRevoke
+		target = *rec.OwnerID
+	}
+	if err := s.commitCertChange(ctx, op.UserID, target, action, op.StepUpProof, func(pgx.Tx) error {
+		return s.certs.Revoke(ctx, certID, reason)
+	}); err != nil {
 		return nil, err
 	}
 	rec.Status = repo.CertStatusRevoked
@@ -1957,9 +1963,6 @@ func (s *UKeyService) IssueUserCert(ctx context.Context, req IssueUserCertReques
 	if err != nil || u == nil {
 		return nil, fmt.Errorf("用户不存在")
 	}
-	if err := s.authorizeCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof)); err != nil {
-		return nil, err
-	}
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法签发证书", u.Username)
 	}
@@ -2012,7 +2015,9 @@ func (s *UKeyService) IssueUserCert(ctx context.Context, req IssueUserCertReques
 		OwnerID: &ownerID, OwnerType: ukeyUserOwnerType,
 		CertSource: repo.CertSourceInternal, CreateBy: creatorID(op), Remark: req.Remark,
 	}
-	if err := s.certs.Create(ctx, rec); err != nil {
+	if err := s.commitCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof), func(pgx.Tx) error {
+		return s.certs.Create(ctx, rec)
+	}); err != nil {
 		return nil, err
 	}
 	s.writeOpLog(ctx, op, "issue", "ukey_cert", fmt.Sprint(rec.CertID),
@@ -2071,9 +2076,6 @@ func (s *UKeyService) IssueUserCertByPublicKey(ctx context.Context, req IssueByP
 	u, err := s.users.GetByID(ctx, req.UserID)
 	if err != nil || u == nil {
 		return nil, fmt.Errorf("用户不存在")
-	}
-	if err := s.authorizeCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof)); err != nil {
-		return nil, err
 	}
 	if u.Status != "active" {
 		return nil, fmt.Errorf("用户 %s 已停用，无法签发证书", u.Username)
@@ -2181,7 +2183,9 @@ func (s *UKeyService) IssueUserCertByPublicKey(ctx context.Context, req IssueByP
 		OwnerID: &ownerID, OwnerType: ukeyUserOwnerType,
 		CertSource: repo.CertSourceInternal, CreateBy: creatorID(op), Remark: req.Remark,
 	}
-	if err := s.certs.Create(ctx, rec); err != nil {
+	if err := s.commitCertChange(ctx, op.UserID, req.UserID, auth.StepUpUKeyBind, firstProof(op.StepUpProof, req.StepUpProof), func(pgx.Tx) error {
+		return s.certs.Create(ctx, rec)
+	}); err != nil {
 		return nil, err
 	}
 	// 消费挑战：一次性，防同一份持有证明被反复用来签发证书

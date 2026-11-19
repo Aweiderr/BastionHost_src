@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
 	"bastion.local/shared/auth"
 )
@@ -114,6 +117,117 @@ func TestStepUpRejectsReplayWrongTargetAndStale(t *testing.T) {
 		ActorID: actor.UserID, Password: "wrong", Action: auth.StepUpMFAAssign, TargetUserID: 77, NewFactor: auth.FactorSMS,
 	}); !errors.Is(err, ErrStepUpRejected) {
 		t.Fatalf("口令错误不能签发证明: %v", err)
+	}
+}
+
+func TestPasswordBootstrapRejectsAssignedButUnusableFactors(t *testing.T) {
+	secretUsers := func(id int64, name, factor string, enabled bool) *model.User {
+		u := hashedUser(t, id, name, factor, enabled)
+		return u
+	}
+	ctx := context.Background()
+
+	t.Run("never enrolled", func(t *testing.T) {
+		users := &memAuthUsers{}
+		users.add(secretUsers(1, "fresh", "none", false))
+		svc, _, _ := newTOTPAuth(t, users)
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 1, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
+			TargetUserID: 9, NewFactor: auth.FactorTOTP,
+		})
+		if err != nil || res.Proof == "" {
+			t.Fatal(err)
+		}
+	})
+	t.Run("totp not confirmed cannot reassign", func(t *testing.T) {
+		users := &memAuthUsers{}
+		u := secretUsers(2, "preset", "totp", false)
+		users.add(u)
+		svc, _, _ := newTOTPAuth(t, users)
+		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 2, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
+			TargetUserID: 2, NewFactor: auth.FactorSMS,
+		}); err == nil {
+			t.Fatal("未确认的动态令牌不能只凭口令改因子")
+		}
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 2, Password: gatewayTestPassword, Action: auth.StepUpTOTPEnroll, TargetUserID: 2,
+		})
+		if err != nil || res.Proof == "" {
+			t.Fatalf("初次绑定应允许口令证明: %v", err)
+		}
+	})
+	t.Run("confirmed totp then cleared", func(t *testing.T) {
+		users := &memAuthUsers{}
+		u := secretUsers(3, "was", "totp", false)
+		u.MFAFactorActivated = true
+		users.add(u)
+		svc, _, _ := newTOTPAuth(t, users)
+		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 3, Password: gatewayTestPassword, Action: auth.StepUpTOTPEnroll, TargetUserID: 3,
+		}); err == nil {
+			t.Fatal("曾生效的动态令牌不能只凭口令重绑")
+		}
+	})
+	t.Run("sms without phone", func(t *testing.T) {
+		users := &memAuthUsers{}
+		u := secretUsers(4, "sms", "sms", true)
+		u.Phone = ""
+		users.add(u)
+		svc, _, _ := newTOTPAuth(t, users)
+		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 4, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
+			TargetUserID: 4, NewFactor: auth.FactorTOTP,
+		}); err == nil {
+			t.Fatal("短信因子没有手机号时不能退回口令")
+		}
+	})
+	t.Run("ukey without module", func(t *testing.T) {
+		users := &memAuthUsers{}
+		users.add(secretUsers(5, "ukey", "ukey", false))
+		svc, _, _ := newTOTPAuth(t, users)
+		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 5, Password: gatewayTestPassword, Action: auth.StepUpUKeyBind, TargetUserID: 8,
+		}); err == nil {
+			t.Fatal("已指定 UKey 时不能只凭口令核验")
+		}
+	})
+	t.Run("inconsistent none", func(t *testing.T) {
+		users := &memAuthUsers{}
+		u := secretUsers(6, "dirty", "none", false)
+		u.MFAFactorActivated = true
+		users.add(u)
+		svc, _, _ := newTOTPAuth(t, users)
+		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 6, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
+			TargetUserID: 6, NewFactor: auth.FactorSMS,
+		}); err == nil {
+			t.Fatal("类型为空但曾生效的账号不能口令引导")
+		}
+	})
+}
+
+func TestProofNotConsumedWhenMutationFails(t *testing.T) {
+	users := &memAuthUsers{}
+	users.add(hashedUser(t, 8, "fresh", "none", false))
+	svc, _, _ := newTOTPAuth(t, users)
+	res, err := svc.BeginStepUp(context.Background(), StepUpRequest{
+		ActorID: 8, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
+		TargetUserID: 1, NewFactor: auth.FactorUKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("state write failed")
+	if err := svc.CommitWithProof(context.Background(), res.Proof, 8, 1, auth.StepUpMFAAssign, auth.FactorUKey, func(pgx.Tx) error {
+		return boom
+	}); !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	if err := svc.CommitWithProof(context.Background(), res.Proof, 8, 1, auth.StepUpMFAAssign, auth.FactorUKey, func(pgx.Tx) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("失败的写入不应消费证明: %v", err)
 	}
 }
 

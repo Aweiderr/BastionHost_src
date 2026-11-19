@@ -32,6 +32,9 @@ const (
 	StepUpUKeyRevoke      = "ukey_revoke"
 	StepUpUKeyCARevoke    = "ukey_ca_revoke"
 	StepUpEnforcement     = "mfa_enforcement"
+	// StepUpTOTPReopen 由管理员核验自己的因子后，允许目标用户重新做一次初次绑定。
+	// 不能由目标用户只凭口令发起。
+	StepUpTOTPReopen = "totp_reopen"
 )
 
 // NormalizeFactor 把第二因子归一成 none / totp / sms / ukey。
@@ -103,14 +106,53 @@ type LoginOutcome struct {
 	DenyReason string
 }
 
+// FactorState 是判断“能不能只凭口令核验”所需的账号状态。
+//
+// Activated 表示这个因子曾经真正生效过（动态令牌确认过，或短信/UKey 已被指定为可用因子）。
+// 解绑或证书吊销不会把它清掉。
+type FactorState struct {
+	Type      string
+	Enabled   bool
+	HasSecret bool
+	Pending   bool
+	Activated bool
+}
+
+// BootstrapEligible 只允许“从未指定过因子”的账号用口令换变更证明。
+//
+// 返回的原因码：
+//   - 空字符串且 ok：可以。mfa_type=none，且没有启用标志、种子、待确认种子或曾生效标记。
+//   - factor_assigned：已经指定了 totp / sms / ukey。材料丢失、过期、吊销或尚未确认都不在此列。
+//   - factor_state_inconsistent：类型是 none，但启用标志、种子或曾生效标记仍在。拒绝，不降级。
+func BootstrapEligible(st FactorState) (bool, string) {
+	inconsistent := st.Enabled || st.HasSecret || st.Pending || st.Activated
+	if NormalizeFactor(st.Type) != FactorNone {
+		return false, "factor_assigned"
+	}
+	if inconsistent {
+		return false, "factor_state_inconsistent"
+	}
+	return true, ""
+}
+
+// TOTPPasswordEnroll 表示管理员刚指定动态令牌、用户还从没确认过种子。
+//
+// 只有这时，口令登录可以发一次性绑定证明。曾经确认过再解绑的账号返回 false。
+func TOTPPasswordEnroll(st FactorState) bool {
+	if NormalizeFactor(st.Type) != FactorTOTP || st.Activated {
+		return false
+	}
+	ready := st.HasSecret && st.Enabled && !st.Pending
+	return !ready
+}
+
 // DecideLogin 决定口令已经正确时，Web 与桌面能不能拿到会话。
 //
-// factor 是账号上指定的因子，不是客户端当场选择的。
-// totpReady 只在种子已经确认时为 true。
-// ukeyEnforce 打开后，管理员档账号必须是 UKey，否则拒绝。
-// requireAssigned 打开后，尚未指定因子的账号不能只凭口令登录。
-// 两个开关默认都应关闭：现有账号不会被改写，也不会因为打开代码就被锁在门外。
-func DecideLogin(factor string, totpReady, privileged, ukeyEnforce, requireAssigned bool) LoginOutcome {
+// factor 是账号上指定的因子，不是客户端当场选择的。mfa_enabled=false 不会把已指定的
+// 短信或 UKey 退回仅口令。totpReady 只在种子已经确认时为 true。
+// ukeyEnforce 与 requireAssigned 默认关闭：关闭时不拒绝“尚未指定因子”的旧账号，
+// 也不强迫已有管理员改用 UKey。这两个开关关闭不等于已指定因子可以跳过。
+func DecideLogin(factor string, totpReady, totpActivated, privileged, ukeyEnforce, requireAssigned bool) LoginOutcome {
 	factor = NormalizeFactor(factor)
 	if privileged && ukeyEnforce && factor != FactorUKey {
 		return LoginOutcome{DenyReason: "privileged_ukey_required"}
@@ -124,9 +166,12 @@ func DecideLogin(factor string, totpReady, privileged, ukeyEnforce, requireAssig
 		if totpReady {
 			return LoginOutcome{IssueSession: true}
 		}
+		if totpActivated {
+			return LoginOutcome{DenyReason: "totp_rebind_blocked"}
+		}
 		return LoginOutcome{Enrollment: true}
 	default:
-		if requireAssigned {
+		if requireAssigned || totpActivated {
 			return LoginOutcome{DenyReason: "factor_not_assigned"}
 		}
 		return LoginOutcome{IssueSession: true}

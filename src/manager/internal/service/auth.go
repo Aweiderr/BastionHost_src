@@ -321,7 +321,7 @@ func loginDenyError(reason string) error {
 	switch reason {
 	case reasonPrivilegedDenied:
 		return ErrPrivilegedUKeyRequired
-	case reasonTOTPNotEnrolled:
+	case reasonTOTPNotEnrolled, "totp_rebind_blocked":
 		return ErrTOTPNotEnrolled
 	default:
 		return ErrFactorRequired
@@ -340,7 +340,7 @@ func (s *AuthService) rejectLoginPolicy(ctx context.Context, u *model.User, clie
 	if err != nil {
 		return err
 	}
-	outcome := auth.DecideLogin(u.MFAType, totpView(u).LoginRequiresTOTP(), priv,
+	outcome := auth.DecideLogin(u.MFAType, totpView(u).LoginRequiresTOTP(), u.MFAFactorActivated, priv,
 		s.privilegedUKeyEnforce(ctx), s.requireAssignedFactor(ctx))
 	if outcome.DenyReason == "" && !(gateway && outcome.Enrollment) {
 		return nil
@@ -516,7 +516,7 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 	if perr != nil {
 		return nil, perr
 	}
-	outcome := auth.DecideLogin(u.MFAType, totpView(u).LoginRequiresTOTP(), priv,
+	outcome := auth.DecideLogin(u.MFAType, totpView(u).LoginRequiresTOTP(), u.MFAFactorActivated, priv,
 		s.privilegedUKeyEnforce(ctx), s.requireAssignedFactor(ctx))
 	if outcome.DenyReason != "" {
 		entry.Result, entry.FailReason = "fail", outcome.DenyReason
@@ -541,6 +541,11 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 		return s.issueUKeyChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
 	}
 	if outcome.Enrollment {
+		if !auth.TOTPPasswordEnroll(factorState(u)) {
+			entry.Result, entry.FailReason = "fail", "totp_rebind_blocked"
+			s.writeLoginLog(ctx, entry)
+			return nil, ErrTOTPNotEnrolled
+		}
 		raw, exp, err := s.issueProof(ctx, u.UserID, u.UserID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
 		if err != nil {
 			return nil, err
@@ -1495,17 +1500,17 @@ func (s *AuthService) ConfirmTOTPBinding(ctx context.Context, userID int64, code
 // 解绑后指定因子仍是 totp，种子被清除，不能改成仅口令登录。
 // 恢复码仍然只用一次；用过的时间片不能再登录。丢失认证器且没有未过期会话时，
 // 恢复码不能代替登录，需要管理员在核验自己的因子后重新发起绑定。
-func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, password, code string) error {
+func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, password, code string) (string, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return fmt.Errorf("解绑需要当前动态口令或未使用的恢复码")
+		return "", fmt.Errorf("解绑需要当前动态口令或未使用的恢复码")
 	}
 	if strings.TrimSpace(password) == "" {
-		return fmt.Errorf("解绑需要当前口令")
+		return "", fmt.Errorf("解绑需要当前口令")
 	}
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !auth.VerifyPassword(password, u.PasswordHash, u.PasswordSalt) {
 		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
@@ -1513,53 +1518,67 @@ func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, password, co
 			Action: "totp_unbind", OldMethod: auth.NormalizeFactor(u.MFAType),
 			Result: "denied", Reason: reasonBadPassword,
 		})
-		return ErrInvalidCredential
+		return "", ErrInvalidCredential
 	}
 	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventUnbind); err != nil {
-		return err
+		return "", err
 	}
+	cleared := false
+	reason := "totp_unbound"
 	if totpCodeLooksLikeDigits(code) {
 		secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
 		if err != nil {
-			return err
+			return "", err
 		}
 		ok, step := auth.MatchTOTP(secret, code, auth.TOTPAlgoSHA1, time.Now())
 		if ok {
 			if u.MFATotpLastStep != nil && step <= *u.MFATotpLastStep {
-				return ErrMFAInvalid
+				return "", ErrMFAInvalid
 			}
 			if err := s.userRepo.ClearTOTP(ctx, userID, 0); err != nil {
-				return err
+				return "", err
 			}
-			return s.auditMFA(ctx, repo.MFAAuditEvent{
-				ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
-				Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
-				Result: "success", Reason: "totp_unbound",
-			})
+			cleared = true
 		}
 	}
-	if hash, ok := auth.HashRecoveryCode(code); ok {
+	if !cleared {
+		hash, ok := auth.HashRecoveryCode(code)
+		if !ok {
+			return "", ErrMFAInvalid
+		}
 		rows, err := s.userRepo.ListUnusedRecovery(ctx, userID)
 		if err != nil {
-			return err
+			return "", err
 		}
+		matched := false
 		for _, row := range rows {
-			if auth.RecoveryHashEqual(hash, row.CodeHash) {
-				if err := s.userRepo.ClearTOTP(ctx, userID, row.ID); err != nil {
-					if errors.Is(err, repo.ErrRecoveryCodeUsed) {
-						return ErrMFAInvalid
-					}
-					return err
-				}
-				return s.auditMFA(ctx, repo.MFAAuditEvent{
-					ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
-					Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
-					Result: "success", Reason: "recovery_code_unbound",
-				})
+			if !auth.RecoveryHashEqual(hash, row.CodeHash) {
+				continue
 			}
+			if err := s.userRepo.ClearTOTP(ctx, userID, row.ID); err != nil {
+				if errors.Is(err, repo.ErrRecoveryCodeUsed) {
+					return "", ErrMFAInvalid
+				}
+				return "", err
+			}
+			matched = true
+			reason = "recovery_code_unbound"
+			break
+		}
+		if !matched {
+			return "", ErrMFAInvalid
 		}
 	}
-	return ErrMFAInvalid
+	if err := s.auditMFA(ctx, repo.MFAAuditEvent{
+		ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+		Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
+		Result: "success", Reason: reason,
+	}); err != nil {
+		return "", err
+	}
+	// 刚刚验证过当前因子。只发一张重新绑定证明；之后的口令登录不能再领。
+	raw, _, err := s.issueProof(ctx, userID, userID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
+	return raw, err
 }
 
 func totpCodeLooksLikeDigits(code string) bool {

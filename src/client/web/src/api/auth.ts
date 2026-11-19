@@ -86,17 +86,55 @@ export function logout() {
   return request<Record<string, unknown>>('/auth/logout', { method: 'POST', silent: true })
 }
 
-/** 开始绑定 TOTP，返回密钥与 otpauth 地址 */
-export function totpStart() {
-  return request<TotpStartResult>('/auth/totp/start', { method: 'POST' })
+/** 开始绑定 TOTP。stepUpProof 是口令核验或解绑成功后的一次性证明。 */
+export function totpStart(stepUpProof: string) {
+  return request<TotpStartResult>('/auth/totp/start', {
+    method: 'POST',
+    body: { step_up_proof: stepUpProof },
+  })
 }
 
 /** 确认 TOTP 绑定，返回恢复码 */
-export function totpConfirm(code: string) {
-  return request<TotpConfirmResult>('/auth/totp/confirm', { method: 'POST', body: { code } })
+export function totpConfirm(code: string, stepUpProof: string) {
+  return request<TotpConfirmResult>('/auth/totp/confirm', {
+    method: 'POST',
+    body: { code, step_up_proof: stepUpProof },
+  })
 }
 
-/** 解绑 TOTP */
-export function totpUnbind(code: string) {
-  return request<Record<string, unknown>>('/auth/totp/unbind', { method: 'POST', body: { code } })
+/** 解绑 TOTP。需要当前口令，以及动态口令或恢复码。 */
+export function totpUnbind(password: string, code: string) {
+  return request<{ unbound?: boolean; step_up_proof?: string; message?: string }>('/auth/totp/unbind', {
+    method: 'POST',
+    body: { password, code },
+  })
+}
+
+export interface StepUpResult {
+  step_up_proof?: string
+  step_up_expires?: string
+  action?: string
+  mfa_required?: boolean
+  mfa_type?: string
+  challenge_id?: string
+  sign_data?: string
+  src_data?: string
+  phone_masked?: string
+  mfa_hint?: string
+}
+
+/** 为一次 MFA 变更领取一次性证明。访问令牌不够，还要口令和当前因子。 */
+export function beginStepUp(body: {
+  password: string
+  totp_code?: string
+  sms_code?: string
+  challenge_id?: string
+  cert?: string
+  src_data?: string
+  signature?: string
+  action: string
+  target_user_id: number
+  new_factor?: string
+}) {
+  return request<StepUpResult>('/auth/mfa/step-up', { method: 'POST', body })
 }

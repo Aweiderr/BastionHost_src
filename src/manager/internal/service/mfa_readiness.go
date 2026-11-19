@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"bastion.local/manager/internal/repo"
 	"bastion.local/shared/auth"
 )
@@ -111,8 +113,9 @@ func readinessBlockers(u repo.ReadinessUser) []MFABlocker {
 // SetMFAEnforcement 修改两个强制开关。
 //
 // 打开之前必须没有对应的阻断项。关闭不检查。不会改写任何账号。
-func (s *AuthService) SetMFAEnforcement(ctx context.Context, requireAssigned, privilegedUKey *bool, actorID int64) (*MFAReadiness, error) {
-	if s == nil || s.mfaReady == nil || s.configRepo == nil {
+// proof 是操作者自己的一次性核验；消费和配置写入在同一事务里，失败不记成功。
+func (s *AuthService) SetMFAEnforcement(ctx context.Context, requireAssigned, privilegedUKey *bool, actorID int64, proof, actorName, clientIP string) (*MFAReadiness, error) {
+	if s == nil || s.mfaReady == nil {
 		return nil, fmt.Errorf("因子策略配置未启用")
 	}
 	ready, err := s.MFAReadiness(ctx)
@@ -120,26 +123,51 @@ func (s *AuthService) SetMFAEnforcement(ctx context.Context, requireAssigned, pr
 		return nil, err
 	}
 	if requireAssigned != nil && *requireAssigned && !ready.CanRequireAssignedFactor {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: actorID, ActorName: actorName, TargetID: actorID, Action: auth.StepUpEnforcement,
+			Result: "denied", Reason: "readiness_blocked", ClientIP: clientIP,
+		})
 		return ready, fmt.Errorf("还有账号没有可用的第二因子，不能打开 mfa.login.require_assigned_factor")
 	}
 	if privilegedUKey != nil && *privilegedUKey && !ready.CanEnforcePrivilegedUKey {
+		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+			ActorID: actorID, ActorName: actorName, TargetID: actorID, Action: auth.StepUpEnforcement,
+			Result: "denied", Reason: "readiness_blocked", ClientIP: clientIP,
+		})
 		return ready, fmt.Errorf("还有管理员不是可用的 UKey，不能打开 mfa.privileged.ukey_enforce")
 	}
-	setter, ok := s.configRepo.(interface {
-		Set(ctx context.Context, tenantID int64, key, value string, operatorID int64) error
+	err = s.CommitWithProof(ctx, proof, actorID, actorID, auth.StepUpEnforcement, "", func(tx pgx.Tx) error {
+		if tx == nil {
+			return fmt.Errorf("策略开关需要可事务提交的核验存储")
+		}
+		if requireAssigned != nil {
+			if err := setConfigTx(ctx, tx, cfgRequireAssignedFactor, strconv.FormatBool(*requireAssigned), actorID); err != nil {
+				return err
+			}
+		}
+		if privilegedUKey != nil {
+			if err := setConfigTx(ctx, tx, cfgPrivilegedUKeyEnforce, strconv.FormatBool(*privilegedUKey), actorID); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO audit_mfa_change
+			(actor_id, actor_name, target_id, target_name, action, old_method, new_method, result, reason, client_ip)
+			VALUES ($1,$2,$1,'', $3, '', '', 'success', 'enforcement_updated', $4)`,
+			actorID, actorName, auth.StepUpEnforcement, clientIP)
+		return err
 	})
-	if !ok {
-		return nil, fmt.Errorf("当前配置存储不能写入策略开关")
-	}
-	if requireAssigned != nil {
-		if err := setter.Set(ctx, 0, cfgRequireAssignedFactor, strconv.FormatBool(*requireAssigned), actorID); err != nil {
-			return nil, err
-		}
-	}
-	if privilegedUKey != nil {
-		if err := setter.Set(ctx, 0, cfgPrivilegedUKeyEnforce, strconv.FormatBool(*privilegedUKey), actorID); err != nil {
-			return nil, err
-		}
+	if err != nil {
+		return ready, err
 	}
 	return s.MFAReadiness(ctx)
+}
+
+func setConfigTx(ctx context.Context, tx pgx.Tx, key, value string, operatorID int64) error {
+	_, err := tx.Exec(ctx, `INSERT INTO sys_config
+		(tenant_id, config_key, config_value, value_type, category, update_by, update_time)
+		VALUES (0,$1,$2,'bool','auth',$3,now())
+		ON CONFLICT (tenant_id, config_key)
+		DO UPDATE SET config_value=EXCLUDED.config_value, update_by=EXCLUDED.update_by, update_time=now()`,
+		key, value, operatorID)
+	return err
 }

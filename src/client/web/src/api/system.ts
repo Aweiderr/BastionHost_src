@@ -21,6 +21,37 @@ export function getSystemConfig() {
   return request<{ items: SystemConfigItem[] }>('/system/config')
 }
 
+export interface MFABlocker {
+  user_id: number
+  username: string
+  factor: string
+  reason: string
+  blocks_require_assigned_factor: boolean
+  blocks_privileged_ukey: boolean
+}
+
+export interface MFAReadiness {
+  require_assigned_factor: boolean
+  privileged_ukey_enforce: boolean
+  can_require_assigned_factor: boolean
+  can_enforce_privileged_ukey: boolean
+  blockers: MFABlocker[]
+  privileged_roles: string[]
+  privileged_level: number
+}
+
+export function getMFAReadiness() {
+  return request<MFAReadiness>('/system/mfa/readiness')
+}
+
+export function setMFAEnforcement(body: {
+  require_assigned_factor?: boolean
+  privileged_ukey_enforce?: boolean
+  step_up_proof: string
+}) {
+  return request<MFAReadiness>('/system/mfa/enforcement', { method: 'POST', body })
+}
+
 /** 密码服务自检 */
 export function runCryptoSelfTest() {
   return request<CryptoSelfTestResult>('/system/crypto/selftest')

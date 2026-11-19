@@ -193,6 +193,12 @@ async function submit(): Promise<void> {
       captchaNeeded.value ? { id: captchaId.value, code: captchaCode.value.trim() } : undefined,
     )
 
+    // 已指定动态令牌但还没绑定：没有令牌，也不能当成短信挑战。
+    if (result.enrollment_required) {
+      errorText.value = result.mfa_hint || '动态令牌尚未绑定，本次未登录'
+      return
+    }
+
     // 需要第二因子：打开弹窗，此时还没有令牌
     if (result.mfa_required) {
       // UKey 与短信、TOTP 是同一层级的第二因子，但校验方式完全不同：

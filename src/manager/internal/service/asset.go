@@ -87,6 +87,8 @@ type OperatorContext struct {
 	UserID   int64
 	Username string
 	ClientIP string
+	// StepUpProof 是修改第二因子或用户证书绑定时的一次性身份核验。
+	StepUpProof string
 }
 
 // ---------- 资产 ----------

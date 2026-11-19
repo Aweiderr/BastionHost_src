@@ -160,10 +160,10 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	httpx.OK(w, map[string]any{
-		"user_id":             id,
-		"temporary_password":  tempPwd,
+		"user_id":              id,
+		"temporary_password":   tempPwd,
 		"must_change_password": true,
-		"warning":             "临时口令仅显示一次，请通过安全渠道转交用户；本次重置已记入审计日志",
+		"warning":              "临时口令仅显示一次，请通过安全渠道转交用户；本次重置已记入审计日志",
 	})
 }
 
@@ -195,13 +195,14 @@ func (s *Server) handleAssignUserRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Roles []string `json:"roles"`
+		Roles       []string `json:"roles"`
+		StepUpProof string   `json:"step_up_proof"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	if err := s.user.AssignUserRoles(r.Context(), id, req.Roles, operatorFrom(r)); err != nil {
+	if err := s.user.AssignUserRoles(r.Context(), id, req.Roles, operatorFrom(r), req.StepUpProof); err != nil {
 		writeServiceError(w, err)
 		return
 	}

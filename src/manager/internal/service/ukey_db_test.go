@@ -14,6 +14,7 @@ import (
 
 	"github.com/emmansun/gmsm/sm2"
 	"github.com/emmansun/gmsm/smx509"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"bastion.local/manager/internal/model"
@@ -78,6 +79,7 @@ func TestUKeyServiceDatabaseFlow(t *testing.T) {
 	certRepo := repo.NewCertRepo(pool)
 	challengeRepo := repo.NewChallengeRepo(pool)
 	svc := NewUKeyService(certRepo, challengeRepo, userRepo, configRepo, prov, nil)
+	svc.SetFactorGuard(allowFactorGuard{})
 	// 操作人先占位，创建测试用户后再指向真实 user_id：
 	// create_by 要能被 sys_user 联表解出用户名，测试用户正是为此准备的。
 	op := OperatorContext{ClientIP: "127.0.0.1"}
@@ -667,4 +669,22 @@ func TestUKeyServiceDatabaseFlow(t *testing.T) {
 	if _, err := svc.Challenge(ctx, ch11.ChallengeID); !errors.Is(err, ErrUKeyChallengeConsumed) {
 		t.Fatalf("已消费挑战应为 ErrUKeyChallengeConsumed，实际 %v", err)
 	}
+}
+
+// allowFactorGuard 只给证书链路集成测试用，不代表生产可以跳过核验。
+type allowFactorGuard struct{}
+
+func (allowFactorGuard) AuthorizeFactorChange(context.Context, int64, int64, string, string) error {
+	return nil
+}
+
+func (allowFactorGuard) CommitFactorChange(_ context.Context, _, _ int64, _, _ string, mutate func(pgx.Tx) error) error {
+	if mutate == nil {
+		return nil
+	}
+	return mutate(nil)
+}
+
+func (allowFactorGuard) PrivilegedCertRevokeBlocked(context.Context, int64) (bool, error) {
+	return false, nil
 }

@@ -398,6 +398,8 @@ func main() {
 		ukeySvc.SetKeyRepo(keyRepo)
 		ukeySvc.SetLoginLogRepo(loginLogRepo)
 		authSvc.SetUKeyService(ukeySvc)
+		authSvc.SetMFAPolicyStore(repo.NewMFAPolicyStore(pool))
+		ukeySvc.SetFactorGuard(authSvc)
 		// 管理节点也让自己在集群里可见：集群界面上的"管理节点 N 个"
 		// 需要有依据，否则运维看不出管理面是单点还是多活
 		go runManagerHeartbeat(ctx, nodeSvc, cfg)

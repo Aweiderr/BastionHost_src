@@ -3,8 +3,11 @@ import { computed, onMounted, ref } from 'vue'
 import {
   getSelftestHistory,
   getSelftestLatest,
+  getMFAReadiness,
   getSystemConfig,
   getSystemInfo,
+  setMFAEnforcement,
+  type MFAReadiness,
   runSelftest,
   type SelftestBrief,
   type SelftestResult,
@@ -13,6 +16,7 @@ import type { SystemConfigItem, SystemInfo } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { requestStepUp } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
@@ -27,6 +31,33 @@ const auth = useAuthStore()
  * 而本页其余内容（版本、指标、服务状态、自检）本来对他们开放。
  */
 const canReadConfig = computed(() => auth.has('system:config:read'))
+const canWriteConfig = computed(() => auth.has('system:config:write'))
+const readiness = ref<MFAReadiness | null>(null)
+
+async function loadReadiness(): Promise<void> {
+  if (!canReadConfig.value) {
+    readiness.value = null
+    return
+  }
+  try {
+    readiness.value = await getMFAReadiness()
+  } catch {
+    readiness.value = null
+  }
+}
+
+async function toggleEnforcement(which: 'require' | 'privileged', value: boolean): Promise<void> {
+  const proof = await requestStepUp({
+    action: 'mfa_enforcement',
+    targetUserId: auth.user?.user_id ?? 0,
+    title: '确认是您本人在修改第二因子开关',
+  })
+  readiness.value = await setMFAEnforcement({
+    step_up_proof: proof,
+    ...(which === 'require' ? { require_assigned_factor: value } : { privileged_ukey_enforce: value }),
+  })
+  await loadConfig()
+}
 
 const infoLoading = ref(true)
 const info = ref<SystemInfo | null>(null)
@@ -119,6 +150,7 @@ async function loadConfig(): Promise<void> {
   try {
     const result = await getSystemConfig()
     configItems.value = result.items ?? []
+    await loadReadiness()
   } catch {
     configItems.value = []
   } finally {
@@ -421,6 +453,47 @@ onMounted(async () => {
       <div class="empty-title">系统配置需要 system:config:read 权限</div>
       <div class="text-secondary" style="font-size: 13px">
         本页其余内容（版本、运行指标、服务状态、自检结果）不受影响。
+      </div>
+    </div>
+
+    <div v-if="canReadConfig && readiness" class="card mb-16">
+      <div class="card-header"><span class="card-title">第二因子就绪</span></div>
+      <div class="card-body">
+        <p class="form-hint">
+          两个开关默认关闭。关闭时，已指定的短信、UKey 和已确认动态令牌仍然必须校验；尚未指定因子的旧账号仍可口令登录。打开前必须没有阻断项。
+        </p>
+        <p>
+          必须指定因子：{{ readiness.require_assigned_factor ? '已打开' : '关闭' }}
+          <button
+            v-if="canWriteConfig"
+            class="btn"
+            type="button"
+            style="margin-left: 8px"
+            :disabled="!readiness.can_require_assigned_factor && !readiness.require_assigned_factor"
+            @click="toggleEnforcement('require', !readiness.require_assigned_factor)"
+          >
+            {{ readiness.require_assigned_factor ? '关闭' : '打开' }}
+          </button>
+        </p>
+        <p>
+          管理员必须 UKey：{{ readiness.privileged_ukey_enforce ? '已打开' : '关闭' }}
+          <button
+            v-if="canWriteConfig"
+            class="btn"
+            type="button"
+            style="margin-left: 8px"
+            :disabled="!readiness.can_enforce_privileged_ukey && !readiness.privileged_ukey_enforce"
+            @click="toggleEnforcement('privileged', !readiness.privileged_ukey_enforce)"
+          >
+            {{ readiness.privileged_ukey_enforce ? '关闭' : '打开' }}
+          </button>
+        </p>
+        <p v-if="readiness.blockers.length === 0" class="text-success">没有阻断项。</p>
+        <ul v-else>
+          <li v-for="item in readiness.blockers" :key="`${item.user_id}-${item.reason}`">
+            {{ item.username }}：{{ item.reason }}
+          </li>
+        </ul>
       </div>
     </div>
 

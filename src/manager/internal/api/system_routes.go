@@ -90,6 +90,8 @@ func registerSystemRoutes(mux *http.ServeMux, s *Server) {
 	// 此前是"登录即可"，实测运维账号能读到全部 70+ 项配置，
 	// 含密码服务后端、凭据加密密钥 ID 与登录安全参数。
 	readPerm("system:config:read", "GET /api/v1/system/config", s.handleSystemConfig)
+	readPerm("system:config:read", "GET /api/v1/system/mfa/readiness", s.handleMFAReadiness)
+	write("POST /api/v1/system/mfa/enforcement", s.handleMFAEnforcement)
 	// 迁移版本号只是"库结构到哪一版"，排障通用，保持登录即可
 	read("GET /api/v1/system/migrations", s.handleMigrationStatus)
 }
@@ -128,14 +130,14 @@ func (s *Server) integrityStatus(ctx context.Context) map[string]any {
 
 	ok := bootDigest == current
 	st := map[string]any{
-		"checked":     true,
-		"match":       ok,
-		"algorithm":   "SM3",
-		"digest":      current,
-		"baseline":    bootDigest,
-		"checked_at":  time.Now().Format(time.RFC3339),
-		"scope":       "可执行文件内容",
-		"limitation":  "仅覆盖程序文件是否被替换，不包含运行内存的度量",
+		"checked":    true,
+		"match":      ok,
+		"algorithm":  "SM3",
+		"digest":     current,
+		"baseline":   bootDigest,
+		"checked_at": time.Now().Format(time.RFC3339),
+		"scope":      "可执行文件内容",
+		"limitation": "仅覆盖程序文件是否被替换，不包含运行内存的度量",
 	}
 	if !ok {
 		slog.Error("程序文件完整性校验不一致，文件可能在运行期间被替换", "exe", exe)
@@ -635,6 +637,45 @@ func (s *Server) handleSystemConfig(w http.ResponseWriter, r *http.Request) {
 		items = append(items, it)
 	}
 	httpx.OK(w, map[string]any{"items": items, "total": len(items)})
+}
+
+func (s *Server) handleMFAReadiness(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	res, err := s.auth.MFAReadiness(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, res)
+}
+
+func (s *Server) handleMFAEnforcement(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	var req struct {
+		RequireAssignedFactor *bool  `json:"require_assigned_factor"`
+		PrivilegedUKeyEnforce *bool  `json:"privileged_ukey_enforce"`
+		StepUpProof           string `json:"step_up_proof"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	claims := claimsFrom(r)
+	res, err := s.auth.SetMFAEnforcement(r.Context(), req.RequireAssignedFactor, req.PrivilegedUKeyEnforce, claims.UserID, req.StepUpProof, claims.Username, clientIP(r))
+	if err != nil {
+		writeServiceError(w, err)
+		if res != nil {
+			return
+		}
+		return
+	}
+	httpx.OK(w, res)
 }
 
 // handleMigrationStatus 返回数据库迁移状态（便于运维确认数据库版本）。

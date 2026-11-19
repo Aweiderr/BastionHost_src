@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
@@ -34,11 +37,11 @@ type CreateUserRequest struct {
 	Roles              []string `json:"roles"`
 	PasswordExpireDays int      `json:"password_expire_days"`
 	Remark             string   `json:"remark"`
-	// MFAType 第二因子类型：none（默认）/ totp / sms / ukey
-	//
-	// 这是创建用户时"除账密外额外选择一种认证方式"的入口。
+	// MFAType 第二因子：totp / sms / ukey。创建时必须指定一种，不能为空或 none。
 	// 选 sms 时必须同时提供 Phone，否则用户会卡在验证码弹窗上无码可收。
 	MFAType string `json:"mfa_type"`
+	// StepUpProof 是操作者刚完成的一次性身份核验，绑定本次创建动作。
+	StepUpProof string `json:"step_up_proof"`
 }
 
 // applyMFASelection 按管理员指定的类型设置 mfa_type / mfa_enabled。
@@ -69,12 +72,15 @@ func applyMFASelection(u *model.User, mfaType string) {
 // 约束违反的错误信息是 "violates check constraint ..."，
 // 运维看到完全不知道该怎么办；应用层能给出"短信二次认证需要先填写手机号"。
 func validateMFAType(mfaType, phone string) error {
-	switch strings.TrimSpace(mfaType) {
-	case "", "none":
+	switch auth.NormalizeFactor(mfaType) {
+	case auth.FactorNone:
+		if strings.TrimSpace(mfaType) == "" {
+			return nil
+		}
+		return fmt.Errorf("不能把第二因子清空为仅口令")
+	case auth.FactorTOTP:
 		return nil
-	case "totp":
-		return nil
-	case "sms":
+	case auth.FactorSMS:
 		if strings.TrimSpace(phone) == "" {
 			return fmt.Errorf("选择短信二次认证时必须填写手机号，否则用户无法接收验证码")
 		}
@@ -182,6 +188,22 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 	if err := validateMFAType(req.MFAType, req.Phone); err != nil {
 		return nil, err
 	}
+	level := 0
+	if s.roleRepo != nil && len(req.Roles) > 0 {
+		var lerr error
+		level, lerr = s.roleRepo.MaxLevelOf(ctx, req.Roles)
+		if lerr != nil {
+			return nil, lerr
+		}
+	}
+	privileged := auth.IsPrivileged(req.Roles, level)
+	if err := auth.EvaluateNewFactor(req.MFAType, privileged); err != nil {
+		s.auditFactor(ctx, op, 0, req.Username, "create_user", "", req.MFAType, reasonPolicyDenied)
+		return nil, err
+	}
+	if s.authSvc == nil {
+		return nil, fmt.Errorf("身份核验未启用，不能创建带第二因子的账号")
+	}
 	u := &model.User{
 		TenantID:           0,
 		OrgID:              req.OrgID,
@@ -198,23 +220,33 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 		Remark:             req.Remark,
 	}
 	applyMFASelection(u, req.MFAType)
-	if err := s.userRepo.Create(ctx, u); err != nil {
+	noteFactorActivated(u)
+	if err := s.authSvc.CommitWithProof(ctx, req.StepUpProof, op.UserID, 0, auth.StepUpMFAAssign, req.MFAType, func(pgx.Tx) error {
+		if err := s.userRepo.Create(ctx, u); err != nil {
+			return err
+		}
+		if len(req.Roles) == 0 {
+			return nil
+		}
+		if err := s.assertCanGrant(ctx, op, req.Roles, 0); err != nil {
+			return err
+		}
+		return s.userRepo.AssignRoles(ctx, u.UserID, req.Roles)
+	}); err != nil {
+		if errors.Is(err, ErrStepUpRejected) {
+			s.auditFactor(ctx, op, 0, req.Username, auth.StepUpMFAAssign, "", req.MFAType, reasonMissingStepUp)
+		}
 		s.writeLog(ctx, op, "system", "create_user", "user", "", req.Username, "", "", err)
 		return nil, err
 	}
 	if len(req.Roles) > 0 {
-		// 授权上限校验：必须在分配之前，否则用户已被创建却拿不到角色，
-		// 留下一个半成品账号
-		if err := s.assertCanGrant(ctx, op, req.Roles, 0); err != nil {
-			return nil, err
-		}
-		if err := s.userRepo.AssignRoles(ctx, u.UserID, req.Roles); err != nil {
-			return nil, fmt.Errorf("分配角色失败: %w", err)
-		}
 		u.Roles = req.Roles
 	}
 	s.writeLog(ctx, op, "system", "create_user", "user", fmt.Sprint(u.UserID), u.Username, "",
 		fmt.Sprintf(`{"username":%q,"roles":%q}`, u.Username, strings.Join(req.Roles, ",")), nil)
+	if err := s.auditFactor(ctx, op, u.UserID, u.Username, "create_user", "", u.MFAType, "created"); err != nil {
+		return nil, err
+	}
 	return u, nil
 }
 
@@ -247,6 +279,8 @@ type UpdateUserRequest struct {
 	Remark             string   `json:"remark"`
 	// MFAType 第二因子类型；为空表示不修改，而不是重置为 none
 	MFAType string `json:"mfa_type"`
+	// StepUpProof 在修改因子、短信手机号或新授予管理员角色时必填。
+	StepUpProof string `json:"step_up_proof"`
 }
 
 // UpdateUser 更新用户。
@@ -256,6 +290,8 @@ func (s *UserService) UpdateUser(ctx context.Context, userID int64, req UpdateUs
 		return nil, err
 	}
 	before := fmt.Sprintf(`{"display_name":%q,"status":%q,"email":%q}`, u.DisplayName, u.Status, u.Email)
+	oldFactor := auth.NormalizeFactor(u.MFAType)
+	oldPhone := u.Phone
 	if req.DisplayName != "" {
 		u.DisplayName = req.DisplayName
 	}
@@ -278,28 +314,95 @@ func (s *UserService) UpdateUser(ctx context.Context, userID int64, req UpdateUs
 	// 校验用最终生效的手机号（可能是本次传入的，也可能是库里已有）。
 	// 种子保留，便于从短信切回已确认的动态令牌时不必重新扫码。
 	// totp 在没有已确认种子时不打开 mfa_enabled，避免把还没绑定的用户锁在登录页外。
+	wasPrivileged, err := s.accountPrivileged(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(req.MFAType) != "" {
 		if err := validateMFAType(req.MFAType, u.Phone); err != nil {
+			s.auditFactor(ctx, op, userID, u.Username, auth.StepUpMFAAssign, oldFactor, req.MFAType, reasonPolicyDenied)
 			return nil, err
 		}
 		applyMFASelection(u, req.MFAType)
+		noteFactorActivated(u)
 	}
 	// 若本来是短信 MFA，本次把手机号清空了，则必须拦住：
 	// 否则用户下次登录会卡在弹窗上收不到验证码
 	if u.MFAType == "sms" && strings.TrimSpace(u.Phone) == "" {
 		return nil, fmt.Errorf("该账号启用了短信二次认证，不能清空手机号；请先改为其它认证方式")
 	}
-	if err := s.userRepo.Update(ctx, u); err != nil {
+	willPrivileged := wasPrivileged
+	if req.Roles != nil {
+		level, lerr := s.roleRepo.MaxLevelOf(ctx, req.Roles)
+		if lerr != nil {
+			return nil, lerr
+		}
+		willPrivileged = auth.IsPrivileged(req.Roles, level)
+	}
+	explicitNone := auth.NormalizeFactor(req.MFAType) == auth.FactorNone && strings.TrimSpace(req.MFAType) != ""
+	if err := auth.EvaluateFactorChange(auth.FactorChange{
+		OldFactor: oldFactor, NewFactor: req.MFAType,
+		WasPrivileged: wasPrivileged, WillPrivileged: willPrivileged && !wasPrivileged,
+		UKeyEnforce: s.ukeyEnforce(ctx), ExplicitNone: explicitNone,
+	}); err != nil {
+		s.auditFactor(ctx, op, userID, u.Username, auth.StepUpMFAAssign, oldFactor, u.MFAType, reasonPolicyDenied)
 		return nil, err
 	}
+	phoneChanged := req.Phone != "" && req.Phone != oldPhone && (oldFactor == auth.FactorSMS || auth.NormalizeFactor(u.MFAType) == auth.FactorSMS)
+	factorChanged := strings.TrimSpace(req.MFAType) != "" && auth.NormalizeFactor(req.MFAType) != oldFactor
+	grantPrivileged := !wasPrivileged && willPrivileged
 	if req.Roles != nil {
-		// 同样必须校验：更新接口也能改角色，否则提权路径只是换了个入口
 		if err := s.assertCanGrant(ctx, op, req.Roles, userID); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.rejectLastAdminLoss(ctx, userID, wasPrivileged, willPrivileged, u, req.Status); err != nil {
+		s.auditFactor(ctx, op, userID, u.Username, auth.StepUpMFAAssign, oldFactor, u.MFAType, "last_admin")
+		return nil, err
+	}
+	writeUser := func(tx pgx.Tx) error {
+		if factorChanged || phoneChanged {
+			reason := "factor_updated"
+			if phoneChanged && !factorChanged {
+				reason = "phone_updated"
+			}
+			ev := &repo.MFAAuditEvent{
+				ActorID: op.UserID, ActorName: op.Username, TargetID: userID, TargetName: u.Username,
+				Action: auth.StepUpMFAAssign, OldMethod: oldFactor, NewMethod: auth.NormalizeFactor(u.MFAType),
+				Result: "success", Reason: reason, ClientIP: op.ClientIP,
+			}
+			return s.userRepo.UpdateAudited(ctx, tx, u, ev)
+		}
+		if tx != nil {
+			return s.userRepo.UpdateAudited(ctx, tx, u, nil)
+		}
+		return s.userRepo.Update(ctx, u)
+	}
+	if factorChanged || phoneChanged || grantPrivileged {
+		action, factor := userChangeProof(oldFactor, auth.NormalizeFactor(u.MFAType), factorChanged, phoneChanged, grantPrivileged)
+		if err := s.authSvc.CommitWithProof(ctx, req.StepUpProof, op.UserID, userID, action, factor, func(tx pgx.Tx) error {
+			if err := writeUser(tx); err != nil {
+				return err
+			}
+			if req.Roles != nil {
+				return s.userRepo.AssignRolesTx(ctx, tx, userID, req.Roles)
+			}
+			return nil
+		}); err != nil {
+			if errors.Is(err, ErrStepUpRejected) {
+				s.auditFactor(ctx, op, userID, u.Username, action, oldFactor, u.MFAType, reasonMissingStepUp)
+			}
+			return nil, err
+		}
+	} else if err := writeUser(nil); err != nil {
+		return nil, err
+	}
+	if req.Roles != nil && !(factorChanged || phoneChanged || grantPrivileged) {
 		if err := s.userRepo.AssignRoles(ctx, userID, req.Roles); err != nil {
 			return nil, fmt.Errorf("更新角色失败: %w", err)
 		}
+		u.Roles = req.Roles
+	} else if req.Roles != nil {
 		u.Roles = req.Roles
 	} else {
 		u.Roles, _ = s.userRepo.ListRoles(ctx, userID)
@@ -363,7 +466,7 @@ func (s *UserService) UnlockUser(ctx context.Context, userID int64, op OperatorC
 // 三个入口都必须走同一套 assertCanGrant 校验，否则只要留一个没校验，
 // 提权路径就依然存在 —— 此前正是如此：独立接口有校验，
 // 但创建/更新用户请求体里的 roles 绕过了它。
-func (s *UserService) AssignUserRoles(ctx context.Context, userID int64, roleCodes []string, op OperatorContext) error {
+func (s *UserService) AssignUserRoles(ctx context.Context, userID int64, roleCodes []string, op OperatorContext, stepUpProof string) error {
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return err
@@ -372,6 +475,52 @@ func (s *UserService) AssignUserRoles(ctx context.Context, userID int64, roleCod
 		return err
 	}
 	old, _ := s.userRepo.ListRoles(ctx, userID)
+	oldLevel, err := s.roleRepo.LevelOfUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	newLevel, err := s.roleRepo.MaxLevelOf(ctx, roleCodes)
+	if err != nil {
+		return err
+	}
+	wasPrivileged := auth.IsPrivileged(old, oldLevel)
+	willPrivileged := auth.IsPrivileged(roleCodes, newLevel)
+	if err := s.rejectLastAdminLoss(ctx, userID, wasPrivileged, willPrivileged, u, u.Status); err != nil {
+		s.auditFactor(ctx, op, userID, u.Username, auth.StepUpGrantPrivileged, auth.NormalizeFactor(u.MFAType), auth.NormalizeFactor(u.MFAType), "last_admin")
+		return err
+	}
+	if !wasPrivileged && willPrivileged {
+		factor := auth.NormalizeFactor(u.MFAType)
+		if err := auth.EvaluateFactorChange(auth.FactorChange{
+			OldFactor: factor, WasPrivileged: false, WillPrivileged: true,
+			UKeyEnforce: s.ukeyEnforce(ctx),
+		}); err != nil {
+			s.auditFactor(ctx, op, userID, u.Username, auth.StepUpGrantPrivileged, factor, factor, reasonPolicyDenied)
+			return err
+		}
+		if s.authSvc == nil {
+			return fmt.Errorf("身份核验未启用")
+		}
+		if err := s.authSvc.CommitWithProof(ctx, stepUpProof, op.UserID, userID, auth.StepUpGrantPrivileged, auth.FactorUKey, func(tx pgx.Tx) error {
+			if err := s.userRepo.AssignRolesTx(ctx, tx, userID, roleCodes); err != nil {
+				return err
+			}
+			return s.userRepo.UpdateAudited(ctx, tx, u, &repo.MFAAuditEvent{
+				ActorID: op.UserID, ActorName: op.Username, TargetID: userID, TargetName: u.Username,
+				Action: auth.StepUpGrantPrivileged, OldMethod: factor, NewMethod: factor,
+				Result: "success", Reason: "roles_granted", ClientIP: op.ClientIP,
+			})
+		}); err != nil {
+			if errors.Is(err, ErrStepUpRejected) {
+				s.auditFactor(ctx, op, userID, u.Username, auth.StepUpGrantPrivileged, factor, factor, reasonMissingStepUp)
+			}
+			return err
+		}
+		s.writeLog(ctx, op, "system", "assign_roles", "user", fmt.Sprint(userID), u.Username,
+			fmt.Sprintf(`{"roles":%q}`, strings.Join(old, ",")),
+			fmt.Sprintf(`{"roles":%q}`, strings.Join(roleCodes, ",")), nil)
+		return nil
+	}
 	if err := s.userRepo.AssignRoles(ctx, userID, roleCodes); err != nil {
 		return err
 	}
@@ -422,6 +571,108 @@ func (s *UserService) ListRolePermissions(ctx context.Context, roleID int64) ([]
 // CountByStatus 返回用户状态统计。
 func (s *UserService) CountByStatus(ctx context.Context) (map[string]int, error) {
 	return s.userRepo.CountByStatus(ctx)
+}
+
+func (s *UserService) accountPrivileged(ctx context.Context, userID int64) (bool, error) {
+	roles, err := s.userRepo.ListRoles(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	level, err := s.roleRepo.LevelOfUser(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return auth.IsPrivileged(roles, level), nil
+}
+
+func (s *UserService) ukeyEnforce(ctx context.Context) bool {
+	if s == nil || s.authSvc == nil {
+		return false
+	}
+	return s.authSvc.privilegedUKeyEnforce(ctx)
+}
+
+func userChangeProof(oldFactor, newFactor string, factorChanged, phoneChanged, grantPrivileged bool) (string, string) {
+	switch {
+	case grantPrivileged:
+		return auth.StepUpGrantPrivileged, auth.FactorUKey
+	case phoneChanged && !factorChanged:
+		return auth.StepUpMFAPhone, auth.FactorSMS
+	default:
+		return auth.StepUpMFAAssign, newFactor
+	}
+}
+
+func noteFactorActivated(u *model.User) {
+	if u == nil {
+		return
+	}
+	switch auth.NormalizeFactor(u.MFAType) {
+	case auth.FactorSMS, auth.FactorUKey:
+		u.MFAFactorActivated = true
+	case auth.FactorTOTP:
+		if totpView(u).LoginRequiresTOTP() {
+			u.MFAFactorActivated = true
+		}
+	}
+}
+
+func (s *UserService) rejectLastAdminLoss(ctx context.Context, userID int64, wasPrivileged, willPrivileged bool, after *model.User, status string) error {
+	if !wasPrivileged {
+		return nil
+	}
+	stillPrivileged := willPrivileged
+	if status == "disabled" || status == "locked" {
+		stillPrivileged = false
+	}
+	usable := stillPrivileged && after != nil && after.Status == "active" && status != "disabled" && status != "locked"
+	if usable {
+		switch auth.NormalizeFactor(after.MFAType) {
+		case auth.FactorSMS:
+			usable = strings.TrimSpace(after.Phone) != ""
+		case auth.FactorTOTP:
+			usable = totpView(after).LoginRequiresTOTP()
+		case auth.FactorUKey:
+			n, err := s.userRepo.CountActiveClientCerts(ctx, userID)
+			if err != nil {
+				return err
+			}
+			usable = n > 0
+		default:
+			require := false
+			if s.authSvc != nil {
+				require = s.authSvc.requireAssignedFactor(ctx)
+			}
+			usable = !require && !after.MFAFactorActivated && strings.TrimSpace(after.MFASecretCipher) == "" && !after.MFATotpPending
+		}
+	}
+	if usable {
+		return nil
+	}
+	others, err := s.userRepo.CountUsablePrivilegedExcept(ctx, userID, s.authSvc != nil && s.authSvc.requireAssignedFactor(ctx))
+	if err != nil {
+		return err
+	}
+	if others == 0 {
+		return fmt.Errorf("这会去掉最后一名仍能登录的管理员，已拒绝")
+	}
+	return nil
+}
+
+func (s *UserService) auditFactor(ctx context.Context, op OperatorContext, targetID int64, targetName, action, oldMethod, newMethod, reason string) error {
+	if s == nil || s.authSvc == nil {
+		return fmt.Errorf("因子变更审计未启用")
+	}
+	result := "denied"
+	switch reason {
+	case "created", "factor_updated", "phone_updated", "roles_granted":
+		result = "success"
+	}
+	return s.authSvc.auditMFA(ctx, repo.MFAAuditEvent{
+		ActorID: op.UserID, ActorName: op.Username, TargetID: targetID, TargetName: targetName,
+		Action: action, OldMethod: oldMethod, NewMethod: newMethod,
+		Result: result, Reason: reason, ClientIP: op.ClientIP,
+	})
 }
 
 // writeLog 写入操作日志。

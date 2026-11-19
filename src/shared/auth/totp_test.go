@@ -167,8 +167,13 @@ func TestTOTPBindStateMachine(t *testing.T) {
 	if _, err := ApplyTOTPBind(pending.View(), TOTPEventConfirm); err != nil {
 		t.Fatal(err)
 	}
-	active, err := ApplyTOTPBind(TOTPBindView{
+	if _, err := ApplyTOTPBind(TOTPBindView{
 		MFAType: "none", MFAEnabled: false, HasSecret: true, Pending: true,
+	}, TOTPEventConfirm); err == nil {
+		t.Fatal("未指定 totp 时，确认绑定不能把因子改成动态令牌")
+	}
+	active, err := ApplyTOTPBind(TOTPBindView{
+		MFAType: "totp", MFAEnabled: false, HasSecret: true, Pending: true,
 	}, TOTPEventConfirm)
 	if err != nil {
 		t.Fatal(err)
@@ -200,8 +205,8 @@ func TestTOTPBindStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared.Phase != TOTPPhaseUnbound || cleared.MFAEnabled || cleared.HasSecret || cleared.View().LoginRequiresTOTP() {
-		t.Fatalf("解绑后应回到未启用: %+v", cleared)
+	if cleared.Phase != TOTPPhaseUnbound || cleared.MFAEnabled || cleared.HasSecret || cleared.MFAType != "totp" || cleared.View().LoginRequiresTOTP() {
+		t.Fatalf("解绑后应清掉种子并保持指定因子 totp: %+v", cleared)
 	}
 	if _, err := ApplyTOTPBind(cleared.View(), TOTPEventUnbind); err == nil {
 		t.Fatal("未绑定不能解绑")

@@ -43,8 +43,12 @@ func (m *memAuthUsers) BindTOTP(_ context.Context, userID int64, secretCipher st
 	if u == nil {
 		return repo.ErrNotFound
 	}
+	if u.MFAType != "totp" {
+		return repo.ErrNotFound
+	}
 	u.MFAEnabled = true
 	u.MFAType = "totp"
+	u.MFAFactorActivated = true
 	u.MFASecretCipher = secretCipher
 	u.MFATotpPending = false
 	stepCopy := step
@@ -99,8 +103,10 @@ func (m *memAuthUsers) ClearTOTP(_ context.Context, userID int64, recoveryID int
 			return repo.ErrRecoveryCodeUsed
 		}
 	}
+	if u.MFAType != "totp" {
+		return repo.ErrNotFound
+	}
 	u.MFAEnabled = false
-	u.MFAType = "none"
 	u.MFASecretCipher = ""
 	u.MFATotpPending = false
 	u.MFATotpLastStep = nil

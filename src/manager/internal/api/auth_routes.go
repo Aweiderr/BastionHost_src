@@ -25,10 +25,14 @@ func registerAuthRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("GET /api/v1/auth/me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("POST /api/v1/auth/password", s.requireAuth(s.handleChangePassword))
 
-	// 动态令牌（TOTP）绑定
+	// 动态令牌（TOTP）绑定。访问令牌不够，还要一次性身份核验。
 	mux.HandleFunc("POST /api/v1/auth/totp/start", s.requireAuth(s.handleTOTPStart))
 	mux.HandleFunc("POST /api/v1/auth/totp/confirm", s.requireAuth(s.handleTOTPConfirm))
 	mux.HandleFunc("POST /api/v1/auth/totp/unbind", s.requireAuth(s.handleTOTPUnbind))
+	// 尚未登录时的初次绑定：证明来自口令登录响应，不能换成访问令牌。
+	mux.HandleFunc("POST /api/v1/auth/totp/enroll/start", s.handleTOTPEnrollStart)
+	mux.HandleFunc("POST /api/v1/auth/totp/enroll/confirm", s.handleTOTPEnrollConfirm)
+	mux.HandleFunc("POST /api/v1/auth/mfa/step-up", s.requireAuth(s.handleMFAStepUp))
 }
 
 // handleLogin 登录。
@@ -229,10 +233,11 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTOTPStart(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
 	var req struct {
-		Issuer string `json:"issuer"`
+		Issuer      string `json:"issuer"`
+		StepUpProof string `json:"step_up_proof"`
 	}
 	_ = decodeJSON(r, &req) // 请求体可为空
-	res, err := s.auth.StartTOTPBinding(r.Context(), claims.UserID, req.Issuer)
+	res, err := s.auth.StartTOTPBinding(r.Context(), claims.UserID, req.Issuer, req.StepUpProof)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -244,13 +249,14 @@ func (s *Server) handleTOTPStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
 	var req struct {
-		Code string `json:"code"`
+		Code        string `json:"code"`
+		StepUpProof string `json:"step_up_proof"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	res, err := s.auth.ConfirmTOTPBinding(r.Context(), claims.UserID, req.Code)
+	res, err := s.auth.ConfirmTOTPBinding(r.Context(), claims.UserID, req.Code, req.StepUpProof)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -266,21 +272,96 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTOTPUnbind(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFrom(r)
 	var req struct {
-		Code string `json:"code"`
+		Code     string `json:"code"`
+		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	if strings.TrimSpace(req.Code) == "" {
-		httpx.Fail(w, errcode.New(errcode.ErrBadRequest, "解绑需要当前动态口令或未使用的恢复码"))
+	if strings.TrimSpace(req.Code) == "" || strings.TrimSpace(req.Password) == "" {
+		httpx.Fail(w, errcode.New(errcode.ErrBadRequest, "解绑需要当前口令，以及当前动态口令或未使用的恢复码"))
 		return
 	}
-	if err := s.auth.UnbindTOTP(r.Context(), claims.UserID, req.Code); err != nil {
+	proof, err := s.auth.UnbindTOTP(r.Context(), claims.UserID, req.Password, req.Code)
+	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	httpx.OK(w, map[string]any{"unbound": true})
+	httpx.OK(w, map[string]any{
+		"unbound":       true,
+		"step_up_proof": proof,
+		"message":       "动态令牌已解绑。账号仍指定动态令牌。请立即用返回的证明重新绑定；关闭后不能只凭口令再领一次。",
+	})
+}
+
+func (s *Server) handleTOTPEnrollStart(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	var req struct {
+		UserID      int64  `json:"user_id"`
+		Issuer      string `json:"issuer"`
+		StepUpProof string `json:"step_up_proof"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	res, err := s.auth.StartTOTPBinding(r.Context(), req.UserID, req.Issuer, req.StepUpProof)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, res)
+}
+
+func (s *Server) handleTOTPEnrollConfirm(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	var req struct {
+		UserID      int64  `json:"user_id"`
+		Code        string `json:"code"`
+		StepUpProof string `json:"step_up_proof"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	res, err := s.auth.ConfirmTOTPBinding(r.Context(), req.UserID, req.Code, req.StepUpProof)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, map[string]any{
+		"bound":          true,
+		"recovery_codes": res.RecoveryCodes,
+		"message":        "动态令牌绑定成功。恢复码仅显示一次。解绑需要口令加动态口令或恢复码，且不会改成仅口令登录。",
+	})
+}
+
+func (s *Server) handleMFAStepUp(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	claims := claimsFrom(r)
+	var req service.StepUpRequest
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	req.ActorID = claims.UserID
+	req.ClientIP = clientIP(r)
+	res, err := s.auth.BeginStepUp(r.Context(), req)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.OK(w, res)
 }
 
 // writeServiceError 把业务错误映射为统一错误码响应。

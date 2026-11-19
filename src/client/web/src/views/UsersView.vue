@@ -21,6 +21,7 @@ import Pagination from '@/components/Pagination.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import UkeyCertDialog from '@/components/UkeyCertDialog.vue'
+import { requestStepUp } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
@@ -280,6 +281,23 @@ async function submit(): Promise<void> {
   }
   submitting.value = true
   try {
+    const privileged = new Set(['super_admin', 'sys_admin', 'sec_admin', 'audit_admin'])
+    const wasPrivileged = (editing.value?.roles ?? []).some((code) => privileged.has(code))
+    const willPrivileged = form.roles.some((code) => privileged.has(code))
+    const factorChanged = !editing.value || form.mfa_type !== (editing.value.mfa_type || 'none')
+    const phoneChanged = Boolean(editing.value) && form.phone !== (editing.value?.phone || '') &&
+      (form.mfa_type === 'sms' || editing.value?.mfa_type === 'sms')
+    const grantPrivileged = Boolean(editing.value) && !wasPrivileged && willPrivileged
+    let stepUpProof = ''
+    if (!editing.value || factorChanged || phoneChanged || grantPrivileged) {
+      const action = grantPrivileged ? 'grant_privileged' : phoneChanged && !factorChanged ? 'mfa_phone' : 'mfa_assign'
+      stepUpProof = await requestStepUp({
+        action,
+        targetUserId: editing.value?.user_id ?? 0,
+        newFactor: grantPrivileged ? 'ukey' : form.mfa_type,
+        title: editing.value ? '确认是您本人在修改用户认证' : '确认是您本人在创建用户',
+      })
+    }
     if (editing.value) {
       await updateUser(editing.value.user_id, {
         display_name: form.display_name.trim(),
@@ -289,6 +307,7 @@ async function submit(): Promise<void> {
         remark: form.remark,
         mfa_type: form.mfa_type,
         password_expire_days: expireDays,
+        step_up_proof: stepUpProof,
       })
       app.success('用户已更新')
     } else {
@@ -302,6 +321,7 @@ async function submit(): Promise<void> {
         remark: form.remark,
         mfa_type: form.mfa_type,
         password_expire_days: expireDays,
+        step_up_proof: stepUpProof,
       })
       app.success('用户创建成功')
     }

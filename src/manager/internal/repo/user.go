@@ -32,7 +32,8 @@ func NewUserRepo(pool *pgxpool.Pool) *UserRepo { return &UserRepo{pool: pool} }
 const userColumns = `user_id, tenant_id, org_id, username, display_name,
 	COALESCE(email,''), COALESCE(phone,''), password_hash, password_salt, password_algo,
 	password_update_time, password_expire_days, must_change_password,
-	mfa_enabled, COALESCE(mfa_secret_cipher,''), mfa_type, mfa_totp_pending, mfa_totp_last_step, status, user_type,
+	mfa_enabled, COALESCE(mfa_secret_cipher,''), mfa_type, mfa_totp_pending, mfa_totp_last_step,
+	mfa_factor_activated, status, user_type,
 	fail_count, locked_until, last_login_time, COALESCE(last_login_ip,''),
 	COALESCE(remark,''), create_time, update_time`
 
@@ -41,7 +42,8 @@ func scanUser(row pgx.Row) (*model.User, error) {
 	err := row.Scan(&u.UserID, &u.TenantID, &u.OrgID, &u.Username, &u.DisplayName,
 		&u.Email, &u.Phone, &u.PasswordHash, &u.PasswordSalt, &u.PasswordAlgo,
 		&u.PasswordUpdateTime, &u.PasswordExpireDays, &u.MustChangePassword,
-		&u.MFAEnabled, &u.MFASecretCipher, &u.MFAType, &u.MFATotpPending, &u.MFATotpLastStep, &u.Status, &u.UserType,
+		&u.MFAEnabled, &u.MFASecretCipher, &u.MFAType, &u.MFATotpPending, &u.MFATotpLastStep,
+		&u.MFAFactorActivated, &u.Status, &u.UserType,
 		&u.FailCount, &u.LockedUntil, &u.LastLoginTime, &u.LastLoginIP,
 		&u.Remark, &u.CreateTime, &u.UpdateTime)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -91,9 +93,9 @@ func (r *UserRepo) Create(ctx context.Context, u *model.User) error {
 	q := `INSERT INTO sys_user
 		(tenant_id, org_id, username, display_name, email, phone,
 		 password_hash, password_salt, password_algo, password_update_time,
-		 password_expire_days, must_change_password, mfa_enabled, mfa_type, status, user_type,
+		 password_expire_days, must_change_password, mfa_enabled, mfa_type, mfa_factor_activated, status, user_type,
 		 remark, create_by, update_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10,$11,$12,$13,$14,$15,$16,$17,$17)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10,$11,$12,$13,$14,$15,$16,$17,$18,$18)
 		RETURNING user_id, create_time, update_time`
 	if u.MFAType == "" {
 		u.MFAType = "none"
@@ -101,7 +103,7 @@ func (r *UserRepo) Create(ctx context.Context, u *model.User) error {
 	err := r.pool.QueryRow(ctx, q,
 		u.TenantID, u.OrgID, u.Username, u.DisplayName, nullIfEmpty(u.Email), nullIfEmpty(u.Phone),
 		u.PasswordHash, u.PasswordSalt, u.PasswordAlgo, u.PasswordExpireDays,
-		u.MustChangePassword, u.MFAEnabled, u.MFAType, u.Status, u.UserType,
+		u.MustChangePassword, u.MFAEnabled, u.MFAType, u.MFAFactorActivated, u.Status, u.UserType,
 		nullIfEmpty(u.Remark), nil,
 	).Scan(&u.UserID, &u.CreateTime, &u.UpdateTime)
 	if err != nil {
@@ -329,14 +331,15 @@ func (r *UserRepo) List(ctx context.Context, f UserFilter) ([]*model.User, int64
 func (r *UserRepo) Update(ctx context.Context, u *model.User) error {
 	const q = `UPDATE sys_user SET
 		display_name=$2, email=$3, phone=$4, org_id=$5, status=$6,
-		password_expire_days=$7, remark=$8, mfa_enabled=$9, mfa_type=$10, update_time=now()
+		password_expire_days=$7, remark=$8, mfa_enabled=$9, mfa_type=$10,
+		mfa_factor_activated=$11, update_time=now()
 		WHERE user_id=$1`
 	if u.MFAType == "" {
 		u.MFAType = "none"
 	}
 	ct, err := r.pool.Exec(ctx, q,
 		u.UserID, u.DisplayName, nullIfEmpty(u.Email), nullIfEmpty(u.Phone), u.OrgID,
-		u.Status, u.PasswordExpireDays, nullIfEmpty(u.Remark), u.MFAEnabled, u.MFAType)
+		u.Status, u.PasswordExpireDays, nullIfEmpty(u.Remark), u.MFAEnabled, u.MFAType, u.MFAFactorActivated)
 	if err != nil {
 		return fmt.Errorf("更新用户失败: %w", err)
 	}
@@ -344,6 +347,44 @@ func (r *UserRepo) Update(ctx context.Context, u *model.User) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// UpdateWithMFAAudit 在同一事务里更新用户并写入因子变更审计。
+//
+// 审计写不进去时，用户资料也不会改。ev 为 nil 时与 Update 相同。
+func (r *UserRepo) UpdateWithMFAAudit(ctx context.Context, u *model.User, ev *MFAAuditEvent) error {
+	if ev == nil {
+		return r.Update(ctx, u)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if u.MFAType == "" {
+		u.MFAType = "none"
+	}
+	tag, err := tx.Exec(ctx, `UPDATE sys_user SET
+		display_name=$2, email=$3, phone=$4, org_id=$5, status=$6,
+		password_expire_days=$7, remark=$8, mfa_enabled=$9, mfa_type=$10,
+		mfa_factor_activated=$11, update_time=now()
+		WHERE user_id=$1`,
+		u.UserID, u.DisplayName, nullIfEmpty(u.Email), nullIfEmpty(u.Phone), u.OrgID,
+		u.Status, u.PasswordExpireDays, nullIfEmpty(u.Remark), u.MFAEnabled, u.MFAType, u.MFAFactorActivated)
+	if err != nil {
+		return fmt.Errorf("更新用户失败: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_mfa_change
+		(actor_id, actor_name, target_id, target_name, action, old_method, new_method, result, reason, client_ip)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'success',$8,$9)`,
+		nullIfZero(ev.ActorID), nullIfEmpty(ev.ActorName), nullIfZero(ev.TargetID), nullIfEmpty(ev.TargetName),
+		ev.Action, nullIfEmpty(ev.OldMethod), nullIfEmpty(ev.NewMethod), nullIfEmpty(ev.Reason), nullIfEmpty(ev.ClientIP)); err != nil {
+		return fmt.Errorf("写入因子变更审计失败: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // Delete 删除用户（同时解除角色关联）。
@@ -391,6 +432,131 @@ func (r *UserRepo) MarkMustChangePassword(ctx context.Context, userID int64, mus
 	_, err := r.pool.Exec(ctx,
 		`UPDATE sys_user SET must_change_password=$2, update_time=now() WHERE user_id=$1`, userID, must)
 	return err
+}
+
+// UpdateAudited 更新用户。tx 非空时与调用方的事务一起提交，并在同一事务写成功审计。
+func (r *UserRepo) UpdateAudited(ctx context.Context, tx pgx.Tx, u *model.User, ev *MFAAuditEvent) error {
+	if tx == nil {
+		if ev == nil {
+			return r.Update(ctx, u)
+		}
+		return r.UpdateWithMFAAudit(ctx, u, ev)
+	}
+	if u.MFAType == "" {
+		u.MFAType = "none"
+	}
+	tag, err := tx.Exec(ctx, `UPDATE sys_user SET
+		display_name=$2, email=$3, phone=$4, org_id=$5, status=$6,
+		password_expire_days=$7, remark=$8, mfa_enabled=$9, mfa_type=$10,
+		mfa_factor_activated=$11, update_time=now()
+		WHERE user_id=$1`,
+		u.UserID, u.DisplayName, nullIfEmpty(u.Email), nullIfEmpty(u.Phone), u.OrgID,
+		u.Status, u.PasswordExpireDays, nullIfEmpty(u.Remark), u.MFAEnabled, u.MFAType, u.MFAFactorActivated)
+	if err != nil {
+		return fmt.Errorf("更新用户失败: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if ev == nil {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO audit_mfa_change
+		(actor_id, actor_name, target_id, target_name, action, old_method, new_method, result, reason, client_ip)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'success',$8,$9)`,
+		nullIfZero(ev.ActorID), nullIfEmpty(ev.ActorName), nullIfZero(ev.TargetID), nullIfEmpty(ev.TargetName),
+		ev.Action, nullIfEmpty(ev.OldMethod), nullIfEmpty(ev.NewMethod), nullIfEmpty(ev.Reason), nullIfEmpty(ev.ClientIP))
+	if err != nil {
+		return fmt.Errorf("写入因子变更审计失败: %w", err)
+	}
+	return nil
+}
+
+// AssignRolesTx 在给定事务里覆盖用户角色。tx 为空时使用独立事务。
+func (r *UserRepo) AssignRolesTx(ctx context.Context, tx pgx.Tx, userID int64, roleCodes []string) error {
+	if tx == nil {
+		return r.AssignRoles(ctx, userID, roleCodes)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM sys_user_role WHERE user_id=$1`, userID); err != nil {
+		return fmt.Errorf("清除原角色失败: %w", err)
+	}
+	for _, code := range roleCodes {
+		var roleID int64
+		if err := tx.QueryRow(ctx,
+			`SELECT role_id FROM sys_role WHERE role_code=$1 AND status='active' LIMIT 1`, code).
+			Scan(&roleID); err != nil {
+			return fmt.Errorf("角色不存在: %s", code)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO sys_user_role(user_id, role_id) VALUES($1,$2)
+			 ON CONFLICT (user_id, role_id) DO NOTHING`, userID, roleID); err != nil {
+			return fmt.Errorf("分配角色失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// CountActiveClientCerts 统计用户仍有效的客户端证书。
+func (r *UserRepo) CountActiveClientCerts(ctx context.Context, userID int64) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM km_cert
+		WHERE owner_type='user' AND owner_id=$1 AND cert_type='client' AND status='active'
+		  AND (not_after IS NULL OR not_after > now())`, userID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计用户证书失败: %w", err)
+	}
+	return n, nil
+}
+
+// CountUsablePrivilegedExcept 统计除 excludeID 外仍能登录的管理员人数。
+func (r *UserRepo) CountUsablePrivilegedExcept(ctx context.Context, excludeID int64, requireAssigned bool) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx, `
+		SELECT count(DISTINCT u.user_id)
+		  FROM sys_user u
+		  JOIN sys_user_role ur ON ur.user_id = u.user_id
+		  JOIN sys_role r ON r.role_id = ur.role_id AND r.status = 'active'
+		 WHERE u.user_id <> $1 AND u.status = 'active'
+		   AND (r.level >= 80 OR r.role_code IN ('super_admin','sys_admin','sec_admin','audit_admin'))
+		   AND (
+		     (u.mfa_type = 'ukey' AND EXISTS (
+		        SELECT 1 FROM km_cert c
+		         WHERE c.owner_type = 'user' AND c.owner_id = u.user_id
+		           AND c.cert_type = 'client' AND c.status = 'active'
+		           AND (c.not_after IS NULL OR c.not_after > now())))
+		     OR (u.mfa_type = 'totp' AND u.mfa_enabled AND NOT u.mfa_totp_pending
+		         AND COALESCE(u.mfa_secret_cipher, '') <> '')
+		     OR (u.mfa_type = 'sms' AND COALESCE(u.phone, '') <> '')
+		     OR (u.mfa_type = 'none' AND NOT $2 AND NOT u.mfa_factor_activated
+		         AND NOT u.mfa_totp_pending AND COALESCE(u.mfa_secret_cipher, '') = '')
+		   )`, excludeID, requireAssigned).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计可用管理员失败: %w", err)
+	}
+	return n, nil
+}
+
+// ReopenTOTP 清除已确认的动态令牌，允许该用户重新做一次初次绑定。类型保持 totp。
+func (r *UserRepo) ReopenTOTP(ctx context.Context, userID int64) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE sys_user
+		SET mfa_enabled=false, mfa_secret_cipher=NULL, mfa_totp_pending=false,
+		    mfa_totp_last_step=NULL, mfa_factor_activated=false, update_time=now()
+		WHERE user_id=$1 AND mfa_type='totp'`, userID)
+	if err != nil {
+		return fmt.Errorf("重新开放动态令牌绑定失败: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM sys_user_totp_recovery WHERE user_id=$1`, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // nullIfEmpty 空串转 NULL，避免唯一索引与空串混淆。

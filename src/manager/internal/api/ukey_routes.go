@@ -209,7 +209,9 @@ func (s *Server) handleRegisterUKeyCert(w http.ResponseWriter, r *http.Request) 
 		httpx.Fail(w, err)
 		return
 	}
-	rec, err := s.ukey.RegisterCert(r.Context(), req, operatorFrom(r))
+	op := operatorFrom(r)
+	op.StepUpProof = req.StepUpProof
+	rec, err := s.ukey.RegisterCert(r.Context(), req, op)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -228,7 +230,9 @@ func (s *Server) handleIssueUKeyCert(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	rec, err := s.ukey.IssueUserCert(r.Context(), req, operatorFrom(r))
+	op := operatorFrom(r)
+	op.StepUpProof = req.StepUpProof
+	rec, err := s.ukey.IssueUserCert(r.Context(), req, op)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -272,7 +276,9 @@ func (s *Server) handleUKeyIssueByPubkey(w http.ResponseWriter, r *http.Request)
 		httpx.Fail(w, err)
 		return
 	}
-	rec, err := s.ukey.IssueUserCertByPublicKey(r.Context(), req, clientIP(r), operatorFrom(r))
+	op := operatorFrom(r)
+	op.StepUpProof = req.StepUpProof
+	rec, err := s.ukey.IssueUserCertByPublicKey(r.Context(), req, clientIP(r), op)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -325,10 +331,13 @@ func (s *Server) handleRevokeUKeyCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Reason string `json:"reason"`
+		Reason      string `json:"reason"`
+		StepUpProof string `json:"step_up_proof"`
 	}
 	_ = decodeJSON(r, &req) // 允许空体
-	rec, err := s.ukey.RevokeCert(r.Context(), id, req.Reason, operatorFrom(r))
+	op := operatorFrom(r)
+	op.StepUpProof = req.StepUpProof
+	rec, err := s.ukey.RevokeCert(r.Context(), id, req.Reason, op)
 	if err != nil {
 		writeServiceError(w, err)
 		return

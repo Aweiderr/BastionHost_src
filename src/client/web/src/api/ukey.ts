@@ -149,10 +149,10 @@ export function issueUKeyCertByPubkey(payload: UKeyIssueByPubkeyPayload) {
 }
 
 /** 吊销证书（软状态变更，记录保留可追溯） */
-export function revokeUKeyCert(certId: number, reason: string) {
+export function revokeUKeyCert(certId: number, reason: string, stepUpProof = '') {
   return request<UKeyCertRecord>(`/ukey/certs/${certId}/revoke`, {
     method: 'POST',
-    body: { reason },
+    body: { reason, step_up_proof: stepUpProof },
   })
 }
 

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { cancelStepUp, currentStepUp, finishStepUp, requestStepUp } from '../stepup.ts'
+import { activatedFactor, cancelStepUp, currentStepUp, finishStepUp, hasActivatedFactor, requestStepUp, requestStepUpIfNeeded } from '../stepup.ts'
 import {
   beginSave,
   beginUserAdminGate,
@@ -68,9 +68,10 @@ test('取消或失败的核验不会打开表单，保存状态必须清掉', ()
     assert.notEqual(gate.notice, '')
   }
   const empty = settleStepUp(beginUserAdminGate(), 'confirmed', '   ')
-  assert.equal(empty.formOpen, false)
+  assert.equal(empty.formOpen, true)
   assert.equal(empty.submitting, false)
-  assert.equal(empty.notice, '身份核验失败')
+  assert.equal(empty.proof, '')
+  assert.equal(empty.notice, '')
 })
 
 test('保存成功或失败后转圈结束，失败仍留在表单里', () => {
@@ -196,4 +197,41 @@ test('用户管理页在打开表单前核验，保存路径不再次弹出核�
   assert.match(submitFn, /submitting\.value = false/)
   assert.match(source, />绑定UKEY</)
   assert.doesNotMatch(source, />证书链</)
+})
+
+test('没有已激活因子时确认可以带着空证明打开表单', () => {
+  const opened = settleStepUp(beginUserAdminGate(), 'confirmed', '')
+  assert.equal(opened.formOpen, true)
+  assert.equal(opened.proof, '')
+  assert.equal(opened.submitting, false)
+  assert.equal(opened.notice, '')
+})
+
+test('已激活因子判定不看残留 mfa_type，也不把正在绑定的 totp 当成已激活', () => {
+  assert.equal(hasActivatedFactor({ mfa_type: 'none' }), false)
+  assert.equal(hasActivatedFactor({ mfa_type: 'none', mfa_factor_activated: true }), false)
+  assert.equal(hasActivatedFactor({ mfa_type: 'totp', mfa_enabled: false }), false)
+  assert.equal(hasActivatedFactor({ mfa_type: 'totp', mfa_enabled: true }), true)
+  assert.equal(activatedFactor({ mfa_type: 'sms', mfa_enabled: true }), 'sms')
+  assert.equal(activatedFactor({ mfa_type: 'ukey', mfa_factor_activated: true }), 'ukey')
+})
+
+test('没有已激活因子时 requestStepUpIfNeeded 不弹框并返回空证明', async () => {
+  if (currentStepUp()) cancelStepUp()
+  const proof = await requestStepUpIfNeeded(createUserStepUpAsk(), { mfa_type: 'none' })
+  assert.equal(proof, '')
+  assert.equal(currentStepUp(), null)
+})
+
+test('用户管理页在无已激活因子时允许空证明保存，列表按钮保持绑定UKEY', () => {
+  const source = readFileSync(join(srcRoot, 'UsersView.vue'), 'utf8')
+  assert.match(source, /requestStepUpIfNeeded/)
+  assert.match(source, /proofReady/)
+  assert.match(source, />绑定UKEY</)
+  assert.doesNotMatch(source, />证书链</)
+  const submitAt = source.indexOf('async function submit')
+  const removeAt = source.indexOf('async function confirmRemove')
+  const submitFn = source.slice(submitAt, removeAt)
+  assert.match(submitFn, /proofReady/)
+  assert.doesNotMatch(submitFn, /!heldProof\.value/)
 })

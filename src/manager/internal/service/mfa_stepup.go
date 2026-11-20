@@ -328,8 +328,11 @@ func (s *AuthService) ConsumeFactorProof(ctx context.Context, raw string, actor,
 // 数据库实现里，消费与 mutate 在同一个事务中，因此不会先记下成功再写失败。
 func (s *AuthService) CommitWithProof(ctx context.Context, raw string, actor, target int64, action, factor string, mutate func(tx pgx.Tx) error) error {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || mutate == nil {
+	if mutate == nil {
 		return ErrStepUpRejected
+	}
+	if raw == "" {
+		return s.commitWithoutActivatedProof(ctx, actor, mutate)
 	}
 	factor = proofFactor(factor)
 	sum := hashStepUp(raw)
@@ -341,6 +344,22 @@ func (s *AuthService) CommitWithProof(ctx context.Context, raw string, actor, ta
 		return ErrStepUpRejected
 	}
 	return mapStepUpErr(mem.commit(sum, actor, target, action, factor, func() error { return mutate(nil) }))
+}
+
+// commitWithoutActivatedProof 在操作者没有已激活第二因子时，允许已登录会话直接提交变更。
+// 证明必须为空；一旦账号上已有可用因子，仍拒绝空证明。
+func (s *AuthService) commitWithoutActivatedProof(ctx context.Context, actor int64, mutate func(tx pgx.Tx) error) error {
+	if s == nil || s.userRepo == nil {
+		return ErrStepUpRejected
+	}
+	u, err := s.userRepo.GetByID(ctx, actor)
+	if err != nil || u == nil {
+		return ErrStepUpRejected
+	}
+	if auth.HasActivatedFactor(factorState(u)) {
+		return ErrStepUpRejected
+	}
+	return mutate(nil)
 }
 
 func mapStepUpErr(err error) error {
@@ -417,7 +436,8 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		return nil, deny(reasonBadPassword)
 	}
 	if req.Action == auth.StepUpTOTPEnroll {
-		if req.TargetUserID != actor.UserID || !auth.TOTPPasswordEnroll(factorState(actor)) {
+		st := factorState(actor)
+		if req.TargetUserID != actor.UserID || (auth.HasActivatedFactor(st) && !auth.TOTPPasswordEnroll(st)) {
 			return nil, deny("totp_rebind_blocked")
 		}
 		raw, exp, err := s.issueProof(ctx, actor.UserID, actor.UserID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
@@ -426,7 +446,7 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		}
 		return &StepUpResult{Proof: raw, Expires: exp, Action: auth.StepUpTOTPEnroll}, nil
 	}
-	switch auth.NormalizeFactor(actor.MFAType) {
+	switch auth.ActivatedFactor(factorState(actor)) {
 	case auth.FactorTOTP:
 		if !totpView(actor).LoginRequiresTOTP() {
 			return nil, deny("totp_unavailable")
@@ -464,10 +484,8 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		}
 		return s.finishUKeyStepUp(ctx, actor, req)
 	default:
-		ok, why := auth.BootstrapEligible(factorState(actor))
-		if !ok {
-			return nil, deny(why)
-		}
+		// 没有已激活因子时，已登录会话可用口令换证明（含残留 totp、解绑后的 none）。
+		// 不再用 BootstrapEligible 的“从未指定过”门槛拦住这类账号。
 		if s.requireAssignedFactor(ctx) {
 			return nil, deny(reasonFactorNotAssigned)
 		}

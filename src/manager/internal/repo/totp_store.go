@@ -15,11 +15,14 @@ type TOTPRecoveryCode struct {
 	CodeHash string
 }
 
-// SetTOTPPending 保存尚未确认的种子。登录不要求动态口令，类型保持不变。
+// SetTOTPPending 保存尚未确认的种子。登录不要求动态口令。
+// 类型已是 totp 时保持不变；解绑后类型为 none 时预置为 totp，否则确认绑定时无法通过类型检查。
 func (r *UserRepo) SetTOTPPending(ctx context.Context, userID int64, secretCipher string) error {
 	tag, err := r.pool.Exec(ctx, `UPDATE sys_user
 		SET mfa_enabled=false, mfa_secret_cipher=$2, mfa_totp_pending=true,
-		    mfa_totp_last_step=NULL, update_time=now()
+		    mfa_totp_last_step=NULL,
+		    mfa_type=CASE WHEN lower(coalesce(mfa_type, '')) IN ('', 'none') THEN 'totp' ELSE mfa_type END,
+		    update_time=now()
 		WHERE user_id=$1`, userID, secretCipher)
 	if err != nil {
 		return fmt.Errorf("保存待确认种子失败: %w", err)

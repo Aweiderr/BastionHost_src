@@ -338,3 +338,22 @@ func BuildQuery(params map[string]string) string {
 	}
 	return v.Encode()
 }
+
+// UserVisibleSendError 把下游发送错误转成可以展示给用户的中文说明。
+// 不回传密钥、验证码、手机号或完整上游报文。未识别的错误使用同一句通用提示。
+func UserVisibleSendError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "LimitExceeded.PhoneNumberThirtySecondLimit"):
+		return "该手机号发送过于频繁，请 30 秒后再试"
+	case strings.Contains(msg, "LimitExceeded.PhoneNumberOneHourLimit"):
+		return "该手机号一小时内发送次数已达上限，请稍后再试"
+	case strings.Contains(msg, "LimitExceeded.PhoneNumberDailyLimit"):
+		return "该手机号今日发送次数已达上限，请明日再试"
+	default:
+		return "短信发送失败，请稍后重试"
+	}
+}

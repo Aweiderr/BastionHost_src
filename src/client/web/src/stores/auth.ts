@@ -137,6 +137,7 @@ export const useAuthStore = defineStore('auth', () => {
       password_expired: Boolean(result.password_expired),
       mfa_enabled: result.mfa_enabled,
       mfa_type: result.mfa_type,
+      mfa_factor_activated: result.mfa_factor_activated,
     }
     persist()
   }

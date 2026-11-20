@@ -88,6 +88,7 @@ export interface LoginResult {
   must_change_password: boolean
   password_expired?: boolean
   mfa_enabled: boolean
+  mfa_factor_activated?: boolean
   /**
    * UKey 证书临期或已过期提示。
    *
@@ -143,6 +144,8 @@ export interface CurrentUser {
   mfa_enabled?: boolean
   /** 第二因子类型。totp 尚未确认时登录不签发令牌，需用 step_up_proof 完成绑定 */
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey' | ''
+  /** 当前因子是否已经确认并生效。不要把残留的 mfa_type 或正在绑定的新因子当成已激活 */
+  mfa_factor_activated?: boolean
 }
 
 export interface TotpStartResult {

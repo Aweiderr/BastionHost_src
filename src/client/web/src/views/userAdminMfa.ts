@@ -137,15 +137,15 @@ export function beginUserAdminGate(): UserAdminGate {
   return { phase: 'stepup', formOpen: false, submitting: false, proof: '', notice: '' }
 }
 
-/** 确认、取消或失败之后，保存按钮都不能继续转圈，失败时表单保持关闭。 */
+/** 确认、取消或失败之后，保存按钮都不能继续转圈，失败时表单保持关闭。
+ * 操作者没有已激活因子时，确认可以带着空证明打开表单。 */
 export function settleStepUp(
   _gate: UserAdminGate,
   outcome: 'confirmed' | 'cancelled' | 'failed',
   proof = '',
 ): UserAdminGate {
-  const token = proof.trim()
-  if (outcome === 'confirmed' && token) {
-    return { phase: 'form', formOpen: true, submitting: false, proof: token, notice: '' }
+  if (outcome === 'confirmed') {
+    return { phase: 'form', formOpen: true, submitting: false, proof: proof.trim(), notice: '' }
   }
   const notice = outcome === 'cancelled' ? '已取消身份核验' : '身份核验失败'
   return { phase: 'idle', formOpen: false, submitting: false, proof: '', notice }

@@ -147,6 +147,39 @@ func TOTPPasswordEnroll(st FactorState) bool {
 	return !ready
 }
 
+// ActivatedFactor 返回当前已经绑定并生效、可以用来做身份核验的第二因子。
+//
+// 只看「现在能不能用来核验」，不看残留的 mfa_type，也不看正在绑定、尚未确认的新因子。
+// 动态令牌必须种子已确认：已启用、有种子、非待确认，并且曾经激活过。
+// 短信 / UKey 在类型就是该因子，并且已激活或已启用时视为可用。
+// 类型仍是 totp 但种子已空、或类型已是 none 但激活标记残留，都返回 none。
+func ActivatedFactor(st FactorState) string {
+	switch NormalizeFactor(st.Type) {
+	case FactorTOTP:
+		if st.Activated && st.HasSecret && st.Enabled && !st.Pending {
+			return FactorTOTP
+		}
+		return FactorNone
+	case FactorSMS:
+		if st.Activated || st.Enabled {
+			return FactorSMS
+		}
+		return FactorNone
+	case FactorUKey:
+		if st.Activated || st.Enabled {
+			return FactorUKey
+		}
+		return FactorNone
+	default:
+		return FactorNone
+	}
+}
+
+// HasActivatedFactor 表示操作者当前有可用的第二因子，变更时必须按该因子核验。
+func HasActivatedFactor(st FactorState) bool {
+	return ActivatedFactor(st) != FactorNone
+}
+
 // DecideLogin 决定口令已经正确时，Web 与桌面能不能拿到会话。
 //
 // factor 是账号上指定的因子，不是客户端当场选择的。mfa_enabled=false 不会把已指定的

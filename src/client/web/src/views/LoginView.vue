@@ -6,12 +6,13 @@ import type { LoginResult } from '@/api/types'
 import logo2x from '@/assets/logo@2x.png'
 import logoUrl from '@/assets/logo.png'
 import MfaDialog from '@/components/MfaDialog.vue'
+import TotpLoginDialog from '@/components/TotpLoginDialog.vue'
 import UkeyMfaDialog from '@/components/UkeyMfaDialog.vue'
 import { canAccessPath, firstAllowedPath } from '@/router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { CLIENT_PACKAGES, suggestClientPackageForNavigator } from '@/utils/clientDownload'
-import { TOTP_CLOCK_HINT, shouldShowTotp } from '@/utils/loginTotp'
+import { loginFactorDialog } from '@/utils/loginFactor'
 
 const route = useRoute()
 const router = useRouter()
@@ -21,8 +22,7 @@ const app = useAppStore()
 // 只给当前系统对应的主选包加「推荐」。Windows 与麒麟的链接都保留。
 const suggestedPackageId = suggestClientPackageForNavigator()
 
-const form = ref({ username: '', password: '', totp_code: '' })
-const showTotp = ref(false)
+const form = ref({ username: '', password: '' })
 const submitting = ref(false)
 const errorText = ref('')
 
@@ -95,6 +95,11 @@ const mfaChallengeId = ref('')
 const mfaPhoneMasked = ref('')
 const mfaHint = ref('')
 const mfaDialog = ref<InstanceType<typeof MfaDialog> | null>(null)
+
+const showTotpMfa = ref(false)
+const totpChallengeId = ref('')
+const totpHint = ref('')
+const totpDialog = ref<InstanceType<typeof TotpLoginDialog> | null>(null)
 
 // ---------------------------------------------------------------------------
 // UKey 二次认证
@@ -189,22 +194,19 @@ async function submit(): Promise<void> {
     const result = await auth.login(
       form.value.username,
       form.value.password,
-      form.value.totp_code,
+      undefined,
       captchaNeeded.value ? { id: captchaId.value, code: captchaCode.value.trim() } : undefined,
     )
 
-    // 已指定动态令牌但还没绑定：没有令牌，也不能当成短信挑战。
+    // 已指定动态令牌但还没绑定，且强制开关已打开：没有令牌，也不能当成第二因子弹窗。
     if (result.enrollment_required) {
       errorText.value = result.mfa_hint || '动态令牌尚未绑定，本次未登录'
       return
     }
 
-    // 需要第二因子：打开弹窗，此时还没有令牌
-    if (result.mfa_required) {
-      // UKey 与短信、TOTP 是同一层级的第二因子，但校验方式完全不同：
-      // 短信要用户输入收到的验证码，UKey 要用钥匙里的私钥对服务端原文签名。
-      // 两者共用"账密通过 → 弹窗 → 换取令牌"这条骨架，弹窗各自实现。
-      if (result.mfa_type === 'ukey') {
+    // 账密通过后，只弹出该账号已经指定并生效的那一种因子。用户不能在第一屏自选。
+    switch (loginFactorDialog(result)) {
+      case 'ukey':
         ukeyChallengeId.value = result.challenge_id || ''
         ukeySignData.value = result.sign_data || ''
         ukeySrcData.value = result.src_data || ''
@@ -213,22 +215,25 @@ async function submit(): Promise<void> {
         ukeyHint.value = result.mfa_hint || ''
         showUkeyMfa.value = true
         return
-      }
-      mfaChallengeId.value = result.challenge_id || ''
-      mfaPhoneMasked.value = result.phone_masked || ''
-      mfaHint.value = result.mfa_hint || ''
-      showMfa.value = true
-      return
+      case 'totp':
+        totpChallengeId.value = result.challenge_id || ''
+        totpHint.value = result.mfa_hint || ''
+        showTotpMfa.value = true
+        return
+      case 'sms':
+        mfaChallengeId.value = result.challenge_id || ''
+        mfaPhoneMasked.value = result.phone_masked || ''
+        mfaHint.value = result.mfa_hint || ''
+        showMfa.value = true
+        return
+      default:
+        break
     }
 
     await afterLoginSuccess(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : '登录失败'
     errorText.value = message
-    // 后端提示缺少动态口令时自动展开输入框。原文是「需要输入动态验证码」。
-    if (shouldShowTotp(message)) {
-      showTotp.value = true
-    }
     // 服务端要求图形验证码（或验证码输错）：显示并刷新一张
     if (message.includes('图形验证码')) {
       captchaNeeded.value = true
@@ -269,6 +274,23 @@ function onMfaCancel(): void {
   mfaHint.value = ''
   errorText.value = '已取消二次验证，请重新登录'
 }
+
+async function onTotpSubmit(code: string): Promise<void> {
+  try {
+    const { result } = await auth.verifyMfa(totpChallengeId.value, code)
+    showTotpMfa.value = false
+    await afterLoginSuccess(result)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '验证失败'
+    totpDialog.value?.fail(message)
+  }
+}
+
+function onTotpCancel(): void {
+  totpChallengeId.value = ''
+  totpHint.value = ''
+  errorText.value = '已取消动态口令验证，请重新登录'
+}
 </script>
 
 <template>
@@ -307,18 +329,6 @@ function onMfaCancel(): void {
           />
         </div>
 
-        <div v-if="showTotp" class="form-item">
-          <label class="form-label">动态口令</label>
-          <input
-            v-model.trim="form.totp_code"
-            class="input text-mono"
-            maxlength="6"
-            inputmode="numeric"
-            placeholder="认证器中的 6 位数字"
-          />
-          <span class="form-hint">{{ TOTP_CLOCK_HINT }}</span>
-        </div>
-
         <!-- 图形验证码：仅在连续失败达到阈值后出现 -->
         <div v-if="captchaNeeded" class="form-item">
           <label class="form-label">图形验证码</label>
@@ -352,11 +362,6 @@ function onMfaCancel(): void {
           {{ submitting ? '登录中…' : '登 录' }}
         </button>
 
-        <div class="flex-between">
-          <button class="btn-link" type="button" @click="showTotp = !showTotp">
-            {{ showTotp ? '隐藏动态口令' : '使用动态口令（TOTP）' }}
-          </button>
-        </div>
       </form>
 
       <!--
@@ -395,6 +400,14 @@ function onMfaCancel(): void {
         :hint="mfaHint"
         @submit="onMfaSubmit"
         @cancel="onMfaCancel"
+      />
+
+      <TotpLoginDialog
+        ref="totpDialog"
+        v-model="showTotpMfa"
+        :hint="totpHint"
+        @submit="onTotpSubmit"
+        @cancel="onTotpCancel"
       />
 
       <!-- UKey 第二因子：与短信弹窗互斥，由后端返回的 mfa_type 决定走哪一个 -->

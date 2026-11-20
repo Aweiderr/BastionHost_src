@@ -45,6 +45,16 @@ type loginRecorder interface {
 	Append(ctx context.Context, in repo.LoginLogInput) error
 }
 
+// loginChallengeStore 保存「账密已通过、第二因子未完成」的挑战。
+// *repo.ChallengeRepo 直接满足。
+type loginChallengeStore interface {
+	InvalidateByUser(ctx context.Context, userID int64) error
+	Create(ctx context.Context, c *repo.LoginChallenge) error
+	Get(ctx context.Context, challengeID string) (*repo.LoginChallenge, error)
+	MarkStatus(ctx context.Context, challengeID, status string) error
+	BumpAttempts(ctx context.Context, challengeID string) (int, error)
+}
+
 // AuthService 实现身份认证（对应需求 FR-01）。
 type AuthService struct {
 	userRepo   authUserStore
@@ -55,8 +65,9 @@ type AuthService struct {
 	crypto     *CryptoHelper
 	// sms 短信验证码服务；未配置服务商时为 nil，短信 MFA 整体不启用
 	sms *SmsService
-	// challenges 登录挑战仓储；账密通过后、第二因子校验前的中间态
-	challenges *repo.ChallengeRepo
+	// challenges 登录挑战仓储；账密通过后、第二因子校验前的中间态。
+	// 生产环境是 *repo.ChallengeRepo。单测可以换成内存实现。
+	challenges loginChallengeStore
 	// captcha 图形验证码存储；按连续失败次数触发，不需要时为 nil
 	captcha *captcha.Store
 	// loginLog 登录日志仓储；为 nil 时只打服务日志、不落库
@@ -211,9 +222,10 @@ func (s *AuthService) NeedCaptcha(ctx context.Context, username string) bool {
 }
 
 var (
-	_ authUserStore   = (*repo.UserRepo)(nil)
-	_ authConfigStore = (*repo.ConfigRepo)(nil)
-	_ loginRecorder   = (*repo.LoginLogRepo)(nil)
+	_ authUserStore       = (*repo.UserRepo)(nil)
+	_ authConfigStore     = (*repo.ConfigRepo)(nil)
+	_ loginRecorder       = (*repo.LoginLogRepo)(nil)
+	_ loginChallengeStore = (*repo.ChallengeRepo)(nil)
 )
 
 // NewAuthService 创建认证服务。
@@ -511,7 +523,7 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 	}
 	entry.UserID, entry.TenantID = u.UserID, u.TenantID
 
-	// ---- 3. 只接受账号上指定的那一种因子，不能改用另一种或退回仅口令 ----
+	// ---- 3. 只接受账号上指定且已生效的那一种因子 ----
 	priv, perr := s.userPrivileged(ctx, u.UserID)
 	if perr != nil {
 		return nil, perr
@@ -539,6 +551,12 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 		// 客户端用 UKey 私钥对它签名，再调 /auth/ukey/login 换取令牌。
 		// **这里同样不签发令牌**。已有的动态令牌种子不能改走这条路。
 		return s.issueUKeyChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
+	}
+	if totpView(u).LoginRequiresTOTP() && strings.TrimSpace(req.TOTPCode) == "" {
+		// 第一屏只提交账密和图形验证码。已确认的动态令牌改成挑战，
+		// 由第二步 /auth/mfa/verify 校验。请求里如果带了 totp_code，
+		// verifyUser 已经验过，下面直接签发会话。
+		return s.issueTotpChallenge(ctx, u, req.ClientIP, req.UserAgent, req.ClientType)
 	}
 	if outcome.Enrollment {
 		if !auth.TOTPPasswordEnroll(factorState(u)) {
@@ -683,6 +701,65 @@ func (s *AuthService) issueSmsChallenge(ctx context.Context, u *model.User, clie
 	return res, nil
 }
 
+// issueTotpChallenge 为已确认的动态令牌生成登录挑战。
+//
+// 第一请求只校验口令和图形验证码，不签发令牌。动态口令留到第二步，
+// 这样登录页不必先让用户选择因子。
+func (s *AuthService) issueTotpChallenge(ctx context.Context, u *model.User, clientIP, userAgent, clientType string) (*LoginResult, error) {
+	if s.challenges == nil {
+		return nil, fmt.Errorf("登录挑战组件未启用")
+	}
+	_ = s.challenges.InvalidateByUser(ctx, u.UserID)
+	id, err := repo.NewChallengeID()
+	if err != nil {
+		return nil, err
+	}
+	ttl := time.Duration(s.cfgInt(ctx, "mfa.challenge.ttl_seconds", 300)) * time.Second
+	c := &repo.LoginChallenge{
+		ChallengeID: id, UserID: u.UserID, Username: u.Username, MFAType: auth.FactorTOTP,
+		ClientIP: clientIP, UserAgent: userAgent,
+		ClientType: clientType, ExpireTime: time.Now().Add(ttl),
+	}
+	if err := s.challenges.Create(ctx, c); err != nil {
+		return nil, err
+	}
+	slog.Info("登录进入二次认证", "username", u.Username, "mfa_type", "totp", "ip", clientIP)
+	return &LoginResult{
+		UserID: u.UserID, Username: u.Username, DisplayName: u.DisplayName,
+		MFARequired: true, MFAType: auth.FactorTOTP, ChallengeID: id,
+		ChallengeExpireTime: c.ExpireTime,
+		MFAHint:             "请输入认证器中的 6 位动态口令",
+	}, nil
+}
+
+// acceptLoginTOTP 校验已确认的动态令牌，并记下一用过的时间片。
+//
+// 验证码对不上时与口令错误共用失败计数，对外仍是口令错误，避免在网关入口
+// 把「口令对、动态口令错」和「口令错」分成两种可枚举的结果。
+// 登录挑战的第二步会把这个口令错误改写成「动态口令不正确」。
+// 同一时间片重放直接说动态口令不正确。
+func (s *AuthService) acceptLoginTOTP(ctx context.Context, u *model.User, code string, maxFail, lockMinutes int) error {
+	secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
+	if err != nil {
+		return err
+	}
+	ok, step := auth.MatchTOTP(secret, code, auth.TOTPAlgoSHA1, time.Now())
+	if !ok {
+		return s.onLoginFail(ctx, u, maxFail, lockMinutes)
+	}
+	accepted, err := s.userRepo.AcceptTOTPStep(ctx, u.UserID, step)
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		if err := s.countLoginFail(ctx, u, maxFail, lockMinutes); err != nil {
+			return err
+		}
+		return ErrMFAInvalid
+	}
+	return nil
+}
+
 // SendMFAChallenge 为已有挑战重新发送验证码（弹窗中的"重新发送"）。
 func (s *AuthService) SendMFAChallenge(ctx context.Context, challengeID, clientIP string) (int, error) {
 	c, err := s.loadPendingChallenge(ctx, challengeID, clientIP)
@@ -735,6 +812,43 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 	}
 
 	switch c.MFAType {
+	case "totp":
+		if !totpView(u).LoginRequiresTOTP() {
+			return nil, "", fmt.Errorf("账号的第二因子已变更，请重新登录")
+		}
+		maxFail := 0
+		lockMinutes := 0
+		if s.cfg != nil {
+			maxFail = s.cfg.Auth.MaxLoginFail
+			lockMinutes = int(s.cfg.Auth.LockDuration.Minutes())
+		}
+		maxFail = s.cfgInt(ctx, "security.login.max_fail", maxFail)
+		lockMinutes = s.cfgInt(ctx, "security.login.lock_minutes", lockMinutes)
+		if err := s.acceptLoginTOTP(ctx, u, code, maxFail, lockMinutes); err != nil {
+			// 口令在第一步已经通过。这一步失败只说动态口令不正确，
+			// 不能再报成 AUTH_4001。账号锁定仍保持原错误。
+			if errors.Is(err, ErrInvalidCredential) {
+				err = ErrMFAInvalid
+			}
+			n, _ := s.challenges.BumpAttempts(ctx, c.ChallengeID)
+			reason := err.Error()
+			if n >= maxAttempts || errors.Is(err, ErrAccountLocked) {
+				_ = s.challenges.MarkStatus(ctx, c.ChallengeID, repo.ChallengeFailed)
+				if errors.Is(err, ErrAccountLocked) {
+					reason = err.Error()
+				} else if n >= maxAttempts {
+					reason = "验证失败次数过多，挑战已作废"
+					err = fmt.Errorf("验证失败次数过多，请重新登录")
+				}
+			}
+			s.writeLoginLog(ctx, repo.LoginLogInput{
+				TenantID: u.TenantID, UserID: u.UserID, Username: u.Username,
+				LoginType: "password+totp", ClientType: ct,
+				ClientIP: clientIP, UserAgent: c.UserAgent,
+				Result: "fail", FailReason: reason, MFAUsed: true,
+			})
+			return nil, "", err
+		}
 	case "sms":
 		// 挑战发出后因子若被改掉，这条短信不能再换成令牌。
 		if auth.NormalizeFactor(u.MFAType) != auth.FactorSMS {
@@ -773,8 +887,8 @@ func (s *AuthService) VerifyMFA(ctx context.Context, challengeID, code, clientIP
 	if err != nil {
 		return nil, "", err
 	}
-	authMethod := "password+sms"
-	if s.sms.Bypass() {
+	authMethod := "password+" + c.MFAType
+	if c.MFAType == "sms" && s.sms != nil && s.sms.Bypass() {
 		authMethod = "password+sms_bypass"
 	}
 	slog.Info("二次认证通过，登录成功", "username", u.Username, "auth_method", authMethod, "ip", clientIP)
@@ -959,35 +1073,19 @@ func (s *AuthService) verifyUserEntry(ctx context.Context, username, password, t
 		}
 	}
 
-	// 多因素校验：**只有已经确认的 TOTP 在这一步完成**。
+	// 多因素校验：网关入口（SSH / SFTP / Oracle）仍在这一步附上动态口令。
 	//
-	// 短信与 UKey 属于"挑战式"第二因子：账密通过后由 Login 生成登录挑战，
-	// 再由弹窗（短信）或客户端硬件（UKey）完成校验。
-	// 管理员把类型预置成 totp、但用户还没确认种子时，也不在这里拦截，
-	// 否则账号没有验证码可用。
+	// Web 与桌面的第一请求不带动态口令。已确认的动态令牌由 Login 下发挑战，
+	// 第二步再校验，避免登录页先让用户自己选一种因子。
+	// 短信与 UKey 本来就是挑战式第二因子。尚未确认的动态令牌不在这里拦截。
 	// 网关入口已在上面把短信 / UKey 拒绝掉，不会走到“跳过即成功”。
 	if totpView(u).LoginRequiresTOTP() {
 		if strings.TrimSpace(totpCode) == "" {
-			return nil, ErrMFARequired
-		}
-		secret, err := s.crypto.DecryptMFA(ctx, u.MFASecretCipher)
-		if err != nil {
-			return nil, err
-		}
-		ok, step := auth.MatchTOTP(secret, totpCode, auth.TOTPAlgoSHA1, time.Now())
-		if !ok {
-			return nil, s.onLoginFail(ctx, u, maxFail, lockMinutes)
-		}
-		accepted, err := s.userRepo.AcceptTOTPStep(ctx, u.UserID, step)
-		if err != nil {
-			return nil, err
-		}
-		if !accepted {
-			// 同一时间片已经用过。口令本身是对的，不能记成口令错误。
-			if err := s.countLoginFail(ctx, u, maxFail, lockMinutes); err != nil {
-				return nil, err
+			if gateway {
+				return nil, ErrMFARequired
 			}
-			return nil, ErrMFAInvalid
+		} else if err := s.acceptLoginTOTP(ctx, u, totpCode, maxFail, lockMinutes); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1497,9 +1595,9 @@ func (s *AuthService) ConfirmTOTPBinding(ctx context.Context, userID int64, code
 // UnbindTOTP 解绑动态令牌。
 //
 // 访问令牌不够。必须同时提供当前口令，以及当前动态口令或未使用的恢复码。
-// 解绑后指定因子仍是 totp，种子被清除，不能改成仅口令登录。
-// 恢复码仍然只用一次；用过的时间片不能再登录。丢失认证器且没有未过期会话时，
-// 恢复码不能代替登录，需要管理员在核验自己的因子后重新发起绑定。
+// 解绑后不再指定第二因子：类型、种子、待确认标记和曾生效标记全部清掉。
+// 两个强制开关保持关闭时，这个账号可以只凭口令登录。
+// 恢复码仍然只用一次；用过的时间片不能再登录。
 func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, password, code string) (string, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -1571,14 +1669,12 @@ func (s *AuthService) UnbindTOTP(ctx context.Context, userID int64, password, co
 	}
 	if err := s.auditMFA(ctx, repo.MFAAuditEvent{
 		ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
-		Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorTOTP,
+		Action: "totp_unbind", OldMethod: auth.FactorTOTP, NewMethod: auth.FactorNone,
 		Result: "success", Reason: reason,
 	}); err != nil {
 		return "", err
 	}
-	// 刚刚验证过当前因子。只发一张重新绑定证明；之后的口令登录不能再领。
-	raw, _, err := s.issueProof(ctx, userID, userID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
-	return raw, err
+	return "", nil
 }
 
 func totpCodeLooksLikeDigits(code string) bool {

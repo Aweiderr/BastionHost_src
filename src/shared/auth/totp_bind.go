@@ -9,9 +9,10 @@ import (
 //
 // LoginRequiresTOTP 只在种子已经确认时为 true。
 // 管理员已经指定 totp、但种子还没确认时，本状态机不要求输入验证码
-// （用户还没有码）。登录政策不会因此签发会话，而是走绑定流程。
+// （用户还没有码）。强制开关关闭时登录可以签发会话；开关打开时走绑定流程。
 const (
-	// TOTPPhaseUnbound 未绑定。指定类型仍是 totp 时，登录不能退回仅口令。
+	// TOTPPhaseUnbound 未绑定。解绑会把指定类型清成 none。
+	// 类型仍是 totp 但种子未确认时，是否允许仅口令由登录策略决定。
 	TOTPPhaseUnbound = "unbound"
 	// TOTPPhasePending 已生成种子，用户还没用动态口令确认。
 	TOTPPhasePending = "pending"
@@ -143,9 +144,8 @@ func ApplyTOTPBind(v TOTPBindView, event string) (TOTPBindState, error) {
 		if st.Phase != TOTPPhaseActive {
 			return st, fmt.Errorf("尚未绑定动态令牌")
 		}
-		// 解绑清掉种子和恢复码，但管理员指定的 totp 还在。
-		// 不能因此变成仅口令登录；用户需重新绑定。
-		return TOTPBindState{Phase: TOTPPhaseUnbound, MFAType: "totp"}, nil
+		// 解绑清掉种子、恢复码和指定因子。账号回到尚未指定第二因子。
+		return TOTPBindState{Phase: TOTPPhaseUnbound, MFAType: "none"}, nil
 	case TOTPEventPreset:
 		if st.Phase == TOTPPhaseActive {
 			return st, nil

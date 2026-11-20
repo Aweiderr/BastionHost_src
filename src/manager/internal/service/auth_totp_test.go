@@ -22,6 +22,7 @@ func newTOTPAuth(t *testing.T, users *memAuthUsers) (*AuthService, *memLoginLog,
 		t.Fatal(err)
 	}
 	svc.tm = tm
+	svc.challenges = newMemChallenges()
 	return svc, logs, helper
 }
 
@@ -52,18 +53,47 @@ func TestAdminPresetTOTPDoesNotIssueSession(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.Login(ctx, LoginRequest{Username: "preset", Password: gatewayTestPassword, ClientIP: "10.0.0.8"})
+	if err != nil || res.AccessToken == "" || res.MFARequired || res.EnrollmentRequired {
+		t.Fatalf("强制开关关闭且尚未确认动态令牌时，应当只凭口令登录: %+v %v", res, err)
+	}
+	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.9"); err != nil {
+		t.Fatalf("尚未确认的动态令牌在开关关闭时不应挡住网关口令: %v", err)
+	}
+
+	svc.configRepo = boolConfig{"captcha.enabled": false, cfgRequireAssignedFactor: true}
+	blocked, err := svc.Login(ctx, LoginRequest{Username: "preset", Password: gatewayTestPassword, ClientIP: "10.0.0.10"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.AccessToken != "" || !res.EnrollmentRequired || res.StepUpProof == "" || res.MFAType != "totp" {
-		t.Fatalf("未绑定种子时只能进入绑定，不能签发令牌: %+v", res)
+	if blocked.AccessToken != "" || !blocked.EnrollmentRequired || blocked.StepUpProof == "" {
+		t.Fatalf("要求指定因子后，未确认的动态令牌仍不能签发令牌: %+v", blocked)
 	}
-	entries := logs.snapshot()
-	if len(entries) != 1 || entries[0].Result != "fail" || entries[0].FailReason != reasonTOTPNotEnrolled || entries[0].MFAUsed {
-		t.Fatalf("未完成绑定不应记成登录成功: %+v", entries)
+	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.11"); !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("要求指定因子后，网关不能因尚未绑定就只凭口令进入: %v", err)
 	}
-	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.9"); !errors.Is(err, ErrTOTPNotEnrolled) {
-		t.Fatalf("网关不能因尚未绑定就只凭口令进入: %v", err)
+	_ = logs
+}
+
+func TestLeftoverTOTPAllowsPasswordWhenFlagsOff(t *testing.T) {
+	users := &memAuthUsers{}
+	u := hashedUser(t, 70, "leftover", "totp", false)
+	u.MFAFactorActivated = true
+	users.add(u)
+	users.setRoles(70, []string{"sys_admin"})
+	svc, _, _ := newTOTPAuth(t, users)
+	ctx := context.Background()
+
+	res, err := svc.Login(ctx, LoginRequest{Username: "leftover", Password: gatewayTestPassword, ClientIP: "10.7.0.1"})
+	if err != nil || res == nil || res.AccessToken == "" || res.MFARequired || res.EnrollmentRequired {
+		t.Fatalf("解绑残留且两个开关关闭时，管理员应能只凭口令登录: %+v %v", res, err)
+	}
+	if _, _, _, err := svc.Authenticate(ctx, "leftover", gatewayTestPassword, "", "10.7.0.2"); err != nil {
+		t.Fatalf("同一残留状态不应挡住网关口令: %v", err)
+	}
+
+	svc.configRepo = boolConfig{"captcha.enabled": false, cfgPrivilegedUKeyEnforce: true}
+	if _, err := svc.Login(ctx, LoginRequest{Username: "leftover", Password: gatewayTestPassword}); !errors.Is(err, ErrPrivilegedUKeyRequired) {
+		t.Fatalf("打开管理员 UKey 约束后才应拒绝非 UKey: %v", err)
 	}
 }
 
@@ -73,11 +103,10 @@ func TestTOTPBindingJSONUsesBothFieldNames(t *testing.T) {
 	applyMFASelection(u, "totp")
 	users.add(u)
 	svc, _, _ := newTOTPAuth(t, users)
-	login, err := svc.Login(context.Background(), LoginRequest{Username: "binder", Password: gatewayTestPassword})
-	if err != nil || login.StepUpProof == "" {
-		t.Fatalf("开始绑定需要登录时签发的证明: %v", err)
+	if _, err := svc.Login(context.Background(), LoginRequest{Username: "binder", Password: gatewayTestPassword}); err != nil {
+		t.Fatal(err)
 	}
-	got, err := svc.StartTOTPBinding(context.Background(), 42, "Bastion", login.StepUpProof)
+	got, err := svc.StartTOTPBinding(context.Background(), 42, "Bastion", enrollProof(t, svc, 42))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,10 +149,11 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 	ctx := context.Background()
 
 	enroll, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword})
-	if err != nil || enroll.AccessToken != "" || !enroll.EnrollmentRequired {
-		t.Fatalf("确认前不能拿到会话: %+v %v", enroll, err)
+	if err != nil || enroll.AccessToken == "" || enroll.MFARequired {
+		t.Fatalf("尚未确认时开关关闭应先进入系统: %+v %v", enroll, err)
 	}
-	started, err := svc.StartTOTPBinding(ctx, 43, "", enroll.StepUpProof)
+	proof := enrollProof(t, svc, 43)
+	started, err := svc.StartTOTPBinding(ctx, 43, "", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,17 +187,30 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.1"}); !errors.Is(err, ErrMFARequired) {
-		t.Fatalf("绑定后 Web 登录必须要求动态口令，得到 %v", err)
+	challenged, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.1"})
+	if err != nil || challenged.AccessToken != "" || !challenged.MFARequired || challenged.MFAType != auth.FactorTOTP || challenged.ChallengeID == "" {
+		t.Fatalf("绑定后 Web 登录应先返回动态令牌挑战，得到 %+v %v", challenged, err)
+	}
+	if _, _, err := svc.VerifyMFA(ctx, challenged.ChallengeID, "000000", "10.1.0.1", "web"); !errors.Is(err, ErrMFAInvalid) || err.Error() != "动态口令不正确" {
+		t.Fatalf("挑战上的错误动态口令应说动态口令不正确，得到 %v", err)
 	}
 	var sawRequired bool
 	for _, e := range logs.snapshot() {
-		if e.ClientIP == "10.1.0.1" && e.Result == "fail" && strings.Contains(e.FailReason, "动态") && e.MFAUsed {
+		if e.ClientIP == "10.1.0.1" && e.Result == "fail" && e.FailReason == "动态口令不正确" && e.MFAUsed {
 			sawRequired = true
 		}
 	}
 	if !sawRequired {
-		t.Fatalf("缺少验证码的失败应记 MFAUsed: %+v", logs.snapshot())
+		t.Fatalf("动态口令失败应记 MFAUsed: %+v", logs.snapshot())
+	}
+	// 错误尝试已经作废这次挑战的可用次数之一，换一张新挑战完成登录。
+	challenged, err = svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.1"})
+	if err != nil || challenged.ChallengeID == "" {
+		t.Fatal(err)
+	}
+	done, method, err := svc.VerifyMFA(ctx, challenged.ChallengeID, nextCode, "10.1.0.1", "web")
+	if err != nil || done.AccessToken == "" || method != "password+totp" {
+		t.Fatalf("第二步提交正确动态口令应登录: %+v %s %v", done, method, err)
 	}
 
 	if _, err := svc.Login(ctx, LoginRequest{
@@ -177,20 +220,19 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 	} else if err.Error() != "动态口令不正确" {
 		t.Fatalf("重放动态口令应对用户说动态口令不正确，得到 %q", err.Error())
 	}
-	res, err := svc.Login(ctx, LoginRequest{
+	if _, err := svc.Login(ctx, LoginRequest{
 		Username: "totp-bind", Password: gatewayTestPassword, TOTPCode: nextCode, ClientIP: "10.1.0.2",
-	})
-	if err != nil || res.AccessToken == "" {
-		t.Fatalf("下一时间片应能登录: %v", err)
+	}); !errors.Is(err, ErrMFAInvalid) {
+		t.Fatalf("挑战里用过的下一时间片不能再在同一请求里登录，得到 %v", err)
 	}
 	var sawMFA bool
 	for _, e := range logs.snapshot() {
-		if e.Result == "success" && e.ClientIP == "10.1.0.2" && e.MFAUsed {
+		if e.Result == "success" && e.ClientIP == "10.1.0.1" && e.MFAUsed && e.LoginType == "password+totp" {
 			sawMFA = true
 		}
 	}
 	if !sawMFA {
-		t.Fatalf("真正校验过动态口令的成功登录应记 MFAUsed: %+v", logs.snapshot())
+		t.Fatalf("第二步校验过动态口令的成功登录应记 MFAUsed: %+v", logs.snapshot())
 	}
 	if _, _, _, err := svc.Authenticate(ctx, "totp-bind", gatewayTestPassword, nextCode, "10.1.0.3"); !errors.Is(err, ErrMFAInvalid) {
 		t.Fatalf("网关入口重复使用同一时间片应失败，得到 %v", err)
@@ -222,15 +264,12 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		t.Fatal("解绑后不能再用另一枚恢复码")
 	}
 	after, _ := users.snapshot("totp-bind")
-	if after.MFAEnabled || after.MFAType != "totp" || after.MFASecretCipher != "" || after.MFATotpPending {
-		t.Fatalf("解绑后应清除种子并保持指定因子: %+v", after)
+	if after.MFAEnabled || after.MFAType != "none" || after.MFASecretCipher != "" || after.MFATotpPending || after.MFAFactorActivated {
+		t.Fatalf("解绑后应清除因子、种子和曾生效标记: %+v", after)
 	}
 	again, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword, ClientIP: "10.1.0.5"})
-	if again != nil && again.AccessToken != "" {
-		t.Fatalf("解绑后不能签发登录令牌: %+v", again)
-	}
-	if !errors.Is(err, ErrTOTPNotEnrolled) {
-		t.Fatalf("曾确认过的动态令牌不能只凭口令重新绑定: %v", err)
+	if err != nil || again.AccessToken == "" || again.MFARequired || again.EnrollmentRequired {
+		t.Fatalf("解绑后开关关闭时应只凭口令登录: %+v %v", again, err)
 	}
 }
 
@@ -240,11 +279,10 @@ func TestTOTPUnbindAcceptsFreshCode(t *testing.T) {
 	users.add(u)
 	svc, _, helper := newTOTPAuth(t, users)
 	ctx := context.Background()
-	enroll, err := svc.Login(ctx, LoginRequest{Username: "unbind-otp", Password: gatewayTestPassword})
-	if err != nil {
+	if _, err := svc.Login(ctx, LoginRequest{Username: "unbind-otp", Password: gatewayTestPassword}); err != nil {
 		t.Fatal(err)
 	}
-	started, err := svc.StartTOTPBinding(ctx, 44, "Bastion", enroll.StepUpProof)
+	started, err := svc.StartTOTPBinding(ctx, 44, "Bastion", enrollProof(t, svc, 44))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,14 +294,30 @@ func TestTOTPUnbindAcceptsFreshCode(t *testing.T) {
 	if _, err := svc.UnbindTOTP(ctx, 44, gatewayTestPassword, nextCode); err != nil {
 		t.Fatalf("未使用过的动态口令应能解绑: %v", err)
 	}
-	if _, _, _, err := svc.Authenticate(ctx, "unbind-otp", gatewayTestPassword, "", "10.2.0.1"); !errors.Is(err, ErrTOTPNotEnrolled) {
-		t.Fatalf("解绑后网关不能只凭口令通过: %v", err)
+	if _, _, _, err := svc.Authenticate(ctx, "unbind-otp", gatewayTestPassword, "", "10.2.0.1"); err != nil {
+		t.Fatalf("解绑后网关应只凭口令通过: %v", err)
+	}
+	cleared, _ := users.snapshot("unbind-otp")
+	if cleared.MFAType != "none" || cleared.MFAFactorActivated || cleared.MFASecretCipher != "" || cleared.MFATotpPending {
+		t.Fatalf("动态口令解绑应清成未指定因子: %+v", cleared)
 	}
 	if _, err := svc.BeginStepUp(ctx, StepUpRequest{
 		ActorID: 44, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign, TargetUserID: 44, NewFactor: auth.FactorSMS,
-	}); err == nil {
-		t.Fatal("已生效过的动态令牌丢失后不能改用口令换变更证明")
+	}); err != nil {
+		t.Fatalf("未指定因子后可以用口令换变更证明: %v", err)
 	}
+}
+
+func enrollProof(t *testing.T, svc *AuthService, userID int64) string {
+	t.Helper()
+	res, err := svc.BeginStepUp(context.Background(), StepUpRequest{
+		ActorID: userID, Password: gatewayTestPassword,
+		Action: auth.StepUpTOTPEnroll, TargetUserID: userID,
+	})
+	if err != nil || res == nil || res.Proof == "" {
+		t.Fatalf("尚未确认的动态令牌应能用口令换到绑定证明: %+v %v", res, err)
+	}
+	return res.Proof
 }
 
 func TestApplyMFASelectionKeepsConfirmedSecret(t *testing.T) {

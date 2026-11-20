@@ -205,8 +205,8 @@ func TestTOTPBindStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared.Phase != TOTPPhaseUnbound || cleared.MFAEnabled || cleared.HasSecret || cleared.MFAType != "totp" || cleared.View().LoginRequiresTOTP() {
-		t.Fatalf("解绑后应清掉种子并保持指定因子 totp: %+v", cleared)
+	if cleared.Phase != TOTPPhaseUnbound || cleared.MFAEnabled || cleared.HasSecret || cleared.MFAType != "none" || cleared.View().LoginRequiresTOTP() {
+		t.Fatalf("解绑后应清掉种子和指定因子: %+v", cleared)
 	}
 	if _, err := ApplyTOTPBind(cleared.View(), TOTPEventUnbind); err == nil {
 		t.Fatal("未绑定不能解绑")

@@ -291,7 +291,7 @@ func (s *Server) handleTOTPUnbind(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]any{
 		"unbound":       true,
 		"step_up_proof": proof,
-		"message":       "动态令牌已解绑。账号仍指定动态令牌。请立即用返回的证明重新绑定；关闭后不能只凭口令再领一次。",
+		"message":       "动态令牌已解绑，当前未指定第二因子。强制开关关闭时可以使用用户名和口令登录。",
 	})
 }
 
@@ -339,7 +339,7 @@ func (s *Server) handleTOTPEnrollConfirm(w http.ResponseWriter, r *http.Request)
 	httpx.OK(w, map[string]any{
 		"bound":          true,
 		"recovery_codes": res.RecoveryCodes,
-		"message":        "动态令牌绑定成功。恢复码仅显示一次。解绑需要口令加动态口令或恢复码，且不会改成仅口令登录。",
+		"message":        "动态令牌绑定成功。恢复码仅显示一次。解绑需要口令加动态口令或恢复码，解绑后不再指定第二因子。",
 	})
 }
 

@@ -436,6 +436,8 @@ type LoginResult struct {
 	MustChangePassword bool     `json:"must_change_password"`
 	PasswordExpired    bool     `json:"password_expired"`
 	MFAEnabled         bool     `json:"mfa_enabled"`
+	// MFAFactorActivated 当前因子是否曾经确认并生效。前端不要只凭残留的 mfa_type 判断。
+	MFAFactorActivated bool `json:"mfa_factor_activated,omitempty"`
 	// CertExpiryHint UKey 证书临期/过期提示（登录成功时带回）
 	CertExpiryHint string `json:"cert_expiry_hint,omitempty"`
 
@@ -1373,6 +1375,7 @@ func (s *AuthService) Me(ctx context.Context, userID int64) (*LoginResult, error
 		Roles: roles, Permissions: perms,
 		MustChangePassword: u.MustChangePassword, PasswordExpired: u.PasswordExpired(),
 		MFAEnabled: u.MFAEnabled, MFAType: u.MFAType,
+		MFAFactorActivated: u.MFAFactorActivated,
 	}, nil
 }
 
@@ -1474,20 +1477,35 @@ func newTOTPBinding(issuer, account string, secret []byte) *TOTPBinding {
 
 // StartTOTPBinding 生成 TOTP 种子并返回绑定信息。
 //
-// proof 必须是 totp_enroll：口令登录时发给尚未绑定的账号，或身份核验签发。
-// 旧的访问令牌本身不能开始绑定。此时种子尚未生效。
+// 操作者已有激活的第二因子时，proof 必须是 totp_enroll。
+// 尚未激活任何因子时（含解绑后的 none、残留未确认的 totp），已登录会话即可开始绑定，证明可为空。
+// 确认绑定仍须使用本次签发的 totp_confirm。此时种子尚未生效。
 func (s *AuthService) StartTOTPBinding(ctx context.Context, userID int64, issuer, proof string) (*TOTPBinding, error) {
 	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ConsumeFactorProof(ctx, proof, userID, userID, auth.StepUpTOTPEnroll, auth.FactorTOTP); err != nil {
-		_ = s.auditMFA(ctx, repo.MFAAuditEvent{
-			ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
-			Action: auth.StepUpTOTPEnroll, OldMethod: auth.NormalizeFactor(u.MFAType),
-			Result: "denied", Reason: reasonMissingStepUp,
-		})
-		return nil, err
+	if auth.HasActivatedFactor(factorState(u)) {
+		if err := s.ConsumeFactorProof(ctx, proof, userID, userID, auth.StepUpTOTPEnroll, auth.FactorTOTP); err != nil {
+			_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+				ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+				Action: auth.StepUpTOTPEnroll, OldMethod: auth.NormalizeFactor(u.MFAType),
+				Result: "denied", Reason: reasonMissingStepUp,
+			})
+			return nil, err
+		}
+	}
+	if auth.NormalizeFactor(u.MFAType) == auth.FactorNone {
+		if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventPreset); err != nil {
+			_ = s.auditMFA(ctx, repo.MFAAuditEvent{
+				ActorID: userID, ActorName: u.Username, TargetID: userID, TargetName: u.Username,
+				Action: auth.StepUpTOTPEnroll, OldMethod: auth.NormalizeFactor(u.MFAType),
+				Result: "denied", Reason: reasonPolicyDenied,
+			})
+			return nil, err
+		}
+		u.MFAType = auth.FactorTOTP
+		u.MFAEnabled = false
 	}
 	if _, err := auth.ApplyTOTPBind(totpView(u), auth.TOTPEventStart); err != nil {
 		_ = s.auditMFA(ctx, repo.MFAAuditEvent{

@@ -14,7 +14,7 @@ import {
   toUKeyError,
   verifyPin,
 } from '@/utils/ukeyAgent'
-import { cancelStepUp, currentStepUp, finishStepUp, onStepUpChange, type StepUpAsk } from '@/stepup'
+import { activatedFactor, cancelStepUp, currentStepUp, finishStepUp, onStepUpChange, type StepUpAsk } from '@/stepup'
 
 const auth = useAuthStore()
 const ask = ref<StepUpAsk | null>(null)
@@ -46,7 +46,7 @@ onMounted(() => {
 })
 onUnmounted(() => stop())
 
-const factor = () => auth.user?.mfa_type || 'none'
+const factor = () => activatedFactor(auth.user)
 
 async function submit(): Promise<void> {
   if (!ask.value) return

@@ -16,7 +16,7 @@ import type { SystemConfigItem, SystemInfo } from '@/api/types'
 import DataTable from '@/components/DataTable.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
-import { requestStepUp } from '@/stepup'
+import { requestStepUpIfNeeded } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
@@ -47,11 +47,11 @@ async function loadReadiness(): Promise<void> {
 }
 
 async function toggleEnforcement(which: 'require' | 'privileged', value: boolean): Promise<void> {
-  const proof = await requestStepUp({
+  const proof = await requestStepUpIfNeeded({
     action: 'mfa_enforcement',
     targetUserId: auth.user?.user_id ?? 0,
     title: '确认是您本人在修改第二因子开关',
-  })
+  }, auth.user)
   readiness.value = await setMFAEnforcement({
     step_up_proof: proof,
     ...(which === 'require' ? { require_assigned_factor: value } : { privileged_ukey_enforce: value }),

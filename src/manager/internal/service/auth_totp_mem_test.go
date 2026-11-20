@@ -106,6 +106,9 @@ func (m *memAuthUsers) SetTOTPPending(_ context.Context, userID int64, secretCip
 	u.MFAEnabled = false
 	u.MFATotpPending = true
 	u.MFATotpLastStep = nil
+	if u.MFAType == "" || u.MFAType == "none" {
+		u.MFAType = "totp"
+	}
 	return nil
 }
 

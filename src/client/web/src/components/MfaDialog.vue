@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { sendMfaCode } from '@/api/auth'
 import Modal from '@/components/Modal.vue'
 
@@ -42,6 +42,8 @@ const notice = ref('')
 const countdown = ref(0)
 let timer: number | undefined
 
+const autoSendFailed = computed(() => Boolean(props.hint && props.hint.includes('发送失败')))
+
 function startCountdown(seconds: number): void {
   countdown.value = seconds > 0 ? seconds : DEFAULT_RESEND_SECONDS
   if (timer !== undefined) window.clearInterval(timer)
@@ -71,7 +73,13 @@ watch(
       errorText.value = ''
       notice.value = props.hint || ''
       submitting.value = false
-      startCountdown(DEFAULT_RESEND_SECONDS)
+      if (autoSendFailed.value) {
+        errorText.value = props.hint || '验证码发送失败，请点击「重新发送验证码」'
+        notice.value = ''
+        stopCountdown()
+      } else {
+        startCountdown(DEFAULT_RESEND_SECONDS)
+      }
       void nextTick(() => {
         const el = document.getElementById('mfa-code-input') as HTMLInputElement | null
         el?.focus()
@@ -142,9 +150,16 @@ defineExpose({ fail })
     @update:model-value="$emit('update:modelValue', $event)"
   >
     <div class="text-secondary mb-12" style="font-size: 13px; line-height: 1.6">
-      账号密码已通过验证。为保障安全，请输入发送到
-      <strong style="color: var(--color-primary, #2563eb)">{{ props.phoneMasked || '绑定手机' }}</strong>
-      的短信验证码。
+      <template v-if="autoSendFailed">
+        账号密码已通过验证。验证码未能自动发送到
+        <strong style="color: var(--color-primary, #2563eb)">{{ props.phoneMasked || '绑定手机' }}</strong>
+        ，请点击「重新发送验证码」后再输入，不要把未发出的请求当成已发送。
+      </template>
+      <template v-else>
+        账号密码已通过验证。为保障安全，请输入发送到
+        <strong style="color: var(--color-primary, #2563eb)">{{ props.phoneMasked || '绑定手机' }}</strong>
+        的短信验证码。
+      </template>
     </div>
 
     <div v-if="notice" class="text-secondary mb-8" style="font-size: 12px">{{ notice }}</div>

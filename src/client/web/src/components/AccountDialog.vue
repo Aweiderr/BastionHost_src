@@ -5,7 +5,7 @@ import QRCode from 'qrcode'
 import Modal from '@/components/Modal.vue'
 import { changePassword, totpConfirm, totpStart, totpUnbind } from '@/api/auth'
 import { readTotpStart } from '@/api/totpBind'
-import { requestStepUp } from '@/stepup'
+import { requestStepUpIfNeeded } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { TOTP_CLOCK_HINT } from '@/utils/loginTotp'
@@ -91,12 +91,12 @@ function resetTotpForm(): void {
 async function startTotp(): Promise<void> {
   totpBusy.value = true
   try {
-    const proof = await requestStepUp({
+    const proof = await requestStepUpIfNeeded({
       action: 'totp_enroll',
       targetUserId: auth.user?.user_id ?? 0,
       newFactor: 'totp',
       title: '确认是您本人在绑定动态令牌',
-    })
+    }, auth.user)
     const parsed = readTotpStart(await totpStart(proof))
     confirmProof.value = parsed.stepUpProof || ''
     if (!parsed.secret || !parsed.otpauthUrl) {
@@ -233,7 +233,7 @@ function close(): void {
       </div>
 
       <p v-if="mfaType === 'none'" class="form-hint mb-16">
-        当前未指定第二因子。需要启用时，请在用户管理中指定；强制开关关闭期间可以使用口令登录。
+        当前未指定第二因子。可在此直接开始绑定动态令牌；绑定并激活前，已登录会话即可操作，不必再次核验。强制开关关闭期间可以使用口令登录。
       </p>
       <p v-else-if="!totpActive && mfaType === 'totp'" class="form-hint mb-16">
         管理员已指定动态令牌。确认绑定前，强制开关关闭时仍可使用口令登录。确认之后，登录需要输入动态口令。
@@ -242,7 +242,7 @@ function close(): void {
         当前账号使用的是{{ mfaType === 'sms' ? '短信验证码' : 'UKey 证书' }}，不能在这里改绑动态令牌。如需更换，请联系管理员。
       </p>
 
-      <div v-if="!totpActive && !otherMfa && mfaType === 'totp'" class="form-grid single">
+      <div v-if="!totpActive && !otherMfa && (mfaType === 'totp' || mfaType === 'none')" class="form-grid single">
         <div v-if="!totpSecret" class="form-item">
           <button class="btn btn-primary" :disabled="totpBusy" @click="startTotp">
             <span v-if="totpBusy" class="spinner light" />
@@ -308,7 +308,7 @@ function close(): void {
         </button>
       </template>
       <template v-else>
-        <button v-if="!totpActive && !otherMfa && mfaType === 'totp' && totpSecret" class="btn btn-primary" :disabled="totpBusy" @click="confirmTotp">
+        <button v-if="!totpActive && !otherMfa && (mfaType === 'totp' || mfaType === 'none') && totpSecret" class="btn btn-primary" :disabled="totpBusy" @click="confirmTotp">
           确认绑定
         </button>
         <button v-if="totpActive" class="btn btn-danger" :disabled="totpBusy" @click="unbindTotp">

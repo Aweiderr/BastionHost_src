@@ -22,7 +22,7 @@ import Pagination from '@/components/Pagination.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import UkeyCertDialog from '@/components/UkeyCertDialog.vue'
-import { requestStepUp } from '@/stepup'
+import { requestStepUpIfNeeded } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
@@ -165,8 +165,10 @@ const submitting = ref(false)
 /** 正在等待操作者本人的身份核验。表单此时还没打开，保存按钮也不转圈。 */
 const opening = ref(false)
 const editing = ref<UserItem | null>(null)
-/** 打开表单之前拿到的一次性证明。取消或失败时清空。 */
+/** 打开表单之前拿到的一次性证明。取消或失败时清空。没有已激活因子时可以为空。 */
 const heldProof = ref('')
+/** 已完成核验（含无需弹框的空证明）。与 heldProof 是否为空无关。 */
+const proofReady = ref(false)
 const saveError = ref('')
 
 /** 与创建用户服务端缺省值一致：未填写或 ≤0 时落库为 90 天 */
@@ -248,19 +250,22 @@ async function openAfterStepUp(user?: UserItem): Promise<void> {
   const ask = user ? editUserStepUpAsk(user.user_id) : createUserStepUpAsk()
   let gate = beginUserAdminGate()
   try {
-    const proof = await requestStepUp(ask)
+    const proof = await requestStepUpIfNeeded(ask, auth.user)
     gate = settleStepUp(gate, 'confirmed', proof)
-    if (!gate.formOpen || !gate.proof) {
+    if (!gate.formOpen) {
       heldProof.value = ''
+      proofReady.value = false
       app.error(gate.notice || '身份核验失败')
       return
     }
     heldProof.value = gate.proof
+    proofReady.value = true
     openDialog(user)
   } catch (err) {
     const cancelled = err instanceof Error && err.message === '已取消身份核验'
     gate = settleStepUp(gate, cancelled ? 'cancelled' : 'failed')
     heldProof.value = ''
+    proofReady.value = false
     dialogVisible.value = false
     app.error(gate.notice || (err instanceof Error ? err.message : '身份核验失败'))
   } finally {
@@ -273,6 +278,7 @@ function closeUserDialog(): void {
   if (submitting.value) return
   dialogVisible.value = false
   heldProof.value = ''
+  proofReady.value = false
   saveError.value = ''
   submitting.value = false
 }
@@ -280,6 +286,7 @@ function closeUserDialog(): void {
 watch(dialogVisible, (open) => {
   if (open || submitting.value) return
   heldProof.value = ''
+  proofReady.value = false
   saveError.value = ''
   submitting.value = false
 })
@@ -369,7 +376,7 @@ async function submit(): Promise<void> {
     submitting.value = false
     return
   }
-  if (!heldProof.value) {
+  if (!proofReady.value) {
     app.error('请先完成身份核验')
     saveError.value = '请先完成身份核验'
     submitting.value = false

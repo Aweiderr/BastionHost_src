@@ -181,7 +181,7 @@ func (s *SmsService) Send(ctx context.Context, phone, scene, clientIP, challenge
 		// 下发失败就不入库：否则用户拿到一个永远收不到的码，
 		// 还会占用限流配额
 		slog.Error("短信下发失败", "phone", sms.MaskPhone(phone), "provider", s.provider.Name(), "err", sendErr)
-		return nil, fmt.Errorf("短信发送失败，请稍后重试")
+		return nil, fmt.Errorf("%s", sms.UserVisibleSendError(sendErr))
 	}
 
 	rec := &repo.SmsCode{

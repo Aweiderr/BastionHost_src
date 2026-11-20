@@ -120,7 +120,7 @@ func TestStepUpRejectsReplayWrongTargetAndStale(t *testing.T) {
 	}
 }
 
-func TestPasswordBootstrapRejectsAssignedButUnusableFactors(t *testing.T) {
+func TestPasswordBootstrapSkipsWhenFactorNotActivated(t *testing.T) {
 	secretUsers := func(id int64, name, factor string, enabled bool) *model.User {
 		u := hashedUser(t, id, name, factor, enabled)
 		return u
@@ -139,34 +139,37 @@ func TestPasswordBootstrapRejectsAssignedButUnusableFactors(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("totp not confirmed cannot reassign", func(t *testing.T) {
+	t.Run("totp not confirmed can reassign", func(t *testing.T) {
 		users := &memAuthUsers{}
 		u := secretUsers(2, "preset", "totp", false)
 		users.add(u)
 		svc, _, _ := newTOTPAuth(t, users)
-		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+		// 尚未确认的动态令牌不是已激活因子，已登录会话可用口令改因子或开始绑定。
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
 			ActorID: 2, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
 			TargetUserID: 2, NewFactor: auth.FactorSMS,
-		}); err == nil {
-			t.Fatal("未确认的动态令牌不能只凭口令改因子")
+		})
+		if err != nil || res.Proof == "" {
+			t.Fatalf("未确认的动态令牌应允许口令核验: %v", err)
 		}
-		res, err := svc.BeginStepUp(ctx, StepUpRequest{
+		res, err = svc.BeginStepUp(ctx, StepUpRequest{
 			ActorID: 2, Password: gatewayTestPassword, Action: auth.StepUpTOTPEnroll, TargetUserID: 2,
 		})
 		if err != nil || res.Proof == "" {
 			t.Fatalf("初次绑定应允许口令证明: %v", err)
 		}
 	})
-	t.Run("confirmed totp then cleared", func(t *testing.T) {
+	t.Run("confirmed totp then cleared can rebind", func(t *testing.T) {
 		users := &memAuthUsers{}
 		u := secretUsers(3, "was", "totp", false)
 		u.MFAFactorActivated = true
 		users.add(u)
 		svc, _, _ := newTOTPAuth(t, users)
-		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
 			ActorID: 3, Password: gatewayTestPassword, Action: auth.StepUpTOTPEnroll, TargetUserID: 3,
-		}); err == nil {
-			t.Fatal("曾生效的动态令牌不能只凭口令重绑")
+		})
+		if err != nil || res.Proof == "" {
+			t.Fatalf("解绑残留的 totp 应允许口令重绑: %v", err)
 		}
 	})
 	t.Run("sms without phone", func(t *testing.T) {
@@ -182,27 +185,61 @@ func TestPasswordBootstrapRejectsAssignedButUnusableFactors(t *testing.T) {
 			t.Fatal("短信因子没有手机号时不能退回口令")
 		}
 	})
-	t.Run("ukey without module", func(t *testing.T) {
+	t.Run("ukey assigned but not activated", func(t *testing.T) {
 		users := &memAuthUsers{}
 		users.add(secretUsers(5, "ukey", "ukey", false))
 		svc, _, _ := newTOTPAuth(t, users)
-		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
 			ActorID: 5, Password: gatewayTestPassword, Action: auth.StepUpUKeyBind, TargetUserID: 8,
-		}); err == nil {
-			t.Fatal("已指定 UKey 时不能只凭口令核验")
+		})
+		if err != nil || res.Proof == "" {
+			t.Fatalf("尚未启用的 UKey 不是已激活因子，应允许口令核验: %v", err)
 		}
 	})
-	t.Run("inconsistent none", func(t *testing.T) {
+	t.Run("ukey enabled still requires factor", func(t *testing.T) {
+		users := &memAuthUsers{}
+		users.add(secretUsers(15, "ukey-on", "ukey", true))
+		svc, _, _ := newTOTPAuth(t, users)
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 15, Password: gatewayTestPassword, Action: auth.StepUpUKeyBind, TargetUserID: 8,
+		})
+		// 本测试未装配 UKey 模块时会在挑战阶段返回错误，这仍表示没有退回纯口令证明。
+		if err == nil {
+			if res == nil || res.Proof != "" {
+				t.Fatalf("已启用 UKey 不能只凭口令拿到证明: %+v", res)
+			}
+			return
+		}
+		if res != nil && res.Proof != "" {
+			t.Fatalf("UKey 核验失败时不应附带证明: %+v %v", res, err)
+		}
+	})
+	t.Run("inconsistent none can bootstrap", func(t *testing.T) {
 		users := &memAuthUsers{}
 		u := secretUsers(6, "dirty", "none", false)
 		u.MFAFactorActivated = true
 		users.add(u)
 		svc, _, _ := newTOTPAuth(t, users)
-		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+		res, err := svc.BeginStepUp(ctx, StepUpRequest{
 			ActorID: 6, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
 			TargetUserID: 6, NewFactor: auth.FactorSMS,
+		})
+		if err != nil || res.Proof == "" {
+			t.Fatalf("类型已是 none 时残留激活标记不能挡住口令核验: %v", err)
+		}
+	})
+	t.Run("active totp still requires code", func(t *testing.T) {
+		users := &memAuthUsers{}
+		u := secretUsers(7, "active", "totp", true)
+		u.MFAFactorActivated = true
+		u.MFASecretCipher = "cipher"
+		users.add(u)
+		svc, _, _ := newTOTPAuth(t, users)
+		if _, err := svc.BeginStepUp(ctx, StepUpRequest{
+			ActorID: 7, Password: gatewayTestPassword, Action: auth.StepUpMFAAssign,
+			TargetUserID: 9, NewFactor: auth.FactorSMS,
 		}); err == nil {
-			t.Fatal("类型为空但曾生效的账号不能口令引导")
+			t.Fatal("已激活的动态令牌不能只凭口令核验")
 		}
 	})
 }

@@ -141,3 +141,32 @@ func TestFactorChangeRejectsDowngradeAndNewPrivileged(t *testing.T) {
 		t.Fatal("升到 UKey 应允许")
 	}
 }
+
+func TestActivatedFactorIgnoresResidualAndPending(t *testing.T) {
+	cases := []struct {
+		name string
+		st   FactorState
+		want string
+	}{
+		{"empty", FactorState{}, FactorNone},
+		{"none leftover activated", FactorState{Activated: true}, FactorNone},
+		{"none with secret", FactorState{HasSecret: true}, FactorNone},
+		{"residual totp no secret", FactorState{Type: FactorTOTP, Activated: true}, FactorNone},
+		{"totp pending", FactorState{Type: FactorTOTP, Pending: true, HasSecret: true}, FactorNone},
+		{"totp assigned unconfirmed", FactorState{Type: FactorTOTP}, FactorNone},
+		{"totp active", FactorState{Type: FactorTOTP, Enabled: true, HasSecret: true, Activated: true}, FactorTOTP},
+		{"sms enabled", FactorState{Type: FactorSMS, Enabled: true}, FactorSMS},
+		{"sms activated only", FactorState{Type: FactorSMS, Activated: true}, FactorSMS},
+		{"sms type only", FactorState{Type: FactorSMS}, FactorNone},
+		{"ukey enabled", FactorState{Type: FactorUKey, Enabled: true}, FactorUKey},
+		{"ukey activated", FactorState{Type: FactorUKey, Activated: true}, FactorUKey},
+	}
+	for _, tc := range cases {
+		if got := ActivatedFactor(tc.st); got != tc.want {
+			t.Fatalf("%s: ActivatedFactor=%s want %s", tc.name, got, tc.want)
+		}
+		if HasActivatedFactor(tc.st) != (tc.want != FactorNone) {
+			t.Fatalf("%s: HasActivatedFactor mismatch", tc.name)
+		}
+	}
+}

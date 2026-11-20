@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { isGraphicCaptchaMessage, shouldShowTotp } from '../src/loginError.ts'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { isGraphicCaptchaMessage, loginFactorDialog, shouldShowTotp } from '../src/loginError.ts'
 
 test('graphic captcha errors are not treated as TOTP', () => {
   for (const message of [
@@ -18,6 +21,18 @@ test('dynamic token errors still reveal the TOTP field', () => {
     assert.equal(isGraphicCaptchaMessage(message), false, message)
     assert.equal(shouldShowTotp(message), true, message)
   }
+})
+
+test('desktop login chooses the factor after credentials and has no method switch', () => {
+  assert.equal(loginFactorDialog({ mfa_required: true, mfa_type: 'totp' }), 'totp')
+  assert.equal(loginFactorDialog({ mfa_required: true, mfa_type: 'sms' }), 'sms')
+  assert.equal(loginFactorDialog({ access_token: 'tok' }), 'none')
+  assert.equal(loginFactorDialog({ enrollment_required: true, mfa_required: true, mfa_type: 'totp' }), 'none')
+  const login = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/views/LoginView.vue'), 'utf8')
+  assert.doesNotMatch(login, /使用动态令牌/)
+  assert.doesNotMatch(login, /showTOTP/)
+  assert.match(login, /loginFactorDialog/)
+  assert.match(login, /mfaKind === 'totp'/)
 })
 
 test('plain credential errors open neither prompt', () => {

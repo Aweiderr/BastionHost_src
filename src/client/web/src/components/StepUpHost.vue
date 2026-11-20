@@ -111,6 +111,11 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
+  <!--
+    挂到 body，并压过账户设置、用户编辑等弹窗（.overlay 是 1000）。
+    否则在已经打开的账户对话框里发起核验时，这一层会留在弹窗下面，无法操作。
+  -->
+  <Teleport to="body">
   <div v-if="ask" class="stepup-mask" role="dialog" aria-modal="true" :aria-label="ask.title">
     <div class="card stepup-card">
       <div class="card-header"><span class="card-title">{{ ask.title }}</span></div>
@@ -145,6 +150,7 @@ async function submit(): Promise<void> {
       </div>
     </div>
   </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -155,7 +161,7 @@ async function submit(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 80;
+  z-index: 1600;
 }
 .stepup-card { width: min(440px, calc(100vw - 32px)); }
 </style>

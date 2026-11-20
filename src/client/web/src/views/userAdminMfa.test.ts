@@ -10,6 +10,7 @@ import {
   coerceFactor,
   createUserStepUpAsk,
   editUserStepUpAsk,
+  canSelfServeFactor,
   factorChoices,
   factorLockReason,
   finishSave,
@@ -88,6 +89,17 @@ test('保存成功或失败后转圈结束，失败仍留在表单里', () => {
   assert.equal(ok.formOpen, false)
   assert.equal(ok.proof, '')
   assert.equal(ok.notice, '用户已更新')
+})
+
+test('运维人员和审批人不能在账户页自助绑定第二因子', () => {
+  assert.equal(canSelfServeFactor(['operator']), false)
+  assert.equal(canSelfServeFactor(['approver']), false)
+  assert.equal(canSelfServeFactor(['operator', 'approver']), false)
+  assert.equal(canSelfServeFactor(['sys_admin']), true)
+  assert.equal(canSelfServeFactor(['sec_admin', 'operator']), true)
+  assert.equal(canSelfServeFactor(['super_admin']), true)
+  assert.equal(canSelfServeFactor(['audit_admin']), true)
+  assert.equal(canSelfServeFactor([]), false)
 })
 
 test('目标因子下拉包含三种，且不按操作者自己的动态口令过滤', () => {

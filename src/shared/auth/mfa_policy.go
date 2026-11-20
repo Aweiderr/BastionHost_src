@@ -109,7 +109,8 @@ type LoginOutcome struct {
 // FactorState 是判断“能不能只凭口令核验”所需的账号状态。
 //
 // Activated 表示这个因子曾经真正生效过（动态令牌确认过，或短信/UKey 已被指定为可用因子）。
-// 解绑或证书吊销不会把它清掉。
+// 动态令牌解绑成功后，类型、种子和这个标记一起清掉。
+// 类型已经是 none 但标记仍在时，视为状态不一致，不能只凭口令核验。
 type FactorState struct {
 	Type      string
 	Enabled   bool
@@ -151,7 +152,8 @@ func TOTPPasswordEnroll(st FactorState) bool {
 // factor 是账号上指定的因子，不是客户端当场选择的。mfa_enabled=false 不会把已指定的
 // 短信或 UKey 退回仅口令。totpReady 只在种子已经确认时为 true。
 // ukeyEnforce 与 requireAssigned 默认关闭：关闭时不拒绝“尚未指定因子”的旧账号，
-// 也不强迫已有管理员改用 UKey。这两个开关关闭不等于已指定因子可以跳过。
+// 也不强迫已有管理员改用 UKey，也不把尚未确认的动态令牌当成登录门槛。
+// 这两个开关关闭不等于已经确认的短信、UKey 或动态令牌可以跳过。
 func DecideLogin(factor string, totpReady, totpActivated, privileged, ukeyEnforce, requireAssigned bool) LoginOutcome {
 	factor = NormalizeFactor(factor)
 	if privileged && ukeyEnforce && factor != FactorUKey {
@@ -164,6 +166,11 @@ func DecideLogin(factor string, totpReady, totpActivated, privileged, ukeyEnforc
 		return LoginOutcome{Challenge: FactorUKey}
 	case FactorTOTP:
 		if totpReady {
+			return LoginOutcome{IssueSession: true}
+		}
+		// 种子还没确认（含解绑后残留的 totp）。强制开关关闭时这不是可用因子，
+		// 口令登录直接进入。开关打开后仍拒绝仅口令。
+		if !requireAssigned {
 			return LoginOutcome{IssueSession: true}
 		}
 		if totpActivated {

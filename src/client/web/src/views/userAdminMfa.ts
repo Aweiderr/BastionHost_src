@@ -24,7 +24,7 @@ export interface FactorOption {
 /** 下拉框顺序与文案：UKey、动态口令、短信验证码。不含「仅口令」。 */
 export const TARGET_FACTOR_OPTIONS: readonly Omit<FactorOption, 'disabled'>[] = [
   { value: 'ukey', label: 'UKey', hint: '需配套客户端与硬件。新的管理员账号必须指定 UKey' },
-  { value: 'totp', label: '动态口令', hint: '认证器 App。完成绑定前登录不要求动态口令，用户可在账户页自行绑定' },
+  { value: 'totp', label: '动态口令', hint: '认证器 App。确认前，强制开关关闭时仍可只凭口令登录。管理员可在账户设置里完成绑定' },
   { value: 'sms', label: '短信验证码', hint: '需先填写手机号；弱因子，建议用于运维人员' },
 ]
 
@@ -36,6 +36,11 @@ export function isPrivilegedRole(code: string): boolean {
 
 export function hasPrivilegedRole(roles: readonly string[]): boolean {
   return roles.some((code) => isPrivilegedRole(code))
+}
+
+/** 运维人员和审批人不能在账户页自己绑定或解绑第二因子。管理员可以。 */
+export function canSelfServeFactor(roles: readonly string[]): boolean {
+  return hasPrivilegedRole(roles)
 }
 
 export interface FactorChoiceInput {

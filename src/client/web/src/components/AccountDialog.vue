@@ -9,6 +9,7 @@ import { requestStepUp } from '@/stepup'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { TOTP_CLOCK_HINT } from '@/utils/loginTotp'
+import { canSelfServeFactor } from '@/views/userAdminMfa'
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void }>()
@@ -69,6 +70,7 @@ const confirmProof = ref('')
 const totpBusy = ref(false)
 const recoveryCodes = ref<string[]>([])
 
+const showFactorSettings = computed(() => canSelfServeFactor(auth.roles))
 const mfaType = computed(() => auth.user?.mfa_type || 'none')
 /** 只有已经确认的动态令牌才算启用。管理员预置 totp 时这里仍是待绑定。 */
 const totpActive = computed(() => {
@@ -146,7 +148,7 @@ async function unbindTotp(): Promise<void> {
   totpBusy.value = true
   try {
     await totpUnbind(totpPassword.value, totpCode.value.trim())
-    app.success('已解绑动态令牌')
+    app.success('已解绑动态令牌。当前未指定第二因子，可使用口令登录')
     resetTotpForm()
     await auth.fetchMe()
   } finally {
@@ -188,12 +190,12 @@ function close(): void {
       <button class="tab" :class="{ active: tab === 'password' }" @click="tab = 'password'">
         修改口令
       </button>
-      <button class="tab" :class="{ active: tab === 'totp' }" @click="tab = 'totp'">
+      <button v-if="showFactorSettings" class="tab" :class="{ active: tab === 'totp' }" @click="tab = 'totp'">
         双因素认证
       </button>
     </div>
 
-    <div v-if="mustChange || tab === 'password'" class="form-grid single">
+    <div v-if="mustChange || tab === 'password' || !showFactorSettings" class="form-grid single">
       <div class="form-item">
         <label class="form-label">当前口令<span class="required">*</span></label>
         <input v-model="pwdForm.old_password" class="input" type="password" autocomplete="off" />
@@ -212,7 +214,7 @@ function close(): void {
       </div>
     </div>
 
-    <div v-else>
+    <div v-else-if="showFactorSettings">
       <div class="result-panel mb-16">
         <div class="result-line">
           <span class="result-key">当前状态</span>
@@ -230,14 +232,17 @@ function close(): void {
         </div>
       </div>
 
-      <p v-if="!totpActive && mfaType === 'totp'" class="form-hint mb-16">
-        管理员已指定动态口令。完成绑定前不会签发登录令牌。若以前绑定过，不能只凭口令重绑。
+      <p v-if="mfaType === 'none'" class="form-hint mb-16">
+        当前未指定第二因子。需要启用时，请在用户管理中指定；强制开关关闭期间可以使用口令登录。
+      </p>
+      <p v-else-if="!totpActive && mfaType === 'totp'" class="form-hint mb-16">
+        管理员已指定动态令牌。确认绑定前，强制开关关闭时仍可使用口令登录。确认之后，登录需要输入动态口令。
       </p>
       <p v-if="otherMfa" class="form-hint mb-16">
         当前账号使用的是{{ mfaType === 'sms' ? '短信验证码' : 'UKey 证书' }}，不能在这里改绑动态令牌。如需更换，请联系管理员。
       </p>
 
-      <div v-if="!totpActive && !otherMfa" class="form-grid single">
+      <div v-if="!totpActive && !otherMfa && mfaType === 'totp'" class="form-grid single">
         <div v-if="!totpSecret" class="form-item">
           <button class="btn btn-primary" :disabled="totpBusy" @click="startTotp">
             <span v-if="totpBusy" class="spinner light" />
@@ -280,7 +285,7 @@ function close(): void {
         <div class="form-item">
           <label class="form-label">动态口令或恢复码<span class="required">*</span></label>
           <input v-model="totpCode" class="input" maxlength="32" placeholder="6 位动态口令，或 XXXX-XXXX 恢复码" />
-          <span class="form-hint">{{ TOTP_CLOCK_HINT }} 解绑必须同时校验当前口令和动态口令或恢复码。解绑后不会变成仅口令登录。</span>
+          <span class="form-hint">{{ TOTP_CLOCK_HINT }} 解绑必须同时校验当前口令和动态口令或恢复码。解绑后不再指定第二因子。</span>
         </div>
       </div>
 
@@ -296,14 +301,14 @@ function close(): void {
     <template #footer>
       <button v-if="mustChange" class="btn" type="button" @click="logoutNow">退出登录</button>
       <button class="btn" type="button" @click="close">关闭</button>
-      <template v-if="mustChange || tab === 'password'">
+      <template v-if="mustChange || tab === 'password' || !showFactorSettings">
         <button class="btn btn-primary" :disabled="pwdLoading || !canSubmitPwd" @click="submitPassword">
           <span v-if="pwdLoading" class="spinner light" />
           保存
         </button>
       </template>
       <template v-else>
-        <button v-if="!totpActive && !otherMfa && totpSecret" class="btn btn-primary" :disabled="totpBusy" @click="confirmTotp">
+        <button v-if="!totpActive && !otherMfa && mfaType === 'totp' && totpSecret" class="btn btn-primary" :disabled="totpBusy" @click="confirmTotp">
           确认绑定
         </button>
         <button v-if="totpActive" class="btn btn-danger" :disabled="totpBusy" @click="unbindTotp">

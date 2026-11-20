@@ -2,10 +2,83 @@ package service
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"bastion.local/manager/internal/model"
 	"bastion.local/manager/internal/repo"
 )
+
+type memChallenges struct {
+	mu   sync.Mutex
+	rows map[string]*repo.LoginChallenge
+}
+
+func newMemChallenges() *memChallenges {
+	return &memChallenges{rows: map[string]*repo.LoginChallenge{}}
+}
+
+func (m *memChallenges) InvalidateByUser(_ context.Context, userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, row := range m.rows {
+		if row.UserID == userID && row.Status == repo.ChallengePending {
+			row.Status = repo.ChallengeExpired
+		}
+	}
+	return nil
+}
+
+func (m *memChallenges) Create(_ context.Context, c *repo.LoginChallenge) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *c
+	cp.Status = repo.ChallengePending
+	if cp.CreateTime.IsZero() {
+		cp.CreateTime = time.Now()
+	}
+	m.rows[c.ChallengeID] = &cp
+	c.Status = repo.ChallengePending
+	c.CreateTime = cp.CreateTime
+	return nil
+}
+
+func (m *memChallenges) Get(_ context.Context, challengeID string) (*repo.LoginChallenge, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[challengeID]
+	if !ok {
+		return nil, repo.ErrNotFound
+	}
+	cp := *row
+	return &cp, nil
+}
+
+func (m *memChallenges) MarkStatus(_ context.Context, challengeID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[challengeID]
+	if !ok {
+		return repo.ErrNotFound
+	}
+	row.Status = status
+	if status == repo.ChallengeCompleted {
+		now := time.Now()
+		row.CompleteTime = &now
+	}
+	return nil
+}
+
+func (m *memChallenges) BumpAttempts(_ context.Context, challengeID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[challengeID]
+	if !ok {
+		return 0, repo.ErrNotFound
+	}
+	row.Attempts++
+	return row.Attempts, nil
+}
 
 type memRecoveryCode struct {
 	id   int64
@@ -107,6 +180,8 @@ func (m *memAuthUsers) ClearTOTP(_ context.Context, userID int64, recoveryID int
 		return repo.ErrNotFound
 	}
 	u.MFAEnabled = false
+	u.MFAType = "none"
+	u.MFAFactorActivated = false
 	u.MFASecretCipher = ""
 	u.MFATotpPending = false
 	u.MFATotpLastStep = nil

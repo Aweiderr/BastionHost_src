@@ -9,7 +9,7 @@
 import { onMounted, ref } from 'vue'
 import { state, notify, rejectLogin, clearLoginError, type Profile } from '../store'
 import { isOpsUser, opsDeniedMessage } from '../opsRole'
-import { isGraphicCaptchaMessage, shouldShowTotp } from '../loginError'
+import { isGraphicCaptchaMessage, loginFactorDialog } from '../loginError'
 import { Login, Ping, SetCoreURL, VerifyMFA, ResendMFA, ChangePassword, Logout, CaptchaRequired, FetchCaptcha } from '../../wailsjs/go/main/App'
 
 const emit = defineEmits<{ (e: 'logged-in', p: Profile): void }>()
@@ -17,8 +17,7 @@ const emit = defineEmits<{ (e: 'logged-in', p: Profile): void }>()
 const coreInput = ref('')
 const username = ref('')
 const password = ref('')
-const totp = ref('')
-const showTOTP = ref(false)
+const mfaKind = ref<'sms' | 'totp' | 'ukey' | ''>('')
 const mfaChallenge = ref('')
 const mfaCode = ref('')
 const mfaHint = ref('')
@@ -171,7 +170,7 @@ async function submit() {
     const p: any = await Login(
       username.value,
       password.value,
-      totp.value,
+      '',
       captchaNeeded.value ? captchaId.value : '',
       captchaNeeded.value ? captchaCode.value.trim() : '',
     )
@@ -179,17 +178,26 @@ async function submit() {
       rejectLogin(p?.mfa_hint || '动态令牌尚未绑定，本次未登录')
       return
     }
-    if (p?.mfa_required && p?.challenge_id) {
+    const factor = loginFactorDialog(p)
+    if (factor === 'ukey') {
+      mfaKind.value = ''
+      mfaChallenge.value = ''
+      rejectLogin('该账号使用 UKey。请使用 Web 控制台完成登录。')
+      return
+    }
+    if ((factor === 'totp' || factor === 'sms') && p?.challenge_id) {
+      mfaKind.value = factor
       mfaChallenge.value = p.challenge_id
-      mfaHint.value = p.mfa_hint || `请输入发往 ${p.phone_masked || '手机'} 的验证码`
+      mfaCode.value = ''
+      mfaHint.value = p.mfa_hint || (factor === 'totp'
+        ? '请输入认证器中的 6 位动态口令'
+        : `请输入发往 ${p.phone_masked || '手机'} 的验证码`)
       notify(mfaHint.value, 'info')
       return
     }
     await finishLogin(p)
   } catch (e: any) {
     const msg = String(e?.message || e)
-    // 「请输入图形验证码」也含「验证码」。不能据此展开动态令牌，
-    // 否则输入框被占掉，用户看不到图形验证码。
     if (isGraphicCaptchaMessage(msg)) {
       captchaNeeded.value = true
       rejectLogin(msg)
@@ -203,9 +211,6 @@ async function submit() {
       }
       return
     }
-    if (shouldShowTotp(msg)) {
-      showTOTP.value = true
-    }
     rejectLogin(msg)
   } finally {
     busy.value = false
@@ -214,7 +219,7 @@ async function submit() {
 
 async function submitMFA() {
   if (!mfaChallenge.value || !mfaCode.value) {
-    notify('请输入短信验证码', 'err')
+    notify(mfaKind.value === 'totp' ? '请输入动态口令' : '请输入短信验证码', 'err')
     return
   }
   busy.value = true
@@ -222,6 +227,7 @@ async function submitMFA() {
   try {
     const p: any = await VerifyMFA(mfaChallenge.value, mfaCode.value)
     mfaChallenge.value = ''
+    mfaKind.value = ''
     await finishLogin(p)
   } catch (e: any) {
     rejectLogin(String(e?.message || e))
@@ -309,12 +315,6 @@ function copyDeviceId() {
         <input v-model="password" type="password" placeholder="登录口令" @keyup.enter="submit" />
       </label>
 
-      <label v-if="showTOTP" class="field">
-        <span>动态令牌（6 位）</span>
-        <input v-model="totp" maxlength="6" placeholder="例如 123456" @keyup.enter="submit" />
-        <p class="hint">动态口令每 30 秒更换一次。请确保本机与认证器的时间准确，时间不同步时验证会失败。</p>
-      </label>
-
       <label v-if="captchaNeeded" class="field">
         <span>图形验证码</span>
         <div class="row captcha-row">
@@ -339,7 +339,17 @@ function copyDeviceId() {
         <p class="hint">连续登录失败较多，请输入图形验证码以继续。看不清可点击图片刷新。</p>
       </label>
 
-      <div v-if="mfaChallenge" class="mfa-box">
+      <div v-if="mfaChallenge && mfaKind === 'totp'" class="mfa-box">
+        <label class="field">
+          <span>动态口令</span>
+          <p class="hint">{{ mfaHint }} 动态口令每 30 秒更换一次。请确保本机与认证器的时间准确。</p>
+          <input v-model="mfaCode" maxlength="6" placeholder="6 位数字" @keyup.enter="submitMFA" />
+        </label>
+        <div class="row" style="gap:8px;margin-top:8px">
+          <button type="button" class="primary" :disabled="busy" @click="submitMFA">验证并登录</button>
+        </div>
+      </div>
+      <div v-else-if="mfaChallenge" class="mfa-box">
         <label class="field">
           <span>短信验证码</span>
           <p class="hint">{{ mfaHint }}</p>
@@ -361,10 +371,7 @@ function copyDeviceId() {
         {{ busy ? '登录中…' : '登 录' }}
       </button>
 
-      <div class="row" style="margin-top: 12px; justify-content: space-between">
-        <a class="hint" style="cursor: pointer" @click="showTOTP = !showTOTP">
-          {{ showTOTP ? '隐藏动态令牌' : '使用动态令牌（TOTP）' }}
-        </a>
+      <div class="row" style="margin-top: 12px; justify-content: flex-end">
         <span class="hint">v0.1.0</span>
       </div>
     </div>

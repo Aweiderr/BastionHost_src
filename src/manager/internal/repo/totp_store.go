@@ -107,10 +107,12 @@ func (r *UserRepo) ClearTOTP(ctx context.Context, userID int64, recoveryID int64
 			return ErrRecoveryCodeUsed
 		}
 	}
-	// 指定因子保持 totp。清掉种子后登录进入重新绑定，而不是仅口令。
+	// 解绑后不再指定第二因子。种子、待确认标记和曾生效标记一并清掉，
+	// 强制开关关闭时这个账号可以只凭口令登录。
 	tag, err := tx.Exec(ctx, `UPDATE sys_user
-		SET mfa_enabled=false, mfa_secret_cipher=NULL,
-		    mfa_totp_pending=false, mfa_totp_last_step=NULL, update_time=now()
+		SET mfa_enabled=false, mfa_type='none', mfa_secret_cipher=NULL,
+		    mfa_totp_pending=false, mfa_totp_last_step=NULL,
+		    mfa_factor_activated=false, update_time=now()
 		WHERE user_id=$1 AND mfa_type='totp'`, userID)
 	if err != nil {
 		return fmt.Errorf("解除动态令牌失败: %w", err)

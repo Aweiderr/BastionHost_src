@@ -33,8 +33,11 @@ func TestDecideLoginUsesAssignedFactorOnly(t *testing.T) {
 		want      LoginOutcome
 	}{
 		{"totp ready", FactorTOTP, true, false, false, false, false, LoginOutcome{IssueSession: true}},
-		{"totp enroll", FactorTOTP, false, false, false, false, false, LoginOutcome{Enrollment: true}},
-		{"totp rebound", FactorTOTP, false, true, false, false, false, LoginOutcome{DenyReason: "totp_rebind_blocked"}},
+		{"totp enroll flags off", FactorTOTP, false, false, false, false, false, LoginOutcome{IssueSession: true}},
+		{"totp rebound flags off", FactorTOTP, false, true, false, false, false, LoginOutcome{IssueSession: true}},
+		{"totp enroll when required", FactorTOTP, false, false, false, false, true, LoginOutcome{Enrollment: true}},
+		{"totp rebound when required", FactorTOTP, false, true, false, false, true, LoginOutcome{DenyReason: "totp_rebind_blocked"}},
+		{"priv leftover totp flags off", FactorTOTP, false, true, true, false, false, LoginOutcome{IssueSession: true}},
 		{"sms disabled flag", FactorSMS, false, false, false, false, false, LoginOutcome{Challenge: FactorSMS}},
 		{"ukey disabled flag", FactorUKey, false, false, false, false, false, LoginOutcome{Challenge: FactorUKey}},
 		{"legacy none", FactorNone, false, false, false, false, false, LoginOutcome{IssueSession: true}},

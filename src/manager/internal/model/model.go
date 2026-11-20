@@ -48,7 +48,8 @@ type User struct {
 	MFATotpPending bool `json:"-"`
 	// MFATotpLastStep 最近一次接受的 TOTP 时间片。小于或等于该值的验证码拒绝。
 	MFATotpLastStep *int64 `json:"-"`
-	// MFAFactorActivated 表示第二因子曾经生效。解绑或材料丢失后仍为 true。
+	// MFAFactorActivated 表示第二因子曾经生效。
+	// 动态令牌解绑成功后与类型、种子一起清掉。类型已是 none 但标记仍在时，登录不降级放行。
 	MFAFactorActivated bool `json:"-"`
 	Status             string     `json:"status"`
 	UserType           string     `json:"user_type"`

@@ -11,8 +11,31 @@ export function isGraphicCaptchaMessage(message: string): boolean {
   return message.includes('图形验证码')
 }
 
-/** 只有口令第二因子相关的失败才展开动态令牌，图形验证码不算。 */
+/** 只有口令第二因子相关的失败才算动态令牌，图形验证码不算。登录页不再据此展开输入框。 */
 export function shouldShowTotp(message: string): boolean {
   if (isGraphicCaptchaMessage(message)) return false
   return message.includes('多因素') || message.includes('验证码') || message.includes('动态')
+}
+
+export type LoginFactorDialog = 'none' | 'totp' | 'sms' | 'ukey'
+
+/** 账密通过后应弹出的因子。第一屏不能自选。未标明类型的旧挑战按短信处理。 */
+export function loginFactorDialog(result: {
+  access_token?: string
+  mfa_required?: boolean
+  mfa_type?: string
+  enrollment_required?: boolean
+} | null | undefined): LoginFactorDialog {
+  if (!result || result.enrollment_required) return 'none'
+  if (!result.mfa_required || result.access_token) return 'none'
+  switch ((result.mfa_type || '').toLowerCase()) {
+    case 'totp':
+      return 'totp'
+    case 'ukey':
+      return 'ukey'
+    case 'sms':
+      return 'sms'
+    default:
+      return 'sms'
+  }
 }

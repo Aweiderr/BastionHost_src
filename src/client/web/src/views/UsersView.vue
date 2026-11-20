@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { UKEY_BIND_PERMISSION, listUKeyCerts } from '@/api/ukey'
+import { ApiError } from '@/api/http'
 import {
   createUser,
   deleteUser,
@@ -26,6 +27,19 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { TableColumn } from '@/types/ui'
 import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '@/utils/clipboard'
+import {
+  beginSave,
+  beginUserAdminGate,
+  coerceFactor,
+  createUserStepUpAsk,
+  editUserStepUpAsk,
+  factorChoices,
+  factorLockReason,
+  finishSave,
+  isTargetFactor,
+  settleStepUp,
+  type FactorChoiceInput,
+} from '@/views/userAdminMfa'
 import { USER_STATUS_MAP, dictLabel, dictTone, roleLabel } from '@/utils/constants'
 import { formatTime } from '@/utils/format'
 
@@ -148,7 +162,12 @@ function onPageSizeChange(next: number): void {
 
 const dialogVisible = ref(false)
 const submitting = ref(false)
+/** 正在等待操作者本人的身份核验。表单此时还没打开，保存按钮也不转圈。 */
+const opening = ref(false)
 const editing = ref<UserItem | null>(null)
+/** 打开表单之前拿到的一次性证明。取消或失败时清空。 */
+const heldProof = ref('')
+const saveError = ref('')
 
 /** 与创建用户服务端缺省值一致：未填写或 ≤0 时落库为 90 天 */
 const PASSWORD_EXPIRE_DAYS_DEFAULT = 90
@@ -170,22 +189,29 @@ const form = reactive({
   roles: [] as string[],
   remark: '',
   /**
-   * 第二因子类型：none / totp / sms / ukey
-   *
-   * 这是"除账密外额外选择一种认证方式"的入口。
-   * 选 sms 时必须填手机号，否则用户登录时会卡在验证码弹窗上收不到码；
-   * 服务端有同样的校验，这里提前提示体验更好。
+   * 目标用户的第二因子：ukey / totp / sms。
+   * 空字符串表示还没选。不能写成 none：创建必须指定一种，也不能把已有因子清空成仅口令。
    */
-  mfa_type: 'none' as 'none' | 'totp' | 'sms' | 'ukey',
+  mfa_type: '' as '' | 'totp' | 'sms' | 'ukey',
 })
 
-/** MFA 选项：文案要说清这是**第二因子**，而不是"选择登录方式" */
-const MFA_OPTIONS = [
-  { value: 'none', label: '不启用', hint: '仅账号 + 口令' },
-  { value: 'totp', label: '动态口令（TOTP）', hint: '认证器 App。完成绑定前登录不要求动态口令，用户可在账户页自行绑定' },
-  { value: 'sms', label: '短信验证码', hint: '需先填写手机号；弱因子，建议用于运维人员' },
-  { value: 'ukey', label: 'UKey 证书', hint: '需配套客户端与硬件，建议用于管理员' },
-]
+function factorInput(): FactorChoiceInput {
+  return {
+    roles: form.roles,
+    editing: Boolean(editing.value),
+    previousRoles: editing.value?.roles ?? [],
+    previousFactor: editing.value?.mfa_type || '',
+  }
+}
+
+const factorChoiceList = computed(() => factorChoices(factorInput()))
+const factorHint = computed(() => factorChoiceList.value.find((opt) => opt.value === form.mfa_type)?.hint ?? '')
+const factorLocked = computed(() => factorLockReason(factorInput()))
+
+function applyFactorPolicy(): void {
+  const next = coerceFactor(form.mfa_type, factorChoiceList.value)
+  if (next === 'ukey' || next === 'totp' || next === 'sms' || next === '') form.mfa_type = next
+}
 
 function openDialog(user?: UserItem): void {
   editing.value = user ?? null
@@ -199,14 +225,64 @@ function openDialog(user?: UserItem): void {
       : PASSWORD_EXPIRE_DAYS_DEFAULT
   form.email = user?.email ?? ''
   form.phone = user?.phone ?? ''
-  form.mfa_type = (user?.mfa_type as typeof form.mfa_type) ?? 'none'
+  form.mfa_type = user?.mfa_type === 'ukey' || user?.mfa_type === 'totp' || user?.mfa_type === 'sms' ? user.mfa_type : ''
   form.roles = [...(user?.roles ?? [])]
   form.remark = user?.remark ?? ''
+  applyFactorPolicy()
+  saveError.value = ''
   dialogVisible.value = true
   // 选中 ukey 时需要就地告诉管理员"这个账号到底有没有可用证书"，
   // 因此编辑已有用户时先把数量查出来
   void loadUserCertCount()
 }
+
+/**
+ * 新建和编辑都先核验操作者本人。
+ * 证明成功才打开表单；取消或失败只提示，不打开表单，也不让保存按钮继续转。
+ */
+async function openAfterStepUp(user?: UserItem): Promise<void> {
+  if (opening.value || submitting.value) return
+  opening.value = true
+  submitting.value = false
+  saveError.value = ''
+  const ask = user ? editUserStepUpAsk(user.user_id) : createUserStepUpAsk()
+  let gate = beginUserAdminGate()
+  try {
+    const proof = await requestStepUp(ask)
+    gate = settleStepUp(gate, 'confirmed', proof)
+    if (!gate.formOpen || !gate.proof) {
+      heldProof.value = ''
+      app.error(gate.notice || '身份核验失败')
+      return
+    }
+    heldProof.value = gate.proof
+    openDialog(user)
+  } catch (err) {
+    const cancelled = err instanceof Error && err.message === '已取消身份核验'
+    gate = settleStepUp(gate, cancelled ? 'cancelled' : 'failed')
+    heldProof.value = ''
+    dialogVisible.value = false
+    app.error(gate.notice || (err instanceof Error ? err.message : '身份核验失败'))
+  } finally {
+    opening.value = false
+    submitting.value = false
+  }
+}
+
+function closeUserDialog(): void {
+  if (submitting.value) return
+  dialogVisible.value = false
+  heldProof.value = ''
+  saveError.value = ''
+  submitting.value = false
+}
+
+watch(dialogVisible, (open) => {
+  if (open || submitting.value) return
+  heldProof.value = ''
+  saveError.value = ''
+  submitting.value = false
+})
 
 /* --------------------------------------------------- UKey 证书（第二因子） */
 
@@ -254,6 +330,7 @@ function toggleRole(code: string): void {
   const index = form.roles.indexOf(code)
   if (index >= 0) form.roles.splice(index, 1)
   else form.roles.push(code)
+  applyFactorPolicy()
 }
 
 async function submit(): Promise<void> {
@@ -279,25 +356,37 @@ async function submit(): Promise<void> {
     app.error('请至少分配一个角色')
     return
   }
-  submitting.value = true
+  applyFactorPolicy()
+  if (!isTargetFactor(form.mfa_type)) {
+    app.error('请选择二次认证方式')
+    saveError.value = '请选择二次认证方式'
+    submitting.value = false
+    return
+  }
+  if (form.mfa_type === 'sms' && !form.phone.trim()) {
+    app.error('选择短信二次认证时必须填写手机号')
+    saveError.value = '选择短信二次认证时必须填写手机号'
+    submitting.value = false
+    return
+  }
+  if (!heldProof.value) {
+    app.error('请先完成身份核验')
+    saveError.value = '请先完成身份核验'
+    submitting.value = false
+    return
+  }
+  const proof = heldProof.value
+  const factor = form.mfa_type
+  let gate = beginSave({
+    phase: 'form',
+    formOpen: true,
+    submitting: false,
+    proof,
+    notice: '',
+  })
+  submitting.value = gate.submitting
+  saveError.value = ''
   try {
-    const privileged = new Set(['super_admin', 'sys_admin', 'sec_admin', 'audit_admin'])
-    const wasPrivileged = (editing.value?.roles ?? []).some((code) => privileged.has(code))
-    const willPrivileged = form.roles.some((code) => privileged.has(code))
-    const factorChanged = !editing.value || form.mfa_type !== (editing.value.mfa_type || 'none')
-    const phoneChanged = Boolean(editing.value) && form.phone !== (editing.value?.phone || '') &&
-      (form.mfa_type === 'sms' || editing.value?.mfa_type === 'sms')
-    const grantPrivileged = Boolean(editing.value) && !wasPrivileged && willPrivileged
-    let stepUpProof = ''
-    if (!editing.value || factorChanged || phoneChanged || grantPrivileged) {
-      const action = grantPrivileged ? 'grant_privileged' : phoneChanged && !factorChanged ? 'mfa_phone' : 'mfa_assign'
-      stepUpProof = await requestStepUp({
-        action,
-        targetUserId: editing.value?.user_id ?? 0,
-        newFactor: grantPrivileged ? 'ukey' : form.mfa_type,
-        title: editing.value ? '确认是您本人在修改用户认证' : '确认是您本人在创建用户',
-      })
-    }
     if (editing.value) {
       await updateUser(editing.value.user_id, {
         display_name: form.display_name.trim(),
@@ -305,11 +394,11 @@ async function submit(): Promise<void> {
         phone: form.phone,
         roles: form.roles,
         remark: form.remark,
-        mfa_type: form.mfa_type,
+        mfa_type: factor,
         password_expire_days: expireDays,
-        step_up_proof: stepUpProof,
+        step_up_proof: proof,
       })
-      app.success('用户已更新')
+      gate = finishSave(gate, true, '用户已更新')
     } else {
       await createUser({
         username: form.username.trim(),
@@ -319,20 +408,32 @@ async function submit(): Promise<void> {
         phone: form.phone,
         roles: form.roles,
         remark: form.remark,
-        mfa_type: form.mfa_type,
+        mfa_type: factor,
         password_expire_days: expireDays,
-        step_up_proof: stepUpProof,
+        step_up_proof: proof,
       })
-      app.success('用户创建成功')
+      gate = finishSave(gate, true, '用户创建成功')
     }
+    app.success(gate.notice)
+    heldProof.value = ''
+    saveError.value = ''
     dialogVisible.value = false
-    // 认证方式可能刚被改成 ukey，刷新已缓存的有效证书数量，避免下次打开显示旧值
+  } catch (err) {
+    const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : '保存失败'
+    gate = finishSave(gate, false, message)
+    saveError.value = gate.notice
+    if (!(err instanceof ApiError)) app.error(gate.notice || '保存失败')
+    return
+  } finally {
+    submitting.value = false
+  }
+  // 认证方式可能刚被改成 ukey，刷新已缓存的有效证书数量，避免下次打开显示旧值。
+  // 刷新失败不能把已经成功的保存再显示成失败，也不能让按钮继续转。
+  try {
     await loadUserCertCount()
     await load()
   } catch {
-    /* 已提示 */
-  } finally {
-    submitting.value = false
+    /* 列表刷新失败时接口层已提示 */
   }
 }
 
@@ -471,7 +572,7 @@ async function openPermissions(): Promise<void> {
       <div class="page-menu" role="toolbar" aria-label="用户管理">
         <button v-if="canViewRole" class="btn" type="button" @click="openPermissions">角色与权限说明</button>
         <button class="btn" type="button" :disabled="loading" @click="refresh">刷新</button>
-        <button v-if="canCreate" class="btn btn-primary" type="button" @click="openDialog()">新建用户</button>
+        <button v-if="canCreate" class="btn btn-primary" type="button" :disabled="opening || submitting" @click="openAfterStepUp()">新建用户</button>
       </div>
     </div>
 
@@ -542,11 +643,12 @@ async function openPermissions(): Promise<void> {
           </td>
           <td class="text-secondary">{{ formatTime(row.last_login_time) }}</td>
           <td class="col-actions">
-            <button v-if="canUpdate" class="btn-link" @click="openDialog(row)">编辑</button>
+            <button v-if="canUpdate" class="btn-link" :disabled="opening || submitting" @click="openAfterStepUp(row)">编辑</button>
             <!-- 绑定证书归 system:user:update（与"修改用户"同权限）：
                  它是"改这个用户的认证方式"，属用户维度操作。
-                 注意与证书链管理页（key:cert:manage）区分，两者不是一回事 -->
-            <button v-if="canManageUkey" class="btn-link" @click="openUkeyDialog(row)">证书链</button>
+                 注意与证书链管理页（key:cert:manage）区分，两者不是一回事。
+                 这一行的按钮文案保持官方界面的「绑定UKEY」。 -->
+            <button v-if="canManageUkey" class="btn-link" @click="openUkeyDialog(row)">绑定UKEY</button>
             <button v-if="canUpdate" class="btn-link" @click="resetTarget = row">重置口令</button>
             <button v-if="canDelete" class="btn-link danger" @click="userToRemove = row">删除</button>
           </td>
@@ -608,14 +710,21 @@ async function openPermissions(): Promise<void> {
         </div>
 
         <div class="form-item span-2">
-          <label class="form-label">二次认证方式</label>
+          <label class="form-label">二次认证方式<span class="required">*</span></label>
           <select v-model="form.mfa_type" class="input" @change="loadUserCertCount">
-            <option v-for="opt in MFA_OPTIONS" :key="opt.value" :value="opt.value">
+            <option value="" disabled>请选择</option>
+            <option
+              v-for="opt in factorChoiceList"
+              :key="opt.value"
+              :value="opt.value"
+              :disabled="opt.disabled"
+            >
               {{ opt.label }}
             </option>
           </select>
-          <div class="form-hint">
-            {{ MFA_OPTIONS.find((o) => o.value === form.mfa_type)?.hint }}
+          <div v-if="factorHint" class="form-hint">{{ factorHint }}</div>
+          <div v-if="factorLocked" class="text-warning" style="font-size: 12px; margin-top: 4px">
+            {{ factorLocked }}
           </div>
           <div
             v-if="form.mfa_type === 'sms' && !form.phone.trim()"
@@ -631,11 +740,11 @@ async function openPermissions(): Promise<void> {
           -->
           <div v-if="form.mfa_type === 'ukey'" style="font-size: 12px; margin-top: 6px">
             <span v-if="!editing" class="text-warning">
-              新用户创建后请点列表中的「证书链」为其绑定至少一张证书，否则该账号无法登录。
+              新用户创建后请点列表中的「绑定UKEY」为其绑定至少一张证书，否则该账号无法登录。
             </span>
             <template v-else>
               <span v-if="ukeyCertCount === null" class="text-secondary">
-                无法读取已绑定证书数量（可能无权限），请用列表中的「证书链」按钮查看。
+                无法读取已绑定证书数量（可能无权限），请用列表中的「绑定UKEY」按钮查看。
               </span>
               <span v-else-if="ukeyCertCount === 0" class="text-danger">
                 该账号当前<strong>没有有效证书</strong>，将无法登录。
@@ -670,8 +779,9 @@ async function openPermissions(): Promise<void> {
           <textarea v-model="form.remark" class="textarea" />
         </div>
       </div>
+      <p v-if="saveError" class="text-danger" style="font-size: 13px; margin: 8px 0 0">{{ saveError }}</p>
       <template #footer>
-        <button class="btn" @click="dialogVisible = false">取消</button>
+        <button class="btn" :disabled="submitting" @click="closeUserDialog">取消</button>
         <button class="btn btn-primary" :disabled="submitting" @click="submit">
           <span v-if="submitting" class="spinner light" />
           保存

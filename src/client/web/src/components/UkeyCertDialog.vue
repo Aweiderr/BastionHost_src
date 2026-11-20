@@ -22,7 +22,7 @@
  *    证书颁发者与内部 CA 主体比对后**自动判断** —— 那是实现细节，
  *    让用户选只会多一次选错的机会（选错必被服务端链校验拒绝）。
  *
- * 入口：用户管理页的「证书链」按钮（权限 system:user:update）。
+ * 入口：用户管理页的「绑定UKEY」按钮（权限 system:user:update）。
  */
 import { computed, ref, watch } from 'vue'
 import {

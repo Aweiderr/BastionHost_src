@@ -1,0 +1,187 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { cancelStepUp, currentStepUp, finishStepUp, requestStepUp } from '../stepup.ts'
+import {
+  beginSave,
+  beginUserAdminGate,
+  coerceFactor,
+  createUserStepUpAsk,
+  editUserStepUpAsk,
+  factorChoices,
+  factorLockReason,
+  finishSave,
+  settleStepUp,
+  type FactorOption,
+} from './userAdminMfa.ts'
+
+const srcRoot = dirname(fileURLToPath(import.meta.url))
+
+function labels(options: FactorOption[]): string[] {
+  return options.map((opt) => opt.label)
+}
+
+function enabled(options: FactorOption[]): string[] {
+  return options.filter((opt) => !opt.disabled).map((opt) => opt.value)
+}
+
+test('新建用户先核验操作者，目标为 0，此时还不绑定对方的因子', () => {
+  const ask = createUserStepUpAsk()
+  assert.equal(ask.action, 'mfa_assign')
+  assert.equal(ask.targetUserId, 0)
+  assert.equal(ask.newFactor, '')
+  assert.equal(ask.title, '确认是您本人在创建用户')
+  const gate = beginUserAdminGate()
+  assert.equal(gate.formOpen, false)
+  assert.equal(gate.submitting, false)
+  const opened = settleStepUp(gate, 'confirmed', 'proof-create')
+  assert.equal(opened.formOpen, true)
+  assert.equal(opened.submitting, false)
+  assert.equal(opened.proof, 'proof-create')
+})
+
+test('编辑用户先核验操作者，目标绑定到该用户', () => {
+  const ask = editUserStepUpAsk(42)
+  assert.equal(ask.action, 'mfa_assign')
+  assert.equal(ask.targetUserId, 42)
+  assert.equal(ask.newFactor, '')
+  assert.equal(ask.title, '确认是您本人在修改用户认证')
+  const opened = settleStepUp(beginUserAdminGate(), 'confirmed', 'proof-edit')
+  assert.equal(opened.formOpen, true)
+  assert.equal(opened.proof, 'proof-edit')
+  assert.equal(opened.submitting, false)
+})
+
+test('取消或失败的核验不会打开表单，保存状态必须清掉', () => {
+  for (const outcome of ['cancelled', 'failed'] as const) {
+    const gate = settleStepUp(
+      { ...beginUserAdminGate(), submitting: true },
+      outcome,
+      outcome === 'failed' ? 'unused' : '',
+    )
+    assert.equal(gate.formOpen, false)
+    assert.equal(gate.submitting, false)
+    assert.equal(gate.proof, '')
+    assert.notEqual(gate.notice, '')
+  }
+  const empty = settleStepUp(beginUserAdminGate(), 'confirmed', '   ')
+  assert.equal(empty.formOpen, false)
+  assert.equal(empty.submitting, false)
+  assert.equal(empty.notice, '身份核验失败')
+})
+
+test('保存成功或失败后转圈结束，失败仍留在表单里', () => {
+  const ready = settleStepUp(beginUserAdminGate(), 'confirmed', 'proof-1')
+  const saving = beginSave(ready)
+  assert.equal(saving.submitting, true)
+  assert.equal(saving.formOpen, true)
+  const failed = finishSave(saving, false, '手机号不能为空')
+  assert.equal(failed.submitting, false)
+  assert.equal(failed.formOpen, true)
+  assert.equal(failed.proof, 'proof-1')
+  assert.equal(failed.notice, '手机号不能为空')
+  const again = beginSave(failed)
+  const ok = finishSave(again, true, '用户已更新')
+  assert.equal(ok.submitting, false)
+  assert.equal(ok.formOpen, false)
+  assert.equal(ok.proof, '')
+  assert.equal(ok.notice, '用户已更新')
+})
+
+test('目标因子下拉包含三种，且不按操作者自己的动态口令过滤', () => {
+  const operator = factorChoices({ roles: ['operator'], editing: false })
+  assert.deepEqual(labels(operator), ['UKey', '动态口令', '短信验证码'])
+  assert.deepEqual(enabled(operator), ['ukey', 'totp', 'sms'])
+  const approver = factorChoices({ roles: ['approver'], editing: true, previousRoles: ['approver'], previousFactor: 'totp' })
+  assert.deepEqual(enabled(approver), ['ukey', 'totp', 'sms'])
+  assert.equal(factorLockReason({ roles: ['operator'], editing: false }), '')
+})
+
+test('新建或新授予的管理员只能选 UKey，已有 UKey 管理员不能改掉', () => {
+  const created = factorChoices({ roles: ['sys_admin'], editing: false })
+  assert.deepEqual(enabled(created), ['ukey'])
+  assert.equal(coerceFactor('sms', created), 'ukey')
+  assert.equal(factorLockReason({ roles: ['sec_admin', 'operator'], editing: false }), '新的管理员账号必须指定 UKey')
+
+  const granted = factorChoices({
+    roles: ['operator', 'audit_admin'],
+    editing: true,
+    previousRoles: ['operator'],
+    previousFactor: 'sms',
+  })
+  assert.deepEqual(enabled(granted), ['ukey'])
+  assert.match(factorLockReason({
+    roles: ['audit_admin'],
+    editing: true,
+    previousRoles: ['operator'],
+    previousFactor: 'sms',
+  }), /UKey/)
+
+  const kept = factorChoices({
+    roles: ['sys_admin'],
+    editing: true,
+    previousRoles: ['sys_admin'],
+    previousFactor: 'ukey',
+  })
+  assert.deepEqual(enabled(kept), ['ukey'])
+  assert.equal(
+    factorLockReason({
+      roles: ['sys_admin'],
+      editing: true,
+      previousRoles: ['sys_admin'],
+      previousFactor: 'ukey',
+    }),
+    '管理员账号已指定 UKey，不能改成其它方式',
+  )
+})
+
+test('已有的非 UKey 管理员仍可保留原来的因子', () => {
+  const legacy = factorChoices({
+    roles: ['sys_admin'],
+    editing: true,
+    previousRoles: ['sys_admin'],
+    previousFactor: 'totp',
+  })
+  assert.deepEqual(enabled(legacy), ['ukey', 'totp', 'sms'])
+  assert.equal(coerceFactor('totp', legacy), 'totp')
+  assert.equal(coerceFactor('none', legacy), '')
+})
+
+test('取消进行中的核验会结束等待，不能再拿这次证明打开表单', async () => {
+  if (currentStepUp()) cancelStepUp()
+  const pending = requestStepUp(createUserStepUpAsk())
+  const settled = pending.then(
+    () => 'resolved',
+    (err: Error) => err.message,
+  )
+  assert.equal(currentStepUp()?.action, 'mfa_assign')
+  assert.equal(currentStepUp()?.targetUserId, 0)
+  cancelStepUp()
+  assert.equal(await settled, '已取消身份核验')
+  assert.equal(currentStepUp(), null)
+  finishStepUp('late-proof')
+  assert.equal(currentStepUp(), null)
+  const gate = settleStepUp(beginUserAdminGate(), 'cancelled')
+  assert.equal(gate.submitting, false)
+  assert.equal(gate.formOpen, false)
+})
+
+test('用户管理页在打开表单前核验，保存路径不再次弹出核验，列表按钮保持绑定UKEY', () => {
+  const source = readFileSync(join(srcRoot, 'UsersView.vue'), 'utf8')
+  assert.match(source, /openAfterStepUp\(\)/)
+  assert.match(source, /openAfterStepUp\(row\)/)
+  assert.match(source, /createUserStepUpAsk|editUserStepUpAsk/)
+  assert.match(source, /settleStepUp/)
+  assert.match(source, /finishSave/)
+  assert.match(source, /factorChoices/)
+  const submitAt = source.indexOf('async function submit')
+  const removeAt = source.indexOf('async function confirmRemove')
+  assert.ok(submitAt > 0 && removeAt > submitAt)
+  const submitFn = source.slice(submitAt, removeAt)
+  assert.equal(submitFn.includes('requestStepUp'), false)
+  assert.match(submitFn, /submitting\.value = false/)
+  assert.match(source, />绑定UKEY</)
+  assert.doesNotMatch(source, />证书链</)
+})

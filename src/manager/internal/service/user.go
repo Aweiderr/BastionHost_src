@@ -221,7 +221,7 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 	}
 	applyMFASelection(u, req.MFAType)
 	noteFactorActivated(u)
-	if err := s.authSvc.CommitWithProof(ctx, req.StepUpProof, op.UserID, 0, auth.StepUpMFAAssign, req.MFAType, func(pgx.Tx) error {
+	if err := s.commitUserAuthChange(ctx, req.StepUpProof, op.UserID, 0, auth.StepUpMFAAssign, req.MFAType, func(pgx.Tx) error {
 		if err := s.userRepo.Create(ctx, u); err != nil {
 			return err
 		}
@@ -380,7 +380,7 @@ func (s *UserService) UpdateUser(ctx context.Context, userID int64, req UpdateUs
 	}
 	if factorChanged || phoneChanged || grantPrivileged {
 		action, factor := userChangeProof(oldFactor, auth.NormalizeFactor(u.MFAType), factorChanged, phoneChanged, grantPrivileged)
-		if err := s.authSvc.CommitWithProof(ctx, req.StepUpProof, op.UserID, userID, action, factor, func(tx pgx.Tx) error {
+		if err := s.commitUserAuthChange(ctx, req.StepUpProof, op.UserID, userID, action, factor, func(tx pgx.Tx) error {
 			if err := writeUser(tx); err != nil {
 				return err
 			}
@@ -590,6 +590,29 @@ func (s *UserService) ukeyEnforce(ctx context.Context) bool {
 		return false
 	}
 	return s.authSvc.privilegedUKeyEnforce(ctx)
+}
+
+// commitUserAuthChange 消费「操作者、动作、目标」都对得上的一次性证明。
+//
+// 表单打开之前的核验还不知道最终因子，证明里的因子为空。
+// 这种证明可以用于随后在同一动作、同一目标上选定的 totp / sms / ukey，
+// 也可以用于同一目标上的手机号变更或新授予管理员（策略仍先由 Evaluate* 把关）。
+// 已经写明因子的证明仍然只能用于那一种因子，不能拿去改成另一种。
+func (s *UserService) commitUserAuthChange(ctx context.Context, proof string, actor, target int64, action, factor string, mutate func(tx pgx.Tx) error) error {
+	if s == nil || s.authSvc == nil {
+		return ErrStepUpRejected
+	}
+	err := s.authSvc.CommitWithProof(ctx, proof, actor, target, action, factor, mutate)
+	if err == nil || !errors.Is(err, ErrStepUpRejected) {
+		return err
+	}
+	if action != auth.StepUpMFAAssign && action != auth.StepUpMFAPhone && action != auth.StepUpGrantPrivileged {
+		return err
+	}
+	if proofFactor(factor) == "" && action == auth.StepUpMFAAssign {
+		return err
+	}
+	return s.authSvc.CommitWithProof(ctx, proof, actor, target, auth.StepUpMFAAssign, "", mutate)
 }
 
 func userChangeProof(oldFactor, newFactor string, factorChanged, phoneChanged, grantPrivileged bool) (string, string) {

@@ -4,11 +4,14 @@ import { useRoute, useRouter } from 'vue-router'
 import logo2x from '@/assets/logo@2x.png'
 import logoUrl from '@/assets/logo.png'
 import AccountDialog from '@/components/AccountDialog.vue'
+import DesktopView from './DesktopView.vue'
+import OracleWorkbenchView from './OracleWorkbenchView.vue'
+import TerminalView from './TerminalView.vue'
 import { MENU_GROUPS, type MenuGroup } from '@/router'
-import { ORACLE_WORKBENCH_COMPONENT } from '@/utils/oracleWorkbench'
 import { shutdownOracleWorkbench } from '@/stores/oracleWorkbench'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { ORACLE_WORKBENCH_COMPONENT } from '@/utils/oracleWorkbench'
 import { roleLabel } from '@/utils/constants'
 
 const route = useRoute()
@@ -181,12 +184,27 @@ async function handleLogout(): Promise<void> {
       </header>
 
       <main class="content" :class="{ 'content-oracle': route.name === 'oracle' }">
-        <!-- 只缓存 SQL 工作台。图形会话和终端仍按原来的方式进出，切走会卸载。 -->
-        <router-view v-slot="{ Component }">
-          <keep-alive :include="oracleKeepAlive">
-            <component :is="Component" />
-          </keep-alive>
-        </router-view>
+        <!--
+          终端和图形会话常驻在布局里，用 v-show 切换。
+          这样从「我的资源」再点一个资源时，已有会话不会被卸载，
+          两个页面都能通过各自的标签页同时保持多个资源。
+          SQL 工作台用 keep-alive 单独缓存，且不放进会在 /terminal、/desktop
+          上被卸掉的 router-view，切到其它页再回来会话还在。
+        -->
+        <TerminalView
+          v-if="auth.hasAny(['ops:session:connect']) && !auth.passwordChangeRequired"
+          v-show="route.path === '/terminal'"
+        />
+        <DesktopView
+          v-if="auth.hasAny(['ops:session:connect']) && !auth.passwordChangeRequired"
+          v-show="route.path === '/desktop'"
+        />
+        <keep-alive :include="oracleKeepAlive">
+          <OracleWorkbenchView
+            v-if="route.path === '/oracle' && auth.hasAny(['ops:session:connect']) && !auth.passwordChangeRequired"
+          />
+        </keep-alive>
+        <router-view v-if="route.path !== '/terminal' && route.path !== '/desktop' && route.path !== '/oracle'" />
       </main>
     </div>
 

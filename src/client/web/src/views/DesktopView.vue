@@ -561,12 +561,34 @@ function key(event: KeyboardEvent, down: boolean): void {
   sendKey(event, down)
 }
 
+function sessionStillUp(): boolean {
+  return !!(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+    || status.value === 'connecting'
+    || status.value === 'connected'
+}
+
 async function loadFromRoute(): Promise<void> {
   const raw = route.query.asset
   const id = Number(Array.isArray(raw) ? raw[0] : raw)
   if (!id) {
-    asset.value = null
+    // 侧栏或返回进入 /desktop 时通常没有 ?asset=。组件是常驻的，不能把进行中的会话清掉。
+    if (asset.value) {
+      void router.replace({ path: '/desktop', query: { asset: String(asset.value.asset_id) } })
+      await nextTick()
+      scheduleResize()
+    }
     return
+  }
+  if (asset.value?.asset_id === id && (sessionStillUp() || status.value === 'closed' || status.value === 'error')) {
+    if (route.query.connect === '1') {
+      void router.replace({ path: '/desktop', query: { asset: String(id) } })
+    }
+    await nextTick()
+    scheduleResize()
+    return
+  }
+  if (asset.value && asset.value.asset_id !== id && sessionStillUp()) {
+    disconnect()
   }
   let items: OpsAsset[] = []
   try {
@@ -603,8 +625,9 @@ async function loadFromRoute(): Promise<void> {
 }
 
 watch(
-  () => [route.query.asset, route.query.connect],
+  () => [route.path, route.query.asset, route.query.connect],
   () => {
+    if (route.path !== '/desktop') return
     void loadFromRoute()
   },
   { immediate: true },

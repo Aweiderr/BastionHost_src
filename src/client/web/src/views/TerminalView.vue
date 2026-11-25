@@ -596,16 +596,22 @@ async function openFromRoute(): Promise<void> {
   }
   if (!openAsset(asset, autoConnect)) {
     if (isGraphicalProtocol(asset.protocol)) {
-      app.info('RDP / VNC 请从「我的资源」打开图形会话')
-    } else {
-      app.info('Oracle 不使用 SSH 终端，请回到「我的资源」选择本机 CMD / DBeaver 或堡垒机 SQL 会话')
+      // 终端页常驻在布局里，从「我的资源」打开图形会话时 query.asset 也会变。
+      // 这里改去 /desktop，而不是再弹一条「请回我的资源」。
+      void router.replace({
+        path: '/desktop',
+        query: autoConnect ? { asset: String(id), connect: '1' } : { asset: String(id) },
+      })
+      return
     }
+    app.info('Oracle 不使用 SSH 终端，请回到「我的资源」选择本机 CMD / DBeaver 或堡垒机 SQL 会话')
   }
 }
 
 watch(
-  () => route.query.asset,
+  () => [route.path, route.query.asset],
   () => {
+    if (route.path !== '/terminal') return
     void openFromRoute()
   },
   { immediate: true },

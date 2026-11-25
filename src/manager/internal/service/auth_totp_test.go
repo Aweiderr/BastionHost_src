@@ -53,23 +53,32 @@ func TestAdminPresetTOTPDoesNotIssueSession(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := svc.Login(ctx, LoginRequest{Username: "preset", Password: gatewayTestPassword, ClientIP: "10.0.0.8"})
-	if err != nil || res.AccessToken == "" || res.MFARequired || res.EnrollmentRequired {
-		t.Fatalf("强制开关关闭且尚未确认动态令牌时，应当只凭口令登录: %+v %v", res, err)
-	}
-	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.9"); err != nil {
-		t.Fatalf("尚未确认的动态令牌在开关关闭时不应挡住网关口令: %v", err)
-	}
-
-	svc.configRepo = boolConfig{"captcha.enabled": false, cfgRequireAssignedFactor: true}
-	blocked, err := svc.Login(ctx, LoginRequest{Username: "preset", Password: gatewayTestPassword, ClientIP: "10.0.0.10"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if blocked.AccessToken != "" || !blocked.EnrollmentRequired || blocked.StepUpProof == "" {
-		t.Fatalf("要求指定因子后，未确认的动态令牌仍不能签发令牌: %+v", blocked)
+	if res == nil || res.AccessToken != "" || !res.EnrollmentRequired || res.StepUpProof == "" {
+		t.Fatalf("管理员已指定但未确认动态令牌时，即使强制开关关闭也不能签发令牌: %+v", res)
 	}
-	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.11"); !errors.Is(err, ErrTOTPNotEnrolled) {
-		t.Fatalf("要求指定因子后，网关不能因尚未绑定就只凭口令进入: %v", err)
+	if _, err := svc.StartLoginTOTPEnrollment(ctx, 41, "Bastion", ""); !errors.Is(err, ErrStepUpRejected) {
+		t.Fatalf("未登录绑定不能使用空证明: %v", err)
+	}
+	started, err := svc.StartLoginTOTPEnrollment(ctx, 41, "Bastion", res.StepUpProof)
+	if err != nil || started == nil || started.StepUpProof == "" {
+		t.Fatalf("口令登录发放的证明应能开始绑定: %+v %v", started, err)
+	}
+	if _, _, _, err := svc.Authenticate(ctx, "preset", gatewayTestPassword, "", "10.0.0.9"); !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("尚未绑定的动态令牌不能只凭口令进入网关: %v", err)
+	}
+
+	desktop, err := svc.Login(ctx, LoginRequest{Username: "preset", Password: gatewayTestPassword, ClientType: "desktop", ClientIP: "10.0.0.12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if desktop.AccessToken != "" || !desktop.EnrollmentRequired || desktop.StepUpProof != "" {
+		t.Fatalf("桌面端应拒绝未绑定账号且不发放绑定证明: %+v", desktop)
+	}
+	if !strings.Contains(desktop.MFAHint, "Web") {
+		t.Fatalf("桌面端应提示去 Web 完成绑定: %q", desktop.MFAHint)
 	}
 	_ = logs
 }
@@ -149,11 +158,10 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 	ctx := context.Background()
 
 	enroll, err := svc.Login(ctx, LoginRequest{Username: "totp-bind", Password: gatewayTestPassword})
-	if err != nil || enroll.AccessToken == "" || enroll.MFARequired {
-		t.Fatalf("尚未确认时开关关闭应先进入系统: %+v %v", enroll, err)
+	if err != nil || enroll == nil || enroll.AccessToken != "" || !enroll.EnrollmentRequired || enroll.StepUpProof == "" {
+		t.Fatalf("尚未确认的指定动态令牌不能签发令牌，应进入强制绑定: %+v %v", enroll, err)
 	}
-	proof := enrollProof(t, svc, 43)
-	started, err := svc.StartTOTPBinding(ctx, 43, "", proof)
+	started, err := svc.StartLoginTOTPEnrollment(ctx, 43, "", enroll.StepUpProof)
 	if err != nil {
 		t.Fatal(err)
 	}

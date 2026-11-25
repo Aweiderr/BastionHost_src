@@ -7,6 +7,7 @@ import logo2x from '@/assets/logo@2x.png'
 import logoUrl from '@/assets/logo.png'
 import MfaDialog from '@/components/MfaDialog.vue'
 import TotpLoginDialog from '@/components/TotpLoginDialog.vue'
+import TotpEnrollDialog from '@/components/TotpEnrollDialog.vue'
 import UkeyMfaDialog from '@/components/UkeyMfaDialog.vue'
 import { canAccessPath, firstAllowedPath } from '@/router'
 import { useAppStore } from '@/stores/app'
@@ -97,6 +98,11 @@ const mfaHint = ref('')
 const mfaDialog = ref<InstanceType<typeof MfaDialog> | null>(null)
 
 const showTotpMfa = ref(false)
+const showEnroll = ref(false)
+const enrollUserId = ref(0)
+const enrollProof = ref('')
+const enrollHint = ref('')
+
 const totpChallengeId = ref('')
 const totpHint = ref('')
 const totpDialog = ref<InstanceType<typeof TotpLoginDialog> | null>(null)
@@ -198,9 +204,12 @@ async function submit(): Promise<void> {
       captchaNeeded.value ? { id: captchaId.value, code: captchaCode.value.trim() } : undefined,
     )
 
-    // 已指定动态令牌但还没绑定，且强制开关已打开：没有令牌，也不能当成第二因子弹窗。
+    // 已指定但尚未确认：没有业务令牌，进入强制绑定，不能跳过。
     if (result.enrollment_required) {
-      errorText.value = result.mfa_hint || '动态令牌尚未绑定，本次未登录'
+      enrollUserId.value = result.user_id || 0
+      enrollProof.value = result.step_up_proof || ''
+      enrollHint.value = result.mfa_hint || '请完成动态口令绑定后才能进入系统'
+      showEnroll.value = true
       return
     }
 
@@ -273,6 +282,21 @@ function onMfaCancel(): void {
   mfaPhoneMasked.value = ''
   mfaHint.value = ''
   errorText.value = '已取消二次验证，请重新登录'
+}
+
+function onEnrollDone(): void {
+  showEnroll.value = false
+  enrollProof.value = ''
+  enrollUserId.value = 0
+  form.value.password = ''
+  errorText.value = '动态口令已绑定。请使用用户名、口令和动态口令重新登录。'
+}
+
+function onEnrollCancel(): void {
+  showEnroll.value = false
+  enrollProof.value = ''
+  enrollUserId.value = 0
+  errorText.value = '已取消绑定，请重新登录后再完成二次认证绑定'
 }
 
 async function onTotpSubmit(code: string): Promise<void> {
@@ -408,6 +432,15 @@ function onTotpCancel(): void {
         :hint="totpHint"
         @submit="onTotpSubmit"
         @cancel="onTotpCancel"
+      />
+
+      <TotpEnrollDialog
+        v-model="showEnroll"
+        :user-id="enrollUserId"
+        :step-up-proof="enrollProof"
+        :hint="enrollHint"
+        @done="onEnrollDone"
+        @cancel="onEnrollCancel"
       />
 
       <!-- UKey 第二因子：与短信弹窗互斥，由后端返回的 mfa_type 决定走哪一个 -->

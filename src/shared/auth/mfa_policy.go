@@ -185,7 +185,8 @@ func HasActivatedFactor(st FactorState) bool {
 // factor 是账号上指定的因子，不是客户端当场选择的。mfa_enabled=false 不会把已指定的
 // 短信或 UKey 退回仅口令。totpReady 只在种子已经确认时为 true。
 // ukeyEnforce 与 requireAssigned 默认关闭：关闭时不拒绝“尚未指定因子”的旧账号，
-// 也不强迫已有管理员改用 UKey，也不把尚未确认的动态令牌当成登录门槛。
+// 也不强迫已有管理员改用 UKey。管理员已经指定但尚未确认的动态令牌，
+// 下次 Web 登录仍必须先完成绑定，不能只凭口令进入。
 // 这两个开关关闭不等于已经确认的短信、UKey 或动态令牌可以跳过。
 func DecideLogin(factor string, totpReady, totpActivated, privileged, ukeyEnforce, requireAssigned bool) LoginOutcome {
 	factor = NormalizeFactor(factor)
@@ -201,15 +202,15 @@ func DecideLogin(factor string, totpReady, totpActivated, privileged, ukeyEnforc
 		if totpReady {
 			return LoginOutcome{IssueSession: true}
 		}
-		// 种子还没确认（含解绑后残留的 totp）。强制开关关闭时这不是可用因子，
-		// 口令登录直接进入。开关打开后仍拒绝仅口令。
+		// 管理员已指定但尚未确认：下次 Web 登录必须先绑定，不看强制开关。
+		// 曾经确认过但种子已不可用，视为残留坏状态，不和「正式指定未绑定」混为一谈。
+		if !totpActivated {
+			return LoginOutcome{Enrollment: true}
+		}
 		if !requireAssigned {
 			return LoginOutcome{IssueSession: true}
 		}
-		if totpActivated {
-			return LoginOutcome{DenyReason: "totp_rebind_blocked"}
-		}
-		return LoginOutcome{Enrollment: true}
+		return LoginOutcome{DenyReason: "totp_rebind_blocked"}
 	default:
 		if requireAssigned || totpActivated {
 			return LoginOutcome{DenyReason: "factor_not_assigned"}

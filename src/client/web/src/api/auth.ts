@@ -102,6 +102,24 @@ export function totpConfirm(code: string, stepUpProof: string) {
   })
 }
 
+/** 登录后强制绑定：只使用口令登录发放的短期证明，不携带业务会话。 */
+export function totpEnrollStart(userId: number, stepUpProof: string) {
+  return request<TotpStartResult>('/auth/totp/enroll/start', {
+    method: 'POST',
+    body: { user_id: userId, step_up_proof: stepUpProof },
+    auth: false,
+  })
+}
+
+/** 确认登录强制绑定。成功后仍须重新登录，不会直接得到业务令牌。 */
+export function totpEnrollConfirm(userId: number, code: string, stepUpProof: string) {
+  return request<TotpConfirmResult>('/auth/totp/enroll/confirm', {
+    method: 'POST',
+    body: { user_id: userId, code, step_up_proof: stepUpProof },
+    auth: false,
+  })
+}
+
 /** 解绑 TOTP。需要当前口令，以及动态口令或恢复码。 */
 export function totpUnbind(password: string, code: string) {
   return request<{ unbound?: boolean; step_up_proof?: string; message?: string }>('/auth/totp/unbind', {

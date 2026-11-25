@@ -566,6 +566,7 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 			s.writeLoginLog(ctx, entry)
 			return nil, ErrTOTPNotEnrolled
 		}
+		desktop := strings.EqualFold(strings.TrimSpace(req.ClientType), "desktop")
 		raw, exp, err := s.issueProof(ctx, u.UserID, u.UserID, auth.StepUpTOTPEnroll, auth.FactorTOTP)
 		if err != nil {
 			return nil, err
@@ -573,11 +574,16 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (*LoginResult
 		entry.Result, entry.FailReason = "fail", reasonTOTPNotEnrolled
 		entry.MFAUsed = false
 		s.writeLoginLog(ctx, entry)
+		hint := "管理员已指定动态口令，请在本页完成绑定后才能进入系统。"
+		if desktop {
+			// 桌面客户端没有绑定页，不发放可用于绑定的证明。
+			raw, exp = "", time.Time{}
+			hint = "该账号已指定二次认证但尚未完成绑定。请先在 Web 端完成二次认证绑定，再使用桌面客户端登录。"
+		}
 		return &LoginResult{
 			UserID: u.UserID, Username: u.Username, DisplayName: u.DisplayName,
 			MFARequired: true, MFAType: auth.FactorTOTP, EnrollmentRequired: true,
-			StepUpProof: raw, StepUpExpires: exp,
-			MFAHint: "管理员已指定动态令牌，但尚未完成绑定。本次不签发登录令牌，请使用 step_up_proof 完成绑定后再登录。",
+			StepUpProof: raw, StepUpExpires: exp, MFAHint: hint,
 		}, nil
 	}
 
@@ -1473,6 +1479,27 @@ func newTOTPBinding(issuer, account string, secret []byte) *TOTPBinding {
 		Digits:       auth.TOTPDigits,
 		Period:       auth.TOTPPeriod,
 	}
+}
+
+// StartLoginTOTPEnrollment 用于尚未登录时的强制绑定。
+//
+// 必须使用口令登录签发的 totp_enroll 证明，证明绑定到这个账号。
+// 不能用空证明，也不能拿已登录会话来走这条未认证接口。
+func (s *AuthService) StartLoginTOTPEnrollment(ctx context.Context, userID int64, issuer, proof string) (*TOTPBinding, error) {
+	if strings.TrimSpace(proof) == "" {
+		return nil, ErrStepUpRejected
+	}
+	u, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !auth.TOTPPasswordEnroll(factorState(u)) {
+		return nil, ErrTOTPNotEnrolled
+	}
+	if err := s.ConsumeFactorProof(ctx, proof, userID, userID, auth.StepUpTOTPEnroll, auth.FactorTOTP); err != nil {
+		return nil, err
+	}
+	return s.StartTOTPBinding(ctx, userID, issuer, "")
 }
 
 // StartTOTPBinding 生成 TOTP 种子并返回绑定信息。

@@ -11,6 +11,7 @@ import {
   createUserStepUpAsk,
   editUserStepUpAsk,
   canSelfServeFactor,
+  TARGET_FACTOR_OPTIONS,
   factorChoices,
   factorLockReason,
   finishSave,
@@ -234,4 +235,14 @@ test('用户管理页在无已激活因子时允许空证明保存，列表按�
   const submitFn = source.slice(submitAt, removeAt)
   assert.match(submitFn, /proofReady/)
   assert.doesNotMatch(submitFn, /!heldProof\.value/)
+})
+
+test('动态口令选项说明改为下次 Web 登录强制绑定，普通用户不能在账户页自助绑定', () => {
+  const totp = TARGET_FACTOR_OPTIONS.find((opt) => opt.value === 'totp')
+  assert.ok(totp)
+  assert.match(totp.hint, /下次/)
+  assert.match(totp.hint, /Web/)
+  assert.match(totp.hint, /账户页/)
+  assert.doesNotMatch(totp.hint, /强制开关关闭时仍可只凭口令登录/)
+  assert.doesNotMatch(totp.hint, /管理员可在账户设置里完成绑定/)
 })

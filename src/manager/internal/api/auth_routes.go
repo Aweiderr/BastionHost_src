@@ -309,7 +309,7 @@ func (s *Server) handleTOTPEnrollStart(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
-	res, err := s.auth.StartTOTPBinding(r.Context(), req.UserID, req.Issuer, req.StepUpProof)
+	res, err := s.auth.StartLoginTOTPEnrollment(r.Context(), req.UserID, req.Issuer, req.StepUpProof)
 	if err != nil {
 		writeServiceError(w, err)
 		return

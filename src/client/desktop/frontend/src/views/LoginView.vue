@@ -175,7 +175,7 @@ async function submit() {
       captchaNeeded.value ? captchaCode.value.trim() : '',
     )
     if (p?.enrollment_required) {
-      rejectLogin(p?.mfa_hint || '动态令牌尚未绑定，本次未登录')
+      rejectLogin(p?.mfa_hint || '该账号已指定二次认证但尚未完成绑定。请先在 Web 端完成二次认证绑定，再使用桌面客户端登录。')
       return
     }
     const factor = loginFactorDialog(p)

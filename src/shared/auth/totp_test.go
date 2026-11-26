@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,105 @@ func TestTOTPWindowSkew(t *testing.T) {
 		ok, step := MatchTOTP(secret, c.code, TOTPAlgoSHA1, now)
 		if ok != c.ok || (c.ok && step != c.step) {
 			t.Errorf("%s: ok=%v step=%d，期望 ok=%v step=%d", c.name, ok, step, c.ok, c.step)
+		}
+	}
+}
+
+// HMAC-SM3 已知向量：key="key"、data="data"，由 OpenSSL 3 独立计算。
+func TestHMACSM3KnownVector(t *testing.T) {
+	got := HMACSM3([]byte("key"), []byte("data"))
+	want := "88a5a14b0fcf4a8a7b0c5084b8ee36e70efca4e8467fa264c3231bf16463b425"
+	if hex.EncodeToString(got) != want {
+		t.Fatalf("HMAC-SM3 向量不符: %x", got)
+	}
+}
+
+// SM3 TOTP 向量：secret 与 RFC 6238 相同，30 秒步长，动态截断后用
+// OpenSSL 3 的 HMAC-SM3 独立计算得到。用于保证国密分支不是自说自话。
+func TestTOTPSM3Vectors(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	vectors := []struct {
+		sec   int64
+		want8 string
+	}{
+		{59, "78614758"},
+		{1111111109, "71578389"},
+		{1111111111, "08739145"},
+		{1234567890, "64982201"},
+		{2000000000, "77639624"},
+		{20000000000, "00363153"},
+	}
+	for _, v := range vectors {
+		counter := uint64(v.sec / int64(TOTPPeriod))
+		if got := hotpDigits(secret, counter, TOTPAlgoSM3, 8); got != v.want8 {
+			t.Errorf("SM3 t=%d 8 位 = %s，期望 %s", v.sec, got, v.want8)
+		}
+		at := time.Unix(v.sec, 0).UTC()
+		want6 := v.want8[len(v.want8)-TOTPDigits:]
+		if got := GenerateTOTPWithParams(secret, at, TOTPAlgoSM3, TOTPDigits, TOTPPeriod); got != want6 {
+			t.Errorf("SM3 t=%d 6 位 = %s，期望 %s", v.sec, got, want6)
+		}
+		ok, step := MatchTOTPWithParams(secret, want6, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, at)
+		if !ok || step != int64(counter) {
+			t.Errorf("SM3 t=%d 校验 ok=%v step=%d，期望 %d", v.sec, ok, step, counter)
+		}
+	}
+}
+
+func TestTOTPParamsAndDiagnosticWindow(t *testing.T) {
+	secret := []byte("12345678901234567890")
+	now := time.Unix(1_111_111_111, 0).UTC()
+	base := now.Unix() / int64(TOTPPeriod)
+
+	// 同一时刻 SM3 与 SHA1 是不同口令；校验必须使用绑定时的算法。
+	sm3 := GenerateTOTPWithParams(secret, now, TOTPAlgoSM3, TOTPDigits, TOTPPeriod)
+	sha1 := GenerateTOTPWithParams(secret, now, TOTPAlgoSHA1, TOTPDigits, TOTPPeriod)
+	if sm3 == sha1 {
+		t.Fatal("SM3 与 SHA1 不应产生同一口令")
+	}
+	if ok, _ := MatchTOTPWithParams(secret, sm3, TOTPAlgoSHA1, TOTPDigits, TOTPPeriod, now); ok {
+		t.Fatal("用 SHA1 不应验过 SM3 绑定")
+	}
+	if ok, _ := MatchTOTPWithParams(secret, sha1, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now); ok {
+		t.Fatal("用 SM3 不应验过 SHA1 绑定")
+	}
+
+	// ±1 内的口令仍由正常窗口放行，不进入偏差诊断。
+	for _, offset := range []int64{-1, 0, 1} {
+		code := GenerateTOTPWithParams(secret, now.Add(time.Duration(offset)*time.Duration(TOTPPeriod)*time.Second), TOTPAlgoSM3, TOTPDigits, TOTPPeriod)
+		if ok, _ := MatchTOTPWithParams(secret, code, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now); !ok {
+			t.Fatalf("±1 内的偏移 %d 应放行", offset)
+		}
+		if minutes, ok := DiagnoseTOTPSkew(secret, code, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now, TOTPDiagnosticWindow, base-1); ok {
+			t.Fatalf("±1 内的偏移 %d 不应算偏差，得到 %d 分钟", offset, minutes)
+		}
+	}
+
+	// 超出 ±1、仍在 ±10 内：诊断命中，给出约 2 / 5 分钟。
+	hit3 := GenerateTOTPWithParams(secret, now.Add(3*time.Duration(TOTPPeriod)*time.Second), TOTPAlgoSM3, TOTPDigits, TOTPPeriod)
+	if minutes, ok := DiagnoseTOTPSkew(secret, hit3, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now, TOTPDiagnosticWindow, base); !ok || minutes != 2 {
+		t.Fatalf("偏移 +3 应提示约 2 分钟，得到 %d %v", minutes, ok)
+	}
+	hit10 := GenerateTOTPWithParams(secret, now.Add(10*time.Duration(TOTPPeriod)*time.Second), TOTPAlgoSM3, TOTPDigits, TOTPPeriod)
+	if minutes, ok := DiagnoseTOTPSkew(secret, hit10, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now, TOTPDiagnosticWindow, base); !ok || minutes != 5 {
+		t.Fatalf("偏移 +10 应提示约 5 分钟，得到 %d %v", minutes, ok)
+	}
+	// 超出诊断窗口不报时间偏差。
+	hit11 := GenerateTOTPWithParams(secret, now.Add(11*time.Duration(TOTPPeriod)*time.Second), TOTPAlgoSM3, TOTPDigits, TOTPPeriod)
+	if _, ok := DiagnoseTOTPSkew(secret, hit11, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now, TOTPDiagnosticWindow, base); ok {
+		t.Fatal("超出 ±10 不应诊断命中")
+	}
+	// 已被接受的时间片不能再用来诊断成功。
+	if _, ok := DiagnoseTOTPSkew(secret, hit3, TOTPAlgoSM3, TOTPDigits, TOTPPeriod, now, TOTPDiagnosticWindow, base+3); ok {
+		t.Fatal("已接受的时间片不能再次作为偏差依据")
+	}
+}
+
+func TestBuildOtpauthURIWithParams(t *testing.T) {
+	uri := BuildOtpauthURIWithParams("Bastion", "zhangsan", []byte("01234567890123456789"), TOTPAlgoSM3, 6, 30)
+	for _, want := range []string{"algorithm=SM3", "digits=6", "period=30", "otpauth://totp/"} {
+		if !strings.Contains(uri, want) {
+			t.Fatalf("otpauth 缺少 %s: %s", want, uri)
 		}
 	}
 }

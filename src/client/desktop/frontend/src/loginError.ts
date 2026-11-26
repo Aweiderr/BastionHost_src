@@ -17,6 +17,16 @@ export function shouldShowTotp(message: string): boolean {
   return message.includes('多因素') || message.includes('验证码') || message.includes('动态')
 }
 
+/** 去掉空格和连字符并转大写，与服务端恢复码规范化一致。 */
+export function normalizeRecoveryCode(value: string): string {
+  return value.toUpperCase().replace(/[\s-]/g, '')
+}
+
+/** 恢复码固定 8 位十六进制；客户端只做格式提示，是否有效以服务端为准。 */
+export function isRecoveryCodeInput(value: string): boolean {
+  return /^[0-9A-F]{8}$/.test(normalizeRecoveryCode(value))
+}
+
 export type LoginFactorDialog = 'none' | 'totp' | 'sms' | 'ukey'
 
 /** 账密通过后应弹出的因子。第一屏不能自选。未标明类型的旧挑战按短信处理。 */

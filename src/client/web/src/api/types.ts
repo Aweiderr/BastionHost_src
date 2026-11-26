@@ -107,6 +107,8 @@ export interface LoginResult {
   mfa_type?: 'none' | 'totp' | 'sms' | 'ukey'
   /** 指定了动态令牌但尚未绑定。没有 access_token，step_up_proof 只能用于绑定。 */
   enrollment_required?: boolean
+  /** 恢复码登录后认证器已不可用，必须先重新绑定；与 enrollment_required 同时出现。 */
+  totp_rebind_required?: boolean
   step_up_proof?: string
   step_up_expires?: string
   /** 登录挑战标识，索取验证码与提交校验都要带上 */

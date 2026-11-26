@@ -26,15 +26,16 @@ func newTOTPAuth(t *testing.T, users *memAuthUsers) (*AuthService, *memLoginLog,
 	return svc, logs, helper
 }
 
-func totpCodes(t *testing.T, helper *CryptoHelper, cipher string) (nowCode, nextCode string) {
+func totpCodes(t *testing.T, helper *CryptoHelper, u model.User) (nowCode, nextCode string) {
 	t.Helper()
-	secret, err := helper.DecryptMFA(context.Background(), cipher)
+	secret, err := helper.DecryptMFA(context.Background(), u.MFASecretCipher)
 	if err != nil {
 		t.Fatal(err)
 	}
+	algo, digits, period := totpParamsOf(&u)
 	now := time.Now()
-	nowCode = auth.GenerateTOTP(secret, now, auth.TOTPAlgoSHA1)
-	nextCode = auth.GenerateTOTP(secret, now.Add(time.Duration(auth.TOTPPeriod)*time.Second), auth.TOTPAlgoSHA1)
+	nowCode = auth.GenerateTOTPWithParams(secret, now, algo, digits, period)
+	nextCode = auth.GenerateTOTPWithParams(secret, now.Add(time.Duration(period)*time.Second), algo, digits, period)
 	if nowCode == nextCode {
 		t.Fatal("相邻时间片验证码不应相同")
 	}
@@ -137,15 +138,15 @@ func TestTOTPBindingJSONUsesBothFieldNames(t *testing.T) {
 		t.Fatalf("新旧字段应是同一份密钥: %s", raw)
 	}
 	uri, _ := m["otpauth_uri"].(string)
-	if !strings.Contains(uri, "algorithm=SHA1") || !strings.Contains(uri, "period=30") || !strings.HasPrefix(uri, "otpauth://totp/") {
-		t.Fatalf("默认绑定应是 SHA1、30 秒 otpauth: %s", uri)
+	if !strings.Contains(uri, "algorithm=SM3") || !strings.Contains(uri, "period=30") || !strings.HasPrefix(uri, "otpauth://totp/") {
+		t.Fatalf("新绑定默认应是 SM3、30 秒 otpauth: %s", uri)
 	}
-	if m["period"] != float64(30) {
-		t.Fatalf("绑定响应 period = %v，期望 30", m["period"])
+	if m["period"] != float64(30) || m["digits"] != float64(6) || m["algorithm"] != "SM3" {
+		t.Fatalf("绑定响应参数不对: period=%v digits=%v algorithm=%v", m["period"], m["digits"], m["algorithm"])
 	}
 	snap, ok := users.snapshot("binder")
-	if !ok || !snap.MFATotpPending || snap.MFAEnabled || snap.MFASecretCipher == "" {
-		t.Fatalf("开始绑定后应是待确认且未启用: %+v", snap)
+	if !ok || !snap.MFATotpPending || snap.MFAEnabled || snap.MFASecretCipher == "" || snap.MFATotpAlgorithm != "SM3" {
+		t.Fatalf("开始绑定后应是待确认、未启用且记录 SM3: %+v", snap)
 	}
 }
 
@@ -166,7 +167,7 @@ func TestTOTPBindRequiresCodeOnLoginAndRejectsReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, _ := users.snapshot("totp-bind")
-	nowCode, nextCode := totpCodes(t, helper, pending.MFASecretCipher)
+	nowCode, nextCode := totpCodes(t, helper, pending)
 
 	confirmed, err := svc.ConfirmTOTPBinding(ctx, 43, nowCode, started.StepUpProof)
 	if err != nil {
@@ -295,7 +296,7 @@ func TestTOTPUnbindAcceptsFreshCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, _ := users.snapshot("unbind-otp")
-	nowCode, nextCode := totpCodes(t, helper, snap.MFASecretCipher)
+	nowCode, nextCode := totpCodes(t, helper, snap)
 	if _, err := svc.ConfirmTOTPBinding(ctx, 44, nowCode, started.StepUpProof); err != nil {
 		t.Fatal(err)
 	}

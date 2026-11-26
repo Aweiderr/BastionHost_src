@@ -48,6 +48,14 @@ type User struct {
 	MFATotpPending bool `json:"-"`
 	// MFATotpLastStep 最近一次接受的 TOTP 时间片。小于或等于该值的验证码拒绝。
 	MFATotpLastStep *int64 `json:"-"`
+	// MFATotpAlgorithm / Digits / Period 是绑定当时写入的参数。
+	// 校验必须用它们，不能用服务端当前默认算法。
+	MFATotpAlgorithm string `json:"-"`
+	MFATotpDigits    int    `json:"-"`
+	MFATotpPeriod    int    `json:"-"`
+	// MFATotpRebindRequired 恢复码登录或认证器丢失后置位：
+	// 必须先重新绑定动态令牌，不能签发业务会话。
+	MFATotpRebindRequired bool `json:"-"`
 	// MFAFactorActivated 表示第二因子曾经生效。
 	// 动态令牌解绑成功后与类型、种子一起清掉。类型已是 none 但标记仍在时，登录不降级放行。
 	MFAFactorActivated bool `json:"-"`

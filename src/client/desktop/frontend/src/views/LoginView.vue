@@ -9,7 +9,7 @@
 import { onMounted, ref } from 'vue'
 import { state, notify, rejectLogin, clearLoginError, type Profile } from '../store'
 import { isOpsUser, opsDeniedMessage } from '../opsRole'
-import { isGraphicCaptchaMessage, loginFactorDialog } from '../loginError'
+import { isGraphicCaptchaMessage, isRecoveryCodeInput, loginFactorDialog, normalizeRecoveryCode } from '../loginError'
 import { Login, Ping, SetCoreURL, VerifyMFA, ResendMFA, ChangePassword, Logout, CaptchaRequired, FetchCaptcha } from '../../wailsjs/go/main/App'
 
 const emit = defineEmits<{ (e: 'logged-in', p: Profile): void }>()
@@ -21,6 +21,8 @@ const mfaKind = ref<'sms' | 'totp' | 'ukey' | ''>('')
 const mfaChallenge = ref('')
 const mfaCode = ref('')
 const mfaHint = ref('')
+/** 动态口令弹窗里的“使用恢复码”开关；短信/UKey 不显示。 */
+const recoveryMode = ref(false)
 const needChangePwd = ref(false)
 const oldPwd = ref('')
 const newPwd = ref('')
@@ -189,6 +191,7 @@ async function submit() {
       mfaKind.value = factor
       mfaChallenge.value = p.challenge_id
       mfaCode.value = ''
+      recoveryMode.value = false
       mfaHint.value = p.mfa_hint || (factor === 'totp'
         ? '请输入认证器中的 6 位动态口令'
         : `请输入发往 ${p.phone_masked || '手机'} 的验证码`)
@@ -217,17 +220,32 @@ async function submit() {
   }
 }
 
+function toggleRecoveryMode() {
+  recoveryMode.value = !recoveryMode.value
+  mfaCode.value = ''
+}
+
 async function submitMFA() {
   if (!mfaChallenge.value || !mfaCode.value) {
     notify(mfaKind.value === 'totp' ? '请输入动态口令' : '请输入短信验证码', 'err')
     return
   }
+  if (mfaKind.value === 'totp' && recoveryMode.value && !isRecoveryCodeInput(mfaCode.value)) {
+    notify('请输入认证器丢失时保存的恢复码', 'err')
+    return
+  }
+  if (mfaKind.value === 'totp' && !recoveryMode.value && !/^\d{6}$/.test(mfaCode.value.trim())) {
+    notify('请输入 6 位动态口令', 'err')
+    return
+  }
   busy.value = true
   clearLoginError()
   try {
-    const p: any = await VerifyMFA(mfaChallenge.value, mfaCode.value)
+    const code = recoveryMode.value ? normalizeRecoveryCode(mfaCode.value) : mfaCode.value.trim()
+    const p: any = await VerifyMFA(mfaChallenge.value, code)
     mfaChallenge.value = ''
     mfaKind.value = ''
+    recoveryMode.value = false
     await finishLogin(p)
   } catch (e: any) {
     rejectLogin(String(e?.message || e))
@@ -341,11 +359,27 @@ function copyDeviceId() {
 
       <div v-if="mfaChallenge && mfaKind === 'totp'" class="mfa-box">
         <label class="field">
-          <span>动态口令</span>
-          <p class="hint">{{ mfaHint }} 动态口令每 30 秒更换一次。请确保本机与认证器的时间准确。</p>
-          <input v-model="mfaCode" maxlength="6" placeholder="6 位数字" @keyup.enter="submitMFA" />
+          <span>{{ recoveryMode ? '恢复码' : '动态口令' }}</span>
+          <p v-if="!recoveryMode" class="hint">
+            {{ mfaHint }} 动态口令每 30 秒更换一次。请确保本机与认证器的时间准确。
+            认证器丢失时可点击「使用恢复码」；恢复码全部用尽请联系管理员在用户管理中解绑或重置动态令牌。
+          </p>
+          <p v-else class="hint">
+            恢复码只能使用一次。使用后必须到 Web 控制台重新绑定动态令牌，才能继续使用桌面客户端。
+            恢复码全部用尽时，请联系管理员在用户管理中解绑或重置动态令牌。
+          </p>
+          <input
+            v-model="mfaCode"
+            :maxlength="recoveryMode ? 9 : 6"
+            :placeholder="recoveryMode ? '例如 AB12-CD34' : '6 位数字'"
+            :autocomplete="recoveryMode ? 'off' : 'one-time-code'"
+            @keyup.enter="submitMFA"
+          />
         </label>
         <div class="row" style="gap:8px;margin-top:8px">
+          <button type="button" :disabled="busy" @click="toggleRecoveryMode">
+            {{ recoveryMode ? '使用动态口令' : '使用恢复码' }}
+          </button>
           <button type="button" class="primary" :disabled="busy" @click="submitMFA">验证并登录</button>
         </div>
       </div>

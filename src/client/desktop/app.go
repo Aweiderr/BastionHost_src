@@ -664,6 +664,12 @@ func (a *App) VerifyMFA(challengeID, code string) (*coreapi.LoginResult, error) 
 	if err != nil {
 		return nil, err
 	}
+	// 恢复码登录后认证器已失效，必须先在 Web 重新绑定；桌面端没有绑定页，
+	// 直接拒绝进入资源列表，避免用户只看到一直转圈。
+	if res != nil && (res.TOTPRebindRequired || (res.EnrollmentRequired && res.AccessToken == "")) {
+		a.discardLogin()
+		return nil, errors.New("恢复码已使用。请到 Web 控制台重新绑定动态令牌后再使用桌面客户端。")
+	}
 	if err := a.ensureOps(res); err != nil {
 		slog.Warn("拒绝非运维账号登录桌面客户端", "roles", rolesOf(res))
 		a.discardLogin()

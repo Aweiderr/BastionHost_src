@@ -95,7 +95,7 @@ func (m *memAuthUsers) userLocked(userID int64) *model.User {
 	return nil
 }
 
-func (m *memAuthUsers) SetTOTPPending(_ context.Context, userID int64, secretCipher string) error {
+func (m *memAuthUsers) SetTOTPPending(_ context.Context, userID int64, secretCipher, algorithm string, digits, period int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u := m.userLocked(userID)
@@ -106,13 +106,16 @@ func (m *memAuthUsers) SetTOTPPending(_ context.Context, userID int64, secretCip
 	u.MFAEnabled = false
 	u.MFATotpPending = true
 	u.MFATotpLastStep = nil
+	u.MFATotpAlgorithm = algorithm
+	u.MFATotpDigits = digits
+	u.MFATotpPeriod = period
 	if u.MFAType == "" || u.MFAType == "none" {
 		u.MFAType = "totp"
 	}
 	return nil
 }
 
-func (m *memAuthUsers) BindTOTP(_ context.Context, userID int64, secretCipher string, step int64, hashes []string) error {
+func (m *memAuthUsers) BindTOTP(_ context.Context, userID int64, secretCipher, algorithm string, digits, period int, step int64, hashes []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u := m.userLocked(userID)
@@ -127,6 +130,10 @@ func (m *memAuthUsers) BindTOTP(_ context.Context, userID int64, secretCipher st
 	u.MFAFactorActivated = true
 	u.MFASecretCipher = secretCipher
 	u.MFATotpPending = false
+	u.MFATotpAlgorithm = algorithm
+	u.MFATotpDigits = digits
+	u.MFATotpPeriod = period
+	u.MFATotpRebindRequired = false
 	stepCopy := step
 	u.MFATotpLastStep = &stepCopy
 	if m.recovery == nil {
@@ -152,6 +159,43 @@ func (m *memAuthUsers) ListUnusedRecovery(_ context.Context, userID int64) ([]re
 		out = append(out, repo.TOTPRecoveryCode{ID: c.id, CodeHash: c.hash})
 	}
 	return out, nil
+}
+
+func (m *memAuthUsers) ConsumeRecoveryForRebind(_ context.Context, userID, recoveryID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.userLocked(userID)
+	if u == nil {
+		return repo.ErrNotFound
+	}
+	codes := m.recovery[userID]
+	found := false
+	for i := range codes {
+		if codes[i].id == recoveryID && !codes[i].used {
+			codes[i].used = true
+			found = true
+			break
+		}
+	}
+	if !found {
+		return repo.ErrRecoveryCodeUsed
+	}
+	// 只保留已核销的那枚，其余未使用的全部作废。
+	kept := codes[:0]
+	for _, c := range codes {
+		if c.used {
+			kept = append(kept, c)
+		}
+	}
+	m.recovery[userID] = kept
+	u.MFAEnabled = true
+	u.MFAType = "totp"
+	u.MFAFactorActivated = true
+	u.MFASecretCipher = ""
+	u.MFATotpPending = false
+	u.MFATotpLastStep = nil
+	u.MFATotpRebindRequired = true
+	return nil
 }
 
 func (m *memAuthUsers) ClearTOTP(_ context.Context, userID int64, recoveryID int64) error {
@@ -188,6 +232,10 @@ func (m *memAuthUsers) ClearTOTP(_ context.Context, userID int64, recoveryID int
 	u.MFASecretCipher = ""
 	u.MFATotpPending = false
 	u.MFATotpLastStep = nil
+	u.MFATotpAlgorithm = "SHA1"
+	u.MFATotpDigits = 6
+	u.MFATotpPeriod = 30
+	u.MFATotpRebindRequired = false
 	delete(m.recovery, userID)
 	return nil
 }

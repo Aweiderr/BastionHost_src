@@ -235,9 +235,10 @@ func (s *Server) handleTOTPStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Issuer      string `json:"issuer"`
 		StepUpProof string `json:"step_up_proof"`
+		Algorithm   string `json:"algorithm"`
 	}
 	_ = decodeJSON(r, &req) // 请求体可为空
-	res, err := s.auth.StartTOTPBinding(r.Context(), claims.UserID, req.Issuer, req.StepUpProof)
+	res, err := s.auth.StartTOTPBindingWithAlgorithm(r.Context(), claims.UserID, req.Issuer, req.StepUpProof, req.Algorithm)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -304,12 +305,13 @@ func (s *Server) handleTOTPEnrollStart(w http.ResponseWriter, r *http.Request) {
 		UserID      int64  `json:"user_id"`
 		Issuer      string `json:"issuer"`
 		StepUpProof string `json:"step_up_proof"`
+		Algorithm   string `json:"algorithm"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpx.Fail(w, err)
 		return
 	}
-	res, err := s.auth.StartLoginTOTPEnrollment(r.Context(), req.UserID, req.Issuer, req.StepUpProof)
+	res, err := s.auth.StartLoginTOTPEnrollmentWithAlgorithm(r.Context(), req.UserID, req.Issuer, req.StepUpProof, req.Algorithm)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -368,6 +370,16 @@ func (s *Server) handleMFAStepUp(w http.ResponseWriter, r *http.Request) {
 func writeServiceError(w http.ResponseWriter, err error) {
 	if be := authStatusError(err); be != nil {
 		httpx.Fail(w, be)
+		return
+	}
+	// 时间偏差仍按动态口令错误码，但要保留“校准时间”的提示。
+	var skew *service.TOTPTimeSkewError
+	if errors.As(err, &skew) {
+		httpx.Fail(w, errcode.New(errcode.ErrMFAInvalid, skew.Error()))
+		return
+	}
+	if errors.Is(err, service.ErrRecoveryInvalid) {
+		httpx.Fail(w, errcode.New(errcode.ErrMFAInvalid, service.ErrRecoveryInvalid.Error()))
 		return
 	}
 	switch {

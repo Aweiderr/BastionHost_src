@@ -250,6 +250,41 @@ func TestLoginMFADefersRoleGate(t *testing.T) {
 	}
 }
 
+func TestVerifyMFARejectsRecoveryRebind(t *testing.T) {
+	srv, calls := newAuthServer(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			writeOK(w, loginBody("ops1", "", nil, map[string]any{
+				"mfa_required": true, "challenge_id": "ch-1", "mfa_type": "totp",
+			}))
+		case "/api/v1/auth/mfa/verify":
+			writeOK(w, map[string]any{"login": loginBody("ops1", "", []string{"operator"}, map[string]any{
+				"mfa_required": true, "mfa_type": "totp", "enrollment_required": true,
+				"totp_rebind_required": true, "step_up_proof": "proof-1",
+				"mfa_hint": "恢复码已使用。请重新绑定动态令牌后再登录。",
+			})})
+		case "/api/v1/auth/logout":
+			writeOK(w, map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	app := NewApp(srv.URL)
+	if _, err := app.Login("ops1", "secret", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	res, err := app.VerifyMFA("ch-1", "AB12-CD34")
+	if err == nil || !strings.Contains(err.Error(), "Web") || !strings.Contains(err.Error(), "重新绑定") {
+		t.Fatalf("恢复码登录后桌面端应拒绝并提示去 Web 改绑，得到 %v", err)
+	}
+	if res != nil || app.GetProfile() != nil || app.api.Token() != "" {
+		t.Fatalf("恢复码登录不得在桌面端留下会话: res=%+v profile=%+v token=%q", res, app.GetProfile(), app.api.Token())
+	}
+	if got := pathsOf(*calls); len(got) == 0 || got[len(got)-1] != "POST /api/v1/auth/logout" {
+		t.Fatalf("应丢弃刚签发的会话，calls=%v", got)
+	}
+}
+
 func TestVerifyMFAAllowsOperator(t *testing.T) {
 	srv, _ := newAuthServer(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
 		switch r.URL.Path {

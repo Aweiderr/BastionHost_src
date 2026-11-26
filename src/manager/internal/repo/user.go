@@ -33,6 +33,7 @@ const userColumns = `user_id, tenant_id, org_id, username, display_name,
 	COALESCE(email,''), COALESCE(phone,''), password_hash, password_salt, password_algo,
 	password_update_time, password_expire_days, must_change_password,
 	mfa_enabled, COALESCE(mfa_secret_cipher,''), mfa_type, mfa_totp_pending, mfa_totp_last_step,
+	mfa_totp_algorithm, mfa_totp_digits, mfa_totp_period, mfa_totp_rebind_required,
 	mfa_factor_activated, status, user_type,
 	fail_count, locked_until, last_login_time, COALESCE(last_login_ip,''),
 	COALESCE(remark,''), create_time, update_time`
@@ -43,6 +44,7 @@ func scanUser(row pgx.Row) (*model.User, error) {
 		&u.Email, &u.Phone, &u.PasswordHash, &u.PasswordSalt, &u.PasswordAlgo,
 		&u.PasswordUpdateTime, &u.PasswordExpireDays, &u.MustChangePassword,
 		&u.MFAEnabled, &u.MFASecretCipher, &u.MFAType, &u.MFATotpPending, &u.MFATotpLastStep,
+		&u.MFATotpAlgorithm, &u.MFATotpDigits, &u.MFATotpPeriod, &u.MFATotpRebindRequired,
 		&u.MFAFactorActivated, &u.Status, &u.UserType,
 		&u.FailCount, &u.LockedUntil, &u.LastLoginTime, &u.LastLoginIP,
 		&u.Remark, &u.CreateTime, &u.UpdateTime)
@@ -561,7 +563,8 @@ func (r *UserRepo) ReopenTOTP(ctx context.Context, userID int64) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 	tag, err := tx.Exec(ctx, `UPDATE sys_user
 		SET mfa_enabled=false, mfa_secret_cipher=NULL, mfa_totp_pending=false,
-		    mfa_totp_last_step=NULL, mfa_factor_activated=false, update_time=now()
+		    mfa_totp_last_step=NULL, mfa_factor_activated=false,
+		    mfa_totp_rebind_required=false, update_time=now()
 		WHERE user_id=$1 AND mfa_type='totp'`, userID)
 	if err != nil {
 		return fmt.Errorf("重新开放动态令牌绑定失败: %w", err)

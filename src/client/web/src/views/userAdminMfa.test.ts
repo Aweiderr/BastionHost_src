@@ -93,15 +93,31 @@ test('保存成功或失败后转圈结束，失败仍留在表单里', () => {
   assert.equal(ok.notice, '用户已更新')
 })
 
-test('运维人员和审批人不能在账户页自助绑定第二因子', () => {
-  assert.equal(canSelfServeFactor(['operator']), false)
-  assert.equal(canSelfServeFactor(['approver']), false)
-  assert.equal(canSelfServeFactor(['operator', 'approver']), false)
+test('所有已登录用户都可以在账户页自助绑定、换绑和解绑动态口令', () => {
+  assert.equal(canSelfServeFactor(['operator']), true)
+  assert.equal(canSelfServeFactor(['approver']), true)
+  assert.equal(canSelfServeFactor(['operator', 'approver']), true)
   assert.equal(canSelfServeFactor(['sys_admin']), true)
   assert.equal(canSelfServeFactor(['sec_admin', 'operator']), true)
   assert.equal(canSelfServeFactor(['super_admin']), true)
   assert.equal(canSelfServeFactor(['audit_admin']), true)
-  assert.equal(canSelfServeFactor([]), false)
+  assert.equal(canSelfServeFactor([]), true)
+})
+
+test('未指定因子的管理员账号只能补 UKey', () => {
+  const choices = factorChoices({
+    roles: ['sec_admin'],
+    editing: true,
+    previousRoles: ['sec_admin'],
+    previousFactor: '',
+  })
+  assert.deepEqual(enabled(choices), ['ukey'])
+  assert.match(factorLockReason({
+    roles: ['sec_admin'],
+    editing: true,
+    previousRoles: ['sec_admin'],
+    previousFactor: 'none',
+  }), /UKey/)
 })
 
 test('目标因子下拉包含三种，且不按操作者自己的动态口令过滤', () => {
@@ -237,7 +253,15 @@ test('用户管理页在无已激活因子时允许空证明保存，列表按�
   assert.doesNotMatch(submitFn, /!heldProof\.value/)
 })
 
-test('动态口令选项说明改为下次 Web 登录强制绑定，普通用户不能在账户页自助绑定', () => {
+test('用户管理页把二次认证交给安全管理员，创建和编辑表单不再提交因子', () => {
+  const view = readFileSync(join(srcRoot, 'UsersView.vue'), 'utf8')
+  assert.match(view, /security:mfa:manage/)
+  assert.match(view, /MfaAssignDialog/)
+  assert.match(view, /openMfaDialog/)
+  assert.doesNotMatch(view, /mfa_type: factor/)
+})
+
+test('动态口令选项说明改为下次 Web 登录强制绑定，并提示账户页可自助换绑', () => {
   const totp = TARGET_FACTOR_OPTIONS.find((opt) => opt.value === 'totp')
   assert.ok(totp)
   assert.match(totp.hint, /下次/)

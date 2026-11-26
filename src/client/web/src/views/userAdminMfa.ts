@@ -24,7 +24,7 @@ export interface FactorOption {
 /** 下拉框顺序与文案：UKey、动态口令、短信验证码。不含「仅口令」。 */
 export const TARGET_FACTOR_OPTIONS: readonly Omit<FactorOption, 'disabled'>[] = [
   { value: 'ukey', label: 'UKey', hint: '需配套客户端与硬件。新的管理员账号必须指定 UKey' },
-  { value: 'totp', label: '动态口令', hint: '认证器 App。指定后，该账号下次在 Web 登录时必须完成绑定，绑完才能进入系统。普通用户不能在账户页自助绑定' },
+  { value: 'totp', label: '动态口令', hint: '认证器 App。指定后，该账号下次在 Web 登录时必须完成绑定；已绑定后可在账户页自助换绑或解绑。' },
   { value: 'sms', label: '短信验证码', hint: '需先填写手机号；弱因子，建议用于运维人员' },
 ]
 
@@ -38,9 +38,9 @@ export function hasPrivilegedRole(roles: readonly string[]): boolean {
   return roles.some((code) => isPrivilegedRole(code))
 }
 
-/** 运维人员和审批人不能在账户页自己绑定或解绑第二因子。管理员可以。 */
-export function canSelfServeFactor(roles: readonly string[]): boolean {
-  return hasPrivilegedRole(roles)
+/** 动态口令的绑定/换绑/解绑对所有已登录用户开放；短信/UKey 的更换仍由管理员处理。 */
+export function canSelfServeFactor(_roles: readonly string[]): boolean {
+  return true
 }
 
 export interface FactorChoiceInput {
@@ -59,6 +59,7 @@ export interface FactorChoiceInput {
  * 运维人员和审批人可以在三种里任选。
  * 新建管理员，或这次才把账号提升为管理员，只能选 UKey。
  * 已经是管理员且当前就是 UKey 的，不能改成另外两种。
+ * 管理员账号已经指定但从未绑定（因子为空）时，也只能补 UKey。
  * 已有的非 UKey 管理员在约束开关关闭时保持原因子，这里不替他们改写。
  */
 export function factorChoices(input: FactorChoiceInput): FactorOption[] {
@@ -69,7 +70,8 @@ export function factorChoices(input: FactorChoiceInput): FactorOption[] {
   const creatingPrivileged = !input.editing && willPrivileged
   const grantingPrivileged = input.editing && !wasPrivileged && willPrivileged
   const lockedUKey = wasPrivileged && previousFactor === 'ukey'
-  const onlyUKey = creatingPrivileged || grantingPrivileged || lockedUKey
+  const missingFactor = wasPrivileged && (previousFactor === '' || previousFactor === 'none')
+  const onlyUKey = creatingPrivileged || grantingPrivileged || lockedUKey || missingFactor
   return TARGET_FACTOR_OPTIONS.map((opt) => ({
     ...opt,
     disabled: onlyUKey && opt.value !== 'ukey',
@@ -82,6 +84,9 @@ export function factorLockReason(input: FactorChoiceInput): string {
   const previousFactor = (input.previousFactor || '').trim().toLowerCase()
   const wasPrivileged = input.editing && hasPrivilegedRole(input.previousRoles ?? [])
   if (wasPrivileged && previousFactor === 'ukey') return '管理员账号已指定 UKey，不能改成其它方式'
+  if (wasPrivileged && (previousFactor === '' || previousFactor === 'none')) {
+    return '管理员账号必须先指定 UKey'
+  }
   return '新的管理员账号必须指定 UKey'
 }
 

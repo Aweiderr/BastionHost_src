@@ -21,6 +21,7 @@ import Modal from '@/components/Modal.vue'
 import Pagination from '@/components/Pagination.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import MfaAssignDialog from '@/components/MfaAssignDialog.vue'
 import UkeyCertDialog from '@/components/UkeyCertDialog.vue'
 import { requestStepUpIfNeeded } from '@/stepup'
 import { useAppStore } from '@/stores/app'
@@ -36,7 +37,6 @@ import {
   factorChoices,
   factorLockReason,
   finishSave,
-  isTargetFactor,
   settleStepUp,
   type FactorChoiceInput,
 } from '@/views/userAdminMfa'
@@ -50,6 +50,8 @@ const canCreate = computed(() => auth.has('system:user:create'))
 const canUpdate = computed(() => auth.has('system:user:update'))
 const canDelete = computed(() => auth.has('system:user:delete'))
 const canViewRole = computed(() => auth.has('system:role:list'))
+/** 二次认证方式归安全管理员；系统管理员能看到用户列表但不能改因子。 */
+const canManageMfa = computed(() => auth.has('security:mfa:manage'))
 /**
  * 「给这个用户绑定/查看/吊销 UKey 证书」的权限。
  *
@@ -210,6 +212,13 @@ const factorChoiceList = computed(() => factorChoices(factorInput()))
 const factorHint = computed(() => factorChoiceList.value.find((opt) => opt.value === form.mfa_type)?.hint ?? '')
 const factorLocked = computed(() => factorLockReason(factorInput()))
 
+function factorLabel(value?: string): string {
+  if (value === 'totp') return '动态口令'
+  if (value === 'sms') return '短信验证码'
+  if (value === 'ukey') return 'UKey'
+  return '未指定'
+}
+
 function applyFactorPolicy(): void {
   const next = coerceFactor(form.mfa_type, factorChoiceList.value)
   if (next === 'ukey' || next === 'totp' || next === 'sms' || next === '') form.mfa_type = next
@@ -333,6 +342,20 @@ function openUkeyDialog(user: UserItem): void {
   ukeyDialogVisible.value = true
 }
 
+/* ------------------------------------------------ 二次认证（安全管理员） */
+
+const mfaDialogVisible = ref(false)
+const mfaTarget = ref<UserItem | null>(null)
+
+function canAssignMfa(row: UserItem): boolean {
+  return canManageMfa.value && row.status !== 'disabled' && auth.user?.user_id !== row.user_id
+}
+
+function openMfaDialog(user: UserItem): void {
+  mfaTarget.value = user
+  mfaDialogVisible.value = true
+}
+
 function toggleRole(code: string): void {
   const index = form.roles.indexOf(code)
   if (index >= 0) form.roles.splice(index, 1)
@@ -364,18 +387,6 @@ async function submit(): Promise<void> {
     return
   }
   applyFactorPolicy()
-  if (!isTargetFactor(form.mfa_type)) {
-    app.error('请选择二次认证方式')
-    saveError.value = '请选择二次认证方式'
-    submitting.value = false
-    return
-  }
-  if (form.mfa_type === 'sms' && !form.phone.trim()) {
-    app.error('选择短信二次认证时必须填写手机号')
-    saveError.value = '选择短信二次认证时必须填写手机号'
-    submitting.value = false
-    return
-  }
   if (!proofReady.value) {
     app.error('请先完成身份核验')
     saveError.value = '请先完成身份核验'
@@ -383,7 +394,6 @@ async function submit(): Promise<void> {
     return
   }
   const proof = heldProof.value
-  const factor = form.mfa_type
   let gate = beginSave({
     phase: 'form',
     formOpen: true,
@@ -401,7 +411,6 @@ async function submit(): Promise<void> {
         phone: form.phone,
         roles: form.roles,
         remark: form.remark,
-        mfa_type: factor,
         password_expire_days: expireDays,
         step_up_proof: proof,
       })
@@ -415,7 +424,6 @@ async function submit(): Promise<void> {
         phone: form.phone,
         roles: form.roles,
         remark: form.remark,
-        mfa_type: factor,
         password_expire_days: expireDays,
         step_up_proof: proof,
       })
@@ -656,6 +664,7 @@ async function openPermissions(): Promise<void> {
                  注意与证书链管理页（key:cert:manage）区分，两者不是一回事。
                  这一行的按钮文案保持官方界面的「绑定UKEY」。 -->
             <button v-if="canManageUkey" class="btn-link" @click="openUkeyDialog(row)">绑定UKEY</button>
+            <button v-if="canAssignMfa(row)" class="btn-link" @click="openMfaDialog(row)">二次认证</button>
             <button v-if="canUpdate" class="btn-link" @click="resetTarget = row">重置口令</button>
             <button v-if="canDelete" class="btn-link danger" @click="userToRemove = row">删除</button>
           </td>
@@ -713,10 +722,10 @@ async function openPermissions(): Promise<void> {
         </div>
         <div class="form-item">
           <label class="form-label">手机号</label>
-          <input v-model.trim="form.phone" class="input" placeholder="选择短信二次认证时必填" />
+          <input v-model.trim="form.phone" class="input" placeholder="短信二次认证的手机号由安全管理员维护" />
         </div>
 
-        <div class="form-item span-2">
+        <div v-if="false" class="form-item span-2">
           <label class="form-label">二次认证方式<span class="required">*</span></label>
           <select v-model="form.mfa_type" class="input" @change="loadUserCertCount">
             <option value="" disabled>请选择</option>
@@ -763,6 +772,13 @@ async function openPermissions(): Promise<void> {
               </span>
             </template>
           </div>
+        </div>
+        <div class="form-item span-2">
+          <label class="form-label">二次认证方式</label>
+          <div>{{ editing ? factorLabel(editing.mfa_type) : '创建后由安全管理员设置' }}</div>
+          <span class="form-hint">
+            二次认证由安全管理员在用户列表的「二次认证」按钮中设置；本表单不修改认证方式。
+          </span>
         </div>
         <div class="form-item span-2">
           <label class="form-label">角色分配<span class="required">*</span></label>
@@ -867,6 +883,13 @@ async function openPermissions(): Promise<void> {
       :username="ukeyTarget.username"
       :display-name="ukeyTarget.display_name"
       :mfa-type="ukeyTarget.mfa_type"
+    />
+
+    <MfaAssignDialog
+      v-if="mfaTarget"
+      v-model="mfaDialogVisible"
+      :user="mfaTarget"
+      @saved="load"
     />
 
     <Drawer v-model="permDrawerVisible" title="角色与权限说明" wide>

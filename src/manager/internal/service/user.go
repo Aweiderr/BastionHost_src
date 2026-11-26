@@ -37,8 +37,8 @@ type CreateUserRequest struct {
 	Roles              []string `json:"roles"`
 	PasswordExpireDays int      `json:"password_expire_days"`
 	Remark             string   `json:"remark"`
-	// MFAType 第二因子：totp / sms / ukey。创建时必须指定一种，不能为空或 none。
-	// 选 sms 时必须同时提供 Phone，否则用户会卡在验证码弹窗上无码可收。
+	// MFAType 创建时不要指定；账号创建后由安全管理员通过二次认证接口设置。
+	// 保留字段仅用于拒绝旧的调用方，避免把系统管理员当成认证策略管理员。
 	MFAType string `json:"mfa_type"`
 	// StepUpProof 是操作者刚完成的一次性身份核验，绑定本次创建动作。
 	StepUpProof string `json:"step_up_proof"`
@@ -185,24 +185,9 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 	if expireDays <= 0 {
 		expireDays = 90
 	}
-	if err := validateMFAType(req.MFAType, req.Phone); err != nil {
-		return nil, err
-	}
-	level := 0
-	if s.roleRepo != nil && len(req.Roles) > 0 {
-		var lerr error
-		level, lerr = s.roleRepo.MaxLevelOf(ctx, req.Roles)
-		if lerr != nil {
-			return nil, lerr
-		}
-	}
-	privileged := auth.IsPrivileged(req.Roles, level)
-	if err := auth.EvaluateNewFactor(req.MFAType, privileged); err != nil {
-		s.auditFactor(ctx, op, 0, req.Username, "create_user", "", req.MFAType, reasonPolicyDenied)
-		return nil, err
-	}
-	if s.authSvc == nil {
-		return nil, fmt.Errorf("身份核验未启用，不能创建带第二因子的账号")
+	// 二次认证方式由安全管理员单独设置；创建账号时只建口令和角色。
+	if strings.TrimSpace(req.MFAType) != "" && auth.NormalizeFactor(req.MFAType) != auth.FactorNone {
+		return nil, fmt.Errorf("创建用户时不能指定二次认证方式，请创建后由安全管理员设置")
 	}
 	u := &model.User{
 		TenantID:           0,
@@ -218,23 +203,25 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 		Status:             "active",
 		UserType:           "local",
 		Remark:             req.Remark,
+		MFAType:            auth.FactorNone,
+		MFAEnabled:         false,
 	}
-	applyMFASelection(u, req.MFAType)
-	noteFactorActivated(u)
-	if err := s.commitUserAuthChange(ctx, req.StepUpProof, op.UserID, 0, auth.StepUpMFAAssign, req.MFAType, func(pgx.Tx) error {
-		if err := s.userRepo.Create(ctx, u); err != nil {
-			return err
-		}
-		if len(req.Roles) == 0 {
-			return nil
-		}
+	if len(req.Roles) > 0 {
 		if err := s.assertCanGrant(ctx, op, req.Roles, 0); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.commitUserAuthChange(ctx, req.StepUpProof, op.UserID, 0, auth.StepUpMFAAssign, "", func(tx pgx.Tx) error {
+		if err := s.userRepo.CreateTx(ctx, tx, u); err != nil {
 			return err
 		}
-		return s.userRepo.AssignRoles(ctx, u.UserID, req.Roles)
+		if len(req.Roles) > 0 {
+			return s.userRepo.AssignRolesTx(ctx, tx, u.UserID, req.Roles)
+		}
+		return nil
 	}); err != nil {
 		if errors.Is(err, ErrStepUpRejected) {
-			s.auditFactor(ctx, op, 0, req.Username, auth.StepUpMFAAssign, "", req.MFAType, reasonMissingStepUp)
+			_ = s.auditFactor(ctx, op, 0, req.Username, auth.StepUpMFAAssign, "", auth.FactorNone, reasonMissingStepUp)
 		}
 		s.writeLog(ctx, op, "system", "create_user", "user", "", req.Username, "", "", err)
 		return nil, err
@@ -250,9 +237,116 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, op 
 	return u, nil
 }
 
-// GetUser 查询用户详情。
-func (s *UserService) GetUser(ctx context.Context, userID int64) (*model.User, error) {
+// AssignUserMFARequest 是安全管理员设置用户二次认证的请求。
+type AssignUserMFARequest struct {
+	MFAType     string `json:"mfa_type"`
+	Phone       string `json:"phone"`
+	StepUpProof string `json:"step_up_proof"`
+}
+
+// validateAdminMFAChange 是安全管理员指定因子时的纯策略校验。
+func validateAdminMFAChange(privileged bool, oldFactor, newFactor, phone string, ukeyEnforce bool) error {
+	newFactor = auth.NormalizeFactor(newFactor)
+	if newFactor == auth.FactorNone {
+		return fmt.Errorf("请选择二次认证方式：totp / sms / ukey")
+	}
+	if newFactor != auth.FactorTOTP && newFactor != auth.FactorSMS && newFactor != auth.FactorUKey {
+		return fmt.Errorf("不支持的二次认证方式：%s", newFactor)
+	}
+	if newFactor == auth.FactorSMS && strings.TrimSpace(phone) == "" {
+		return fmt.Errorf("选择短信二次认证时必须填写手机号")
+	}
+	if privileged && oldFactor == auth.FactorNone && newFactor != auth.FactorUKey {
+		return fmt.Errorf("管理员账号必须先指定 UKey")
+	}
+	return auth.EvaluateFactorChange(auth.FactorChange{
+		OldFactor: oldFactor, NewFactor: newFactor,
+		WasPrivileged: privileged, WillPrivileged: privileged,
+		UKeyEnforce: ukeyEnforce,
+	})
+}
+
+// applyAdminMFA 写入安全管理员指定的因子；TOTP 需要用户下次登录自己绑定。
+func applyAdminMFA(u *model.User, newFactor, phone string) {
+	oldFactor := auth.NormalizeFactor(u.MFAType)
+	newFactor = auth.NormalizeFactor(newFactor)
+	u.MFAType = newFactor
+	if strings.TrimSpace(phone) != "" {
+		u.Phone = strings.TrimSpace(phone)
+	}
+	clearTOTP := func() {
+		u.MFASecretCipher = ""
+		u.MFATotpPending = false
+		u.MFATotpLastStep = nil
+		u.MFAFactorActivated = false
+	}
+	switch newFactor {
+	case auth.FactorTOTP:
+		// 已经绑定并确认过的 TOTP 保持不变；从其它因子切过来时清空，强制重新绑定。
+		if oldFactor != auth.FactorTOTP || !totpView(u).LoginRequiresTOTP() {
+			clearTOTP()
+			u.MFAEnabled = false
+		}
+	case auth.FactorSMS:
+		clearTOTP()
+		u.MFAEnabled = true
+		u.MFAFactorActivated = true
+	case auth.FactorUKey:
+		clearTOTP()
+		u.MFAEnabled = true
+		u.MFAFactorActivated = true
+	}
+}
+
+// AssignUserMFA 由安全管理员设置二次认证方式；系统管理员没有此权限。
+func (s *UserService) AssignUserMFA(ctx context.Context, userID int64, req AssignUserMFARequest, op OperatorContext) (*model.User, error) {
+	if s == nil || s.authSvc == nil {
+		return nil, fmt.Errorf("身份核验未启用")
+	}
 	u, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	roles, _ := s.userRepo.ListRoles(ctx, userID)
+	level, err := s.roleRepo.LevelOfUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	privileged := auth.IsPrivileged(roles, level)
+	oldFactor := auth.NormalizeFactor(u.MFAType)
+	newFactor := auth.NormalizeFactor(req.MFAType)
+	phone := strings.TrimSpace(req.Phone)
+	if phone == "" {
+		phone = u.Phone
+	}
+	if err := validateAdminMFAChange(privileged, oldFactor, newFactor, phone, s.ukeyEnforce(ctx)); err != nil {
+		_ = s.auditFactor(ctx, op, userID, u.Username, auth.StepUpMFAAssign, oldFactor, newFactor, reasonPolicyDenied)
+		return nil, err
+	}
+	after := *u
+	applyAdminMFA(&after, newFactor, phone)
+	event := &repo.MFAAuditEvent{
+		ActorID: op.UserID, ActorName: op.Username, TargetID: userID, TargetName: u.Username,
+		Action: auth.StepUpMFAAssign, OldMethod: oldFactor, NewMethod: newFactor,
+		Result: "success", Reason: "factor_updated", ClientIP: op.ClientIP,
+	}
+	if err := s.commitUserAuthChange(ctx, req.StepUpProof, op.UserID, userID, auth.StepUpMFAAssign, newFactor, func(tx pgx.Tx) error {
+		return s.userRepo.UpdateAudited(ctx, tx, &after, event)
+	}); err != nil {
+		if errors.Is(err, ErrStepUpRejected) {
+			_ = s.auditFactor(ctx, op, userID, u.Username, auth.StepUpMFAAssign, oldFactor, newFactor, reasonMissingStepUp)
+		}
+		return nil, err
+	}
+	after.Roles = roles
+	s.writeLog(ctx, op, "system", "assign_user_mfa", "user", fmt.Sprint(userID), u.Username,
+		fmt.Sprintf(`{"mfa_type":%q}`, oldFactor),
+		fmt.Sprintf(`{"mfa_type":%q}`, newFactor), nil)
+	return &after, nil
+}
+
+// GetUser 查询用户详情。
+func (s *UserService) GetUser(ctx context.Context, userID int64) (*model.User, error) {	u, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +386,14 @@ func (s *UserService) UpdateUser(ctx context.Context, userID int64, req UpdateUs
 	before := fmt.Sprintf(`{"display_name":%q,"status":%q,"email":%q}`, u.DisplayName, u.Status, u.Email)
 	oldFactor := auth.NormalizeFactor(u.MFAType)
 	oldPhone := u.Phone
+	// 二次认证方式和短信手机号归安全管理员；系统管理员走通用用户编辑接口时不能顺带修改。
+	if strings.TrimSpace(req.MFAType) != "" && auth.NormalizeFactor(req.MFAType) != oldFactor {
+		return nil, fmt.Errorf("二次认证方式只能由安全管理员修改")
+	}
+	if req.Phone != "" && req.Phone != oldPhone &&
+		(oldFactor == auth.FactorSMS || auth.NormalizeFactor(req.MFAType) == auth.FactorSMS) {
+		return nil, fmt.Errorf("短信手机号只能由安全管理员修改")
+	}
 	if req.DisplayName != "" {
 		u.DisplayName = req.DisplayName
 	}

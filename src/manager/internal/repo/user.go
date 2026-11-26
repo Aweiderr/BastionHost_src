@@ -90,6 +90,11 @@ func (r *UserRepo) CountAll(ctx context.Context) (int, error) {
 
 // Create 创建用户，成功后填充 UserID。
 func (r *UserRepo) Create(ctx context.Context, u *model.User) error {
+	return r.CreateTx(ctx, nil, u)
+}
+
+// CreateTx 在给定事务里创建用户；tx 为空时使用连接池。
+func (r *UserRepo) CreateTx(ctx context.Context, tx pgx.Tx, u *model.User) error {
 	q := `INSERT INTO sys_user
 		(tenant_id, org_id, username, display_name, email, phone,
 		 password_hash, password_salt, password_algo, password_update_time,
@@ -100,16 +105,27 @@ func (r *UserRepo) Create(ctx context.Context, u *model.User) error {
 	if u.MFAType == "" {
 		u.MFAType = "none"
 	}
-	err := r.pool.QueryRow(ctx, q,
+	args := []any{
 		u.TenantID, u.OrgID, u.Username, u.DisplayName, nullIfEmpty(u.Email), nullIfEmpty(u.Phone),
 		u.PasswordHash, u.PasswordSalt, u.PasswordAlgo, u.PasswordExpireDays,
 		u.MustChangePassword, u.MFAEnabled, u.MFAType, u.MFAFactorActivated, u.Status, u.UserType,
 		nullIfEmpty(u.Remark), nil,
-	).Scan(&u.UserID, &u.CreateTime, &u.UpdateTime)
-	if err != nil {
+	}
+	var row pgx.Row
+	if tx != nil {
+		row = tx.QueryRow(ctx, q, args...)
+	} else {
+		row = r.pool.QueryRow(ctx, q, args...)
+	}
+	if err := row.Scan(&u.UserID, &u.CreateTime, &u.UpdateTime); err != nil {
 		return fmt.Errorf("创建用户失败: %w", err)
 	}
 	return nil
+}
+
+// Begin 开启事务；调用方负责 Commit/Rollback。
+func (r *UserRepo) Begin(ctx context.Context) (pgx.Tx, error) {
+	return r.pool.Begin(ctx)
 }
 
 // UpdatePassword 更新口令摘要。

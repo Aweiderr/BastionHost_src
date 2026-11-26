@@ -30,6 +30,14 @@ export function updateUser(id: number, payload: Partial<UserPayload>) {
   return request<UserItem>(`/users/${id}`, { method: 'PUT', body: payload })
 }
 
+/** 安全管理员设置用户二次认证方式（需 security:mfa:manage）。 */
+export function assignUserMfa(
+  id: number,
+  payload: { mfa_type: string; phone?: string; step_up_proof?: string },
+) {
+  return request<UserItem>(`/users/${id}/mfa`, { method: 'PUT', body: payload })
+}
+
 /**
  * 停用或启用用户（active ↔ disabled）。
  *

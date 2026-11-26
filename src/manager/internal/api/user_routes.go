@@ -15,6 +15,7 @@ func registerUserRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("POST /api/v1/users", s.requirePermission("system:user:create", s.handleCreateUser))
 	mux.HandleFunc("GET /api/v1/users/{id}", s.requirePermission("system:user:list", s.handleGetUser))
 	mux.HandleFunc("PUT /api/v1/users/{id}", s.requirePermission("system:user:update", s.handleUpdateUser))
+	mux.HandleFunc("PUT /api/v1/users/{id}/mfa", s.requirePermission("security:mfa:manage", s.handleAssignUserMFA))
 	mux.HandleFunc("DELETE /api/v1/users/{id}", s.requirePermission("system:user:delete", s.handleDeleteUser))
 	mux.HandleFunc("POST /api/v1/users/{id}/password/reset", s.requirePermission("system:user:update", s.handleResetUserPassword))
 	mux.HandleFunc("POST /api/v1/users/{id}/unlock", s.requirePermission("system:user:update", s.handleUnlockUser))
@@ -119,6 +120,30 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.PasswordHash, u.PasswordSalt = "", ""
+	httpx.OK(w, u)
+}
+
+func (s *Server) handleAssignUserMFA(w http.ResponseWriter, r *http.Request) {
+	if s.user == nil {
+		httpx.FailCode(w, "SYS_5001")
+		return
+	}
+	id, err := pathID(r)
+	if err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	var req service.AssignUserMFARequest
+	if err := decodeJSON(r, &req); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	u, err := s.user.AssignUserMFA(r.Context(), id, req, operatorFrom(r))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	u.PasswordHash, u.PasswordSalt, u.MFASecretCipher = "", "", ""
 	httpx.OK(w, u)
 }
 

@@ -179,6 +179,31 @@ td.mono { font-family: var(--mono); }
   background: radial-gradient(1200px 600px at 50% -10%, #1e3a8a33, transparent), var(--bg);
 }
 .login-card { width: 470px; }
+.mfa-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3, 8, 20, 0.72);
+  backdrop-filter: blur(2px);
+}
+.mfa-modal {
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.mfa-modal h2 { margin: 0 0 8px; font-size: 16px; }
+.mfa-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
 .login-head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
 .login-head .logo {
   width: 42px; height: 42px; border-radius: 11px;

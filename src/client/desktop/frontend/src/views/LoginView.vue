@@ -246,6 +246,15 @@ async function resend() {
   }
 }
 
+function cancelMFA() {
+  if (busy.value) return
+  mfaChallenge.value = ''
+  mfaKind.value = ''
+  mfaCode.value = ''
+  mfaHint.value = ''
+  notify('已取消二次认证', 'info')
+}
+
 async function submitChangePwd() {
   if (!newPwd.value || newPwd.value !== newPwd2.value) {
     notify('两次新口令不一致', 'err')
@@ -339,40 +348,49 @@ function copyDeviceId() {
         <p class="hint">连续登录失败较多，请输入图形验证码以继续。看不清可点击图片刷新。</p>
       </label>
 
-      <div v-if="mfaChallenge && mfaKind === 'totp'" class="mfa-box">
-        <label class="field">
-          <span>动态口令</span>
-          <p class="hint">{{ mfaHint }} 动态口令每 30 秒更换一次。请确保本机与认证器的时间准确。</p>
-          <input v-model="mfaCode" maxlength="6" placeholder="6 位数字" @keyup.enter="submitMFA" />
-        </label>
-        <div class="row" style="gap:8px;margin-top:8px">
-          <button type="button" class="primary" :disabled="busy" @click="submitMFA">验证并登录</button>
-        </div>
-      </div>
-      <div v-else-if="mfaChallenge" class="mfa-box">
-        <label class="field">
-          <span>短信验证码</span>
-          <p class="hint">{{ mfaHint }}</p>
-          <input v-model="mfaCode" maxlength="8" placeholder="6 位验证码" @keyup.enter="submitMFA" />
-        </label>
-        <div class="row" style="gap:8px;margin-top:8px">
-          <button type="button" :disabled="busy" @click="resend">重新发送</button>
-          <button type="button" class="primary" :disabled="busy" @click="submitMFA">验证并登录</button>
-        </div>
-      </div>
       <div v-if="needChangePwd" class="mfa-box">
         <label class="field"><span>原口令</span><input v-model="oldPwd" type="password" /></label>
         <label class="field"><span>新口令</span><input v-model="newPwd" type="password" /></label>
         <label class="field"><span>确认新口令</span><input v-model="newPwd2" type="password" @keyup.enter="submitChangePwd" /></label>
         <button type="button" class="primary" style="width:100%;margin-top:8px" :disabled="busy" @click="submitChangePwd">提交新口令</button>
       </div>
-      <div v-if="state.loginError" class="form-error" role="alert">{{ state.loginError }}</div>
-      <button class="primary" style="width: 100%" :disabled="busy" @click="submit">
+      <div v-if="state.loginError && !mfaChallenge" class="form-error" role="alert">{{ state.loginError }}</div>
+      <button v-if="!mfaChallenge" class="primary" style="width: 100%" :disabled="busy" @click="submit">
         {{ busy ? '登录中…' : '登 录' }}
       </button>
 
       <div class="row" style="margin-top: 12px; justify-content: flex-end">
         <span class="hint">v0.1.0</span>
+      </div>
+    </div>
+
+    <div v-if="mfaChallenge" class="mfa-overlay" role="dialog" aria-modal="true" aria-label="二次认证">
+      <div class="mfa-modal">
+        <h2>二次认证</h2>
+        <p class="hint">{{ mfaHint }}</p>
+        <label class="field">
+          <span>{{ mfaKind === 'totp' ? '动态口令' : '短信验证码' }}</span>
+          <input
+            v-model="mfaCode"
+            :maxlength="mfaKind === 'totp' ? 6 : 8"
+            :placeholder="mfaKind === 'totp' ? '6 位数字' : '6 位验证码'"
+            autocomplete="one-time-code"
+            @keyup.enter="submitMFA"
+          />
+        </label>
+        <p v-if="mfaKind === 'totp'" class="hint">
+          动态口令每 30 秒更换一次。请确保本机与认证器的时间准确。
+        </p>
+        <div v-if="state.loginError" class="form-error" role="alert">{{ state.loginError }}</div>
+        <div class="mfa-actions">
+          <button v-if="mfaKind === 'sms'" type="button" class="ghost" :disabled="busy" @click="resend">
+            重新发送
+          </button>
+          <button type="button" class="ghost" :disabled="busy" @click="cancelMFA">返回</button>
+          <button type="button" class="primary" :disabled="busy" @click="submitMFA">
+            {{ busy ? '验证中…' : '验证并登录' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>

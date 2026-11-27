@@ -229,8 +229,19 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   return payload.data
 }
 
+export interface TextResponse {
+  text: string
+  headers: Headers
+}
+
 /** 拉取纯文本响应（会话录像回放），失败抛出带中文提示的 ApiError */
 export async function requestText(path: string, options: RequestOptions = {}): Promise<string> {
+  const result = await requestTextDetail(path, options)
+  return result.text
+}
+
+/** 与 requestText 相同，额外保留响应头（水印、是否脱敏）。 */
+export async function requestTextDetail(path: string, options: RequestOptions = {}): Promise<TextResponse> {
   const { silent } = options
   const headers: Record<string, string> = {}
   const token = resolveToken(options)
@@ -248,7 +259,7 @@ export async function requestText(path: string, options: RequestOptions = {}): P
   // 成功时正文就是录像文本；失败时同一份正文里可能是 JSON 错误信封。
   // 只能读一次，所以先取出再分支。
   const text = await response.text()
-  if (response.ok) return text
+  if (response.ok) return { text, headers: response.headers }
 
   // 必须读响应体里的业务错误：后端已经把真实原因放在 message 里
   // （"录像未正常封存" / "录像完整性校验失败" / "无权执行该操作"），

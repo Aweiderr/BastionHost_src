@@ -144,6 +144,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '告警中心', permission: ['audit:session:list'] },
       },
       {
+        path: 'audit/evidence',
+        name: 'audit-evidence',
+        component: () => import('@/views/AuditEvidenceView.vue'),
+        meta: { title: '合规与取证', permission: ['audit:report:view', 'audit:export:evidence'] },
+      },
+      {
         path: 'policies',
         name: 'policies',
         component: () => import('@/views/PoliciesView.vue'),
@@ -349,6 +355,12 @@ export const MENU_GROUPS: MenuGroup[] = [
         permission: ['audit:command:list'],
       },
       { title: '操作日志', path: '/audit/logs', icon: ICONS.file, permission: ['audit:log:list'] },
+      {
+        title: '合规与取证',
+        path: '/audit/evidence',
+        icon: ICONS.file,
+        permission: ['audit:report:view', 'audit:export:evidence'],
+      },
       {
         title: '告警中心',
         path: '/audit/alerts',

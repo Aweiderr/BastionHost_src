@@ -4,6 +4,7 @@ import type { RouteLocationRaw } from 'vue-router'
 import { listAuditCommands } from '@/api/audit'
 import type { AuditCommand } from '@/api/types'
 import CommandOriginTag from '@/components/CommandOriginTag.vue'
+import RedactedCommand from '@/components/RedactedCommand.vue'
 import DataTable from '@/components/DataTable.vue'
 import Pagination from '@/components/Pagination.vue'
 import SearchBar from '@/components/SearchBar.vue'
@@ -25,6 +26,7 @@ import { formatTime } from '@/utils/format'
 
 const auth = useAuthStore()
 const canOpenSession = computed(() => auth.has('audit:session:list'))
+const canReveal = computed(() => auth.has('audit:record:reveal'))
 
 const columns: TableColumn[] = [
   { key: 'session_no', title: '会话号', width: '200px' },
@@ -121,7 +123,7 @@ onMounted(load)
       <div>
         <div class="page-title">命令审计</div>
         <div class="page-subtitle">
-          按风险等级、处置动作、来源或会话号检索命令留痕。客户端自动发出的语句会标成「客户端自动」，默认仍全部展示。点击会话号可打开对应会话详情。
+          按风险等级、处置动作、来源或会话号检索命令留痕。关键字按原文匹配，列表展示脱敏结果。点击会话号可打开对应会话详情。
         </div>
       </div>
     </div>
@@ -187,7 +189,14 @@ onMounted(load)
             <div class="text-secondary" style="font-size: 12px">ID {{ row.session_id }}</div>
           </td>
           <td class="text-center">{{ row.seq_no }}</td>
-          <td class="text-mono" style="word-break: break-all">{{ row.command_text }}</td>
+          <td>
+            <RedactedCommand
+              :text="row.command_text"
+              :redacted="row.redacted"
+              :command-id="row.command_id"
+              :can-reveal="canReveal"
+            />
+          </td>
           <td><CommandOriginTag :origin="row.command_origin" /></td>
           <td>
             <StatusTag

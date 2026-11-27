@@ -8,6 +8,7 @@ import DataTable from '@/components/DataTable.vue'
 import Drawer from '@/components/Drawer.vue'
 import Pagination from '@/components/Pagination.vue'
 import RecordPlayer from '@/components/RecordPlayer.vue'
+import RedactedCommand from '@/components/RedactedCommand.vue'
 import SearchBar from '@/components/SearchBar.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -32,6 +33,8 @@ import { formatBytes, formatDuration, formatTime } from '@/utils/format'
 const auth = useAuthStore()
 const route = useRoute()
 const canPlay = computed(() => auth.has('audit:record:play'))
+const canReveal = computed(() => auth.has('audit:record:reveal'))
+const canExport = computed(() => auth.has('audit:export:evidence'))
 
 const columns: TableColumn[] = [
   { key: 'session_no', title: '会话号', width: '165px' },
@@ -129,6 +132,24 @@ watch(
 )
 
 const playUrl = computed(() => detail.value?.record_play_url || '')
+const replayCommands = computed(() =>
+  (detail.value?.commands ?? []).map((cmd) => ({
+    seq_no: cmd.seq_no,
+    command_text: cmd.command_text,
+    command_time: cmd.command_time,
+  })),
+)
+const replayClock = computed(() => ({
+  start: detail.value?.session.start_time,
+  end: detail.value?.session.end_time,
+  durationSec: detail.value?.session.duration_sec,
+}))
+const watermarkVars = computed(() => ({
+  operator: detail.value?.session.display_name || detail.value?.session.username || '',
+  session: detail.value?.session.session_no || '',
+  asset: detail.value?.session.asset_name || '',
+  purpose: detail.value?.session.purpose || '',
+}))
 const playerVisible = ref(false)
 
 function openPlayer(): void {
@@ -238,13 +259,22 @@ onMounted(load)
         <div class="card mb-16">
           <div class="card-header">
             <span class="card-title">基本信息</span>
-            <button
-              v-if="playUrl && canPlay"
-              class="btn btn-sm btn-primary"
-              @click="openPlayer"
-            >
-              回放
-            </button>
+            <div class="flex-center gap-8">
+              <button
+                v-if="playUrl && canPlay"
+                class="btn btn-sm btn-primary"
+                @click="openPlayer"
+              >
+                回放
+              </button>
+              <router-link
+                v-if="canExport"
+                class="btn btn-sm"
+                :to="{ name: 'audit-evidence', query: { session_id: String(detail.session.session_id) } }"
+              >
+                申请取证
+              </router-link>
+            </div>
           </div>
           <div class="card-body">
             <div class="desc-list">
@@ -413,7 +443,14 @@ onMounted(load)
                 </tr>
                 <tr v-for="cmd in detail.commands" :key="cmd.seq_no">
                   <td>{{ cmd.seq_no }}</td>
-                  <td class="text-mono" style="word-break: break-all">{{ cmd.command_text }}</td>
+                  <td>
+                    <RedactedCommand
+                      :text="cmd.command_text"
+                      :redacted="cmd.redacted"
+                      :command-id="cmd.command_id"
+                      :can-reveal="canReveal"
+                    />
+                  </td>
                   <td><CommandOriginTag :origin="cmd.command_origin" /></td>
                   <td>
                     <StatusTag
@@ -443,6 +480,15 @@ onMounted(load)
       </div>
     </Drawer>
 
-    <RecordPlayer v-model="playerVisible" :play-url="playUrl" title="会话录像回放" />
+    <RecordPlayer
+      v-model="playerVisible"
+      :play-url="playUrl"
+      title="会话录像回放"
+      :commands="replayCommands"
+      :clock="replayClock"
+      :watermark="detail?.watermark"
+      :vars="watermarkVars"
+      :can-reveal="canReveal"
+    />
   </div>
 </template>

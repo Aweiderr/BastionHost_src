@@ -712,8 +712,18 @@ curl -X POST http://127.0.0.1:8080/api/v1/setup/seal -H "Authorization: Bearer $
 | GET | `/api/v1/audit/sessions` | `audit:session:list` | 会话列表（keyword / status / user_id / asset_id / 时间范围） |
 | GET | `/api/v1/audit/sessions/stats` | `audit:session:list` | 会话与命令统计（含被阻断命令数、高危命令数） |
 | GET | `/api/v1/audit/sessions/{id}` | `audit:session:list` | 会话详情 + 命令明细 + 录像回放地址 |
-| GET | `/api/v1/audit/commands` | `audit:command:list` | **跨会话命令检索**（按风险等级 / 处置动作 / 关键字） |
+| GET | `/api/v1/audit/commands` | `audit:command:list` | **跨会话命令检索**（按风险等级 / 处置动作 / 关键字；关键字打在原文上，返回文本按脱敏规则处理） |
+| GET | `/api/v1/audit/commands/{id}/original` | `audit:record:reveal` | 查看未脱敏命令原文，并写入操作日志 |
 | GET | `/api/v1/audit/operation-logs` | `audit:log:list` | 管理操作日志 |
+| GET | `/api/v1/audit/reports/compliance` | `audit:report:view` | 合规报表：登录统计、高危命令、会话时长 |
+| GET | `/api/v1/audit/reports/compliance/file` | `audit:report:view` | 同上，`format=txt|pdf|docx`，页眉页脚为水印 |
+| GET/PUT | `/api/v1/audit/watermark` | 查看 `audit:report:view` / 修改 `audit:export:evidence` | 回放与导出水印。关闭或过淡会拒绝并记审计 |
+| GET/POST/PUT/DELETE | `/api/v1/audit/redact-rules` | 查看 `audit:report:view` / 修改 `audit:export:evidence` | 展示层脱敏规则（正则 / 关键字 / 字段类型），可按租户或全局 |
+| GET/POST | `/api/v1/audit/exports` | `audit:export:evidence` | 取证导出申请。须另一名持有同一权限的用户审批 |
+| POST | `/api/v1/audit/exports/{id}/approve` | `audit:export:evidence` | 通过申请（不能批自己的） |
+| POST | `/api/v1/audit/exports/{id}/reject` | `audit:export:evidence` | 驳回申请 |
+| GET | `/api/v1/audit/exports/{id}/package` | `audit:export:evidence` | 下载取证包（录像、日志、封存摘要、水印说明） |
+| GET | `/api/v1/audit/export-logs` | `audit:export:evidence` | 查询 `audit_export_log` |
 | GET | `/api/v1/ops/sessions/my` | 登录即可 | 运维人员回看自己的会话 |
 | GET | `/api/v1/ops/assets` | 登录即可 | 运维视图的"我可访问的资产"（与 `/internal/v1/ops/assets` 同源，供 Web 端选择） |
 
@@ -722,6 +732,10 @@ curl -X POST http://127.0.0.1:8080/api/v1/setup/seal -H "Authorization: Bearer $
 服务端先校验令牌与 `audit:record:play` 权限，再解密并**校验摘要链**后返回明文；
 
 校验不过一律拒绝 —— 录像不可信时回放内容没有证据价值。
+
+默认按脱敏规则处理明文。`reveal=1` 且持有 `audit:record:reveal` 时返回原文，并记审计。
+
+`watermark=off` 不会去掉水印，这次尝试会记入操作日志。播放器按会话时长做时间轴、倍速和命令跳转；字符录像不含逐字节时钟。
 
 ### Web 客户端（`client/web`）
 

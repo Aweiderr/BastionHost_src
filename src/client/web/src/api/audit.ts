@@ -1,4 +1,4 @@
-import { request, requestText } from './http'
+import { API_BASE, ApiError, request, requestText } from './http'
 import type {
   AuditCommand,
   AuditCommandQuery,
@@ -9,6 +9,7 @@ import type {
   OperationLogQuery,
   PageQuery,
   PageResult,
+  WatermarkSpec,
 } from './types'
 
 export interface AuditSessionQuery extends PageQuery {
@@ -101,4 +102,148 @@ export function listMySessions() {
  */
 export function fetchSessionRecord(playUrl: string, token: string) {
   return requestText(playUrl, { params: { token }, token, silent: true })
+}
+
+export interface RedactRule {
+  rule_id?: number
+  tenant_id?: number
+  name: string
+  kind: 'regex' | 'keyword' | 'field' | string
+  field_type?: string
+  pattern?: string
+  replacement?: string
+  enabled: boolean
+  scope?: string
+}
+
+export interface ExportRequest {
+  request_id: number
+  session_id: number
+  session_no?: string
+  status: string
+  reason: string
+  watermark: string
+  requester_id: number
+  requester_name: string
+  request_time: string
+  approver_id?: number
+  approver_name?: string
+  approve_comment?: string
+}
+
+export interface ExportLog {
+  log_id: number
+  export_type: string
+  file_name: string
+  file_size: number
+  file_digest: string
+  watermark: string
+  reason: string
+  operator_name: string
+  result: string
+  export_time: string
+}
+
+export interface ComplianceReport {
+  from: string
+  to: string
+  login: {
+    success: number
+    fail: number
+    locked: number
+    by_user: { username: string; count: number }[]
+  }
+  high_risk: { command: string; risk_level: string; count: number; redacted?: boolean }[]
+  duration: {
+    under_5_min: number
+    under_30_min: number
+    under_2_hour: number
+    over_2_hour: number
+    unknown: number
+  }
+}
+
+export function getComplianceReport() {
+  return request<ComplianceReport>('/audit/reports/compliance')
+}
+
+export function getWatermark() {
+  return request<WatermarkSpec>('/audit/watermark')
+}
+
+export function saveWatermark(body: WatermarkSpec & { scope?: string }) {
+  return request<WatermarkSpec>('/audit/watermark', { method: 'PUT', body })
+}
+
+export function listRedactRules() {
+  return request<{ items: RedactRule[] }>('/audit/redact-rules')
+}
+
+export function saveRedactRule(body: RedactRule) {
+  if (body.rule_id) {
+    return request<RedactRule>(`/audit/redact-rules/${body.rule_id}`, { method: 'PUT', body })
+  }
+  return request<RedactRule>('/audit/redact-rules', { method: 'POST', body })
+}
+
+export function deleteRedactRule(id: number, scope?: string) {
+  return request<{ deleted: boolean }>(`/audit/redact-rules/${id}`, {
+    method: 'DELETE',
+    params: scope ? { scope } : undefined,
+  })
+}
+
+export function listExportRequests(page = 1) {
+  return request<PageResult<ExportRequest>>('/audit/exports', { params: { page, page_size: 20 } })
+}
+
+export function createExportRequest(sessionId: number, reason: string) {
+  return request<ExportRequest>('/audit/exports', {
+    method: 'POST',
+    body: { session_id: sessionId, reason },
+  })
+}
+
+export function approveExportRequest(id: number, comment: string) {
+  return request<ExportRequest>(`/audit/exports/${id}/approve`, { method: 'POST', body: { comment } })
+}
+
+export function rejectExportRequest(id: number, comment: string) {
+  return request<ExportRequest>(`/audit/exports/${id}/reject`, { method: 'POST', body: { comment } })
+}
+
+export function listExportLogs(page = 1) {
+  return request<PageResult<ExportLog>>('/audit/export-logs', { params: { page, page_size: 20 } })
+}
+
+export function getCommandOriginal(id: number) {
+  return request<AuditCommand>(`/audit/commands/${id}/original`)
+}
+
+async function readError(response: Response): Promise<string> {
+  const text = await response.text()
+  if (!text) return `请求失败（HTTP ${response.status}）`
+  try {
+    const payload = JSON.parse(text) as { message?: string }
+    return payload.message || text
+  } catch {
+    return text
+  }
+}
+
+/** 下载二进制或文本附件。失败时抛出 ApiError，不把令牌写进错误。 */
+export async function downloadAuthed(path: string, token: string, filename: string): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!response.ok) {
+    throw new ApiError(`HTTP_${response.status}`, await readError(response), response.status)
+  }
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
 }

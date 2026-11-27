@@ -521,11 +521,16 @@ export interface AuditSession {
   record_status: string
   record_size: number
   record_digest: string
+  purpose?: string
 }
 
 export interface SessionCommand {
+  command_id?: number
+  session_id?: number
   seq_no: number
   command_text: string
+  /** 展示层已脱敏。原文仍在库里，查看需要 audit:record:reveal。 */
+  redacted?: boolean
   /** user：用户输入；client_auto：客户端自动。历史记录可能缺省，按用户输入展示。 */
   command_origin?: string
   policy_action: string
@@ -552,6 +557,17 @@ export interface AuditSessionDetail {
   commands: SessionCommand[]
   files?: SessionFile[]
   record_play_url?: string
+  watermark?: WatermarkSpec
+  watermark_text?: string
+}
+
+export interface WatermarkSpec {
+  enabled: boolean
+  style: string
+  opacity: number
+  font_size: number
+  angle: number
+  template: string
 }
 
 export interface AuditSessionStats {
@@ -573,6 +589,7 @@ export interface AuditSessionStats {
 export interface AuditCommand {
   command_id: number
   session_id: number
+  redacted?: boolean
   /** 人类可读会话号，来自 ops_session.session_no */
   session_no?: string
   seq_no: number

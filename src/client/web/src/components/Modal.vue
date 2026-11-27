@@ -3,7 +3,7 @@ withDefaults(
   defineProps<{
     modelValue: boolean
     title?: string
-    size?: 'sm' | 'md' | 'lg'
+    size?: 'sm' | 'md' | 'lg' | 'xl'
     closeOnMask?: boolean
   }>(),
   { title: '', size: 'md', closeOnMask: true },

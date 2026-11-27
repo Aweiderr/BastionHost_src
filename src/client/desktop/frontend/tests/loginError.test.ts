@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isGraphicCaptchaMessage, loginFactorDialog, shouldShowTotp } from '../src/loginError.ts'
+import { isGraphicCaptchaMessage, isRecoveryCodeInput, loginFactorDialog, normalizeRecoveryCode, shouldShowTotp } from '../src/loginError.ts'
 
 test('graphic captcha errors are not treated as TOTP', () => {
   for (const message of [
@@ -33,6 +33,15 @@ test('desktop login chooses the factor after credentials and has no method switc
   assert.doesNotMatch(login, /showTOTP/)
   assert.match(login, /loginFactorDialog/)
   assert.match(login, /mfaKind === 'totp'/)
+  assert.match(login, /使用恢复码/)
+  assert.match(login, /Web 控制台重新绑定/)
+})
+
+test('recovery codes are normalized and validated before submit', () => {
+  assert.equal(normalizeRecoveryCode(' ab12-cd34 '), 'AB12CD34')
+  assert.equal(isRecoveryCodeInput('AB12-CD34'), true)
+  assert.equal(isRecoveryCodeInput('123456'), false)
+  assert.equal(isRecoveryCodeInput('ZZZZ-ZZZZ'), false)
 })
 
 test('plain credential errors open neither prompt', () => {

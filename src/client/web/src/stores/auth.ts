@@ -181,7 +181,11 @@ export const useAuthStore = defineStore('auth', () => {
     loading.value = true
     try {
       const res = await authApi.verifyMfa(challengeId, code)
-      applyLoginResult(res.login)
+      // 恢复码登录后只返回“必须重新绑定”的证明，没有业务令牌；
+      // 此时写入空会话会让路由守卫误判为已登录。
+      if (res.login.access_token && !res.login.enrollment_required) {
+        applyLoginResult(res.login)
+      }
       return { result: res.login, authMethod: res.auth_method }
     } finally {
       loading.value = false

@@ -236,6 +236,7 @@ type LoginResult struct {
 	PhoneMasked        string   `json:"phone_masked,omitempty"`
 	MFAHint            string   `json:"mfa_hint,omitempty"`
 	EnrollmentRequired bool     `json:"enrollment_required,omitempty"`
+	TOTPRebindRequired bool     `json:"totp_rebind_required,omitempty"`
 	StepUpProof        string   `json:"step_up_proof,omitempty"`
 }
 

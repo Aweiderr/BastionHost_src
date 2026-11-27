@@ -30,6 +30,9 @@ const (
 	TOTPSecretSize = 20
 	// TOTPWindow 容错窗口：验证当前时间片及其前后各 1 个（步长 30 秒，约 ±30 秒）
 	TOTPWindow = 1
+	// TOTPDiagnosticWindow 只用于时间偏差提示：超出验收窗口后，
+	// 再向两侧检查最多 10 个时间片（约 ±5 分钟）。诊断命中也不放行。
+	TOTPDiagnosticWindow = 10
 	// TOTPRFC6238Period 是 RFC 6238 附录 B 的步长。
 	// 当前数值与产品默认值相同，测试仍须显式使用本常量，不能改用 TOTPPeriod。
 	TOTPRFC6238Period = 30
@@ -71,17 +74,27 @@ func DecodeBase32(s string) ([]byte, error) {
 // 格式：
 //
 //	otpauth://totp/{issuer}:{account}?secret=...&issuer=...&algorithm=SHA1&digits=6&period=30
+//
+// 未显式传入算法时保持 SHA1，兼容标准认证器；产品的新绑定由服务层显式传 SM3。
 func BuildOtpauthURI(issuer, account string, secret []byte, algo string) string {
+	return BuildOtpauthURIWithParams(issuer, account, secret, algo, TOTPDigits, TOTPPeriod)
+}
+
+// BuildOtpauthURIWithParams 按绑定时持久化的算法、位数和步长构造 URI。
+// 二维码、手动密钥和登录校验必须使用同一组参数，避免扫到错误算法。
+func BuildOtpauthURIWithParams(issuer, account string, secret []byte, algo string, digits, period int) string {
 	if algo == "" {
 		algo = TOTPAlgoSHA1
 	}
+	digits = normalizeDigits(digits)
+	period = normalizePeriod(period)
 	label := url.PathEscape(issuer + ":" + account)
 	q := url.Values{}
 	q.Set("secret", EncodeBase32(secret))
 	q.Set("issuer", issuer)
 	q.Set("algorithm", algo)
-	q.Set("digits", fmt.Sprintf("%d", TOTPDigits))
-	q.Set("period", fmt.Sprintf("%d", TOTPPeriod))
+	q.Set("digits", fmt.Sprintf("%d", digits))
+	q.Set("period", fmt.Sprintf("%d", period))
 	return "otpauth://totp/" + label + "?" + q.Encode()
 }
 
@@ -90,11 +103,17 @@ func GenerateTOTP(secret []byte, t time.Time, algo string) string {
 	return generateTOTPAt(secret, t, algo, TOTPPeriod)
 }
 
-// generateTOTPAt 按给定步长计算验证码。period 仅供 RFC 6238 的 30 秒向量使用。
-func generateTOTPAt(secret []byte, t time.Time, algo string, period int) string {
+// GenerateTOTPWithParams 按账号绑定时的算法、位数和步长计算验证码。
+func GenerateTOTPWithParams(secret []byte, t time.Time, algo string, digits, period int) string {
 	period = normalizePeriod(period)
+	digits = normalizeDigits(digits)
 	counter := uint64(t.Unix() / int64(period))
-	return hotp(secret, counter, algo)
+	return hotpDigits(secret, counter, algo, digits)
+}
+
+// generateTOTPAt 按给定步长计算 6 位验证码。period 仅供 RFC 6238 的 30 秒向量使用。
+func generateTOTPAt(secret []byte, t time.Time, algo string, period int) string {
+	return GenerateTOTPWithParams(secret, t, algo, TOTPDigits, period)
 }
 
 func normalizePeriod(period int) int {
@@ -102,6 +121,13 @@ func normalizePeriod(period int) int {
 		return TOTPPeriod
 	}
 	return period
+}
+
+func normalizeDigits(digits int) int {
+	if digits <= 0 {
+		return TOTPDigits
+	}
+	return digits
 }
 
 // VerifyTOTP 校验验证码，容忍 ±TOTPWindow 个时间片。
@@ -126,24 +152,66 @@ func MatchTOTP(secret []byte, code string, algo string, now time.Time) (bool, in
 	return matchTOTPAt(secret, code, algo, now, TOTPPeriod)
 }
 
-// matchTOTPAt 按给定步长校验。period 仅供 RFC 6238 的 30 秒向量使用。
+// MatchTOTPWithParams 按账号绑定时的算法、位数和步长校验，容错窗口仍为 ±1。
+func MatchTOTPWithParams(secret []byte, code, algo string, digits, period int, now time.Time) (bool, int64) {
+	return matchTOTPParams(secret, code, algo, digits, period, now)
+}
+
+// matchTOTPAt 按给定步长校验 6 位口令。period 仅供 RFC 6238 的 30 秒向量使用。
 func matchTOTPAt(secret []byte, code string, algo string, now time.Time, period int) (bool, int64) {
+	return matchTOTPParams(secret, code, algo, TOTPDigits, period, now)
+}
+
+func matchTOTPParams(secret []byte, code, algo string, digits, period int, now time.Time) (bool, int64) {
 	code = strings.TrimSpace(code)
-	if len(code) != TOTPDigits {
+	digits = normalizeDigits(digits)
+	period = normalizePeriod(period)
+	if len(code) != digits {
 		return false, 0
 	}
-	period = normalizePeriod(period)
 	base := now.Unix() / int64(period)
 	for _, offset := range windowOffsets() {
 		step := base + int64(offset)
 		if step < 0 {
 			continue
 		}
-		if subtleCompare(hotp(secret, uint64(step), algo), code) {
+		if subtleCompare(hotpDigits(secret, uint64(step), algo, digits), code) {
 			return true, step
 		}
 	}
 	return false, 0
+}
+
+// DiagnoseTOTPSkew 只在验收窗口之外寻找时间偏差，返回“约几分钟”。
+//
+// 只检查 ±2..±maxPeriods 个时间片；±1 由 MatchTOTPWithParams 放行，不算偏差。
+// afterStep 是最近一次已经接受的时间片，小于或等于它的周期不能再作为诊断依据，
+// 避免同一枚验证码被重放后又被拿来探测时间。诊断命中不代表校验通过。
+func DiagnoseTOTPSkew(secret []byte, code, algo string, digits, period int, now time.Time, maxPeriods int, afterStep int64) (int, bool) {
+	code = strings.TrimSpace(code)
+	digits = normalizeDigits(digits)
+	period = normalizePeriod(period)
+	if len(code) != digits || maxPeriods < 2 {
+		return 0, false
+	}
+	base := now.Unix() / int64(period)
+	for i := 2; i <= maxPeriods; i++ {
+		for _, offset := range []int64{-int64(i), int64(i)} {
+			step := base + offset
+			if step < 0 || step <= afterStep {
+				continue
+			}
+			if subtleCompare(hotpDigits(secret, uint64(step), algo, digits), code) {
+				seconds := int64(i) * int64(period)
+				minutes := int((seconds + 59) / 60)
+				if minutes < 1 {
+					minutes = 1
+				}
+				return minutes, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // windowOffsets 返回容错窗口内的时间片偏移序列（当前优先）。

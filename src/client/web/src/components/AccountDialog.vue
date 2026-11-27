@@ -69,6 +69,10 @@ const totpPassword = ref('')
 const confirmProof = ref('')
 const totpBusy = ref(false)
 const recoveryCodes = ref<string[]>([])
+const totpAlgorithm = ref<'SM3' | 'SHA1'>('SM3')
+const totpBoundAlgorithm = ref<'SM3' | 'SHA1'>('SM3')
+const totpBoundDigits = ref(6)
+const totpBoundPeriod = ref(30)
 
 const showFactorSettings = computed(() => canSelfServeFactor(auth.roles))
 const mfaType = computed(() => auth.user?.mfa_type || 'none')
@@ -86,6 +90,9 @@ function resetTotpForm(): void {
   totpUrl.value = ''
   totpQr.value = ''
   recoveryCodes.value = []
+  totpBoundAlgorithm.value = 'SM3'
+  totpBoundDigits.value = 6
+  totpBoundPeriod.value = 30
 }
 
 async function startTotp(): Promise<void> {
@@ -97,7 +104,7 @@ async function startTotp(): Promise<void> {
       newFactor: 'totp',
       title: '确认是您本人在绑定动态令牌',
     }, auth.user)
-    const parsed = readTotpStart(await totpStart(proof))
+    const parsed = readTotpStart(await totpStart(proof, totpAlgorithm.value))
     confirmProof.value = parsed.stepUpProof || ''
     if (!parsed.secret || !parsed.otpauthUrl) {
       app.error('未获取到绑定密钥，请重试')
@@ -105,6 +112,9 @@ async function startTotp(): Promise<void> {
     }
     totpSecret.value = parsed.secret
     totpUrl.value = parsed.otpauthUrl
+    totpBoundAlgorithm.value = parsed.algorithm
+    totpBoundDigits.value = parsed.digits
+    totpBoundPeriod.value = parsed.period
     recoveryCodes.value = []
     try {
       totpQr.value = await QRCode.toDataURL(parsed.otpauthUrl, {
@@ -131,7 +141,7 @@ async function confirmTotp(): Promise<void> {
   try {
     const result = await totpConfirm(totpCode.value, confirmProof.value)
     const codes = result.recovery_codes ?? []
-    app.success('动态令牌已绑定。请离线保存恢复码，认证器丢失时可用它自助解绑')
+    app.success('动态令牌已绑定。请离线保存恢复码；认证器丢失时可在登录页用恢复码登录，登录后须重新绑定')
     resetTotpForm()
     recoveryCodes.value = codes
     await auth.fetchMe()
@@ -244,6 +254,16 @@ function close(): void {
 
       <div v-if="!totpActive && !otherMfa && (mfaType === 'totp' || mfaType === 'none')" class="form-grid single">
         <div v-if="!totpSecret" class="form-item">
+          <label class="form-label" for="account-totp-algorithm">算法</label>
+          <select id="account-totp-algorithm" v-model="totpAlgorithm" class="select" :disabled="totpBusy">
+            <option value="SM3">SM3（国密，推荐）</option>
+            <option value="SHA1">SHA1（标准认证器兼容）</option>
+          </select>
+          <span class="form-hint">
+            国密 SM3，需支持 SM3 的认证器；若认证器仅支持标准 SHA1，请改选 SHA1。
+          </span>
+        </div>
+        <div v-if="!totpSecret" class="form-item">
           <button class="btn btn-primary" :disabled="totpBusy" @click="startTotp">
             <span v-if="totpBusy" class="spinner light" />
             开始绑定
@@ -259,11 +279,17 @@ function close(): void {
               height="180"
               style="display: block; background: #fff; padding: 8px; border-radius: 4px"
             />
-            <span class="form-hint">请扫描二维码或导入下方 otpauth 地址，认证器会按 30 秒周期生成口令。手抄密钥时使用认证器默认的 30 秒更新周期即可。</span>
+            <span class="form-hint">
+              请扫描二维码或导入下方 otpauth 地址。二维码已标明算法、位数和步长。
+            </span>
           </div>
           <div class="form-item">
             <label class="form-label">密钥（手动录入认证器）</label>
             <input class="input text-mono" :value="totpSecret" readonly />
+            <span class="form-hint">
+              算法：{{ totpBoundAlgorithm }} · 位数：{{ totpBoundDigits }} · 步长：{{ totpBoundPeriod }} 秒。
+              服务器时间以堡垒机主机时钟为准，请管理员确保主机已同步 NTP。
+            </span>
           </div>
           <div class="form-item">
             <label class="form-label">otpauth 地址</label>
@@ -291,7 +317,7 @@ function close(): void {
 
       <div v-if="recoveryCodes.length" class="mt-16">
         <div class="form-label mb-8">恢复码（仅显示一次，请离线保存）</div>
-        <p class="form-hint mb-8">认证器丢失时，可在本页用其中一枚恢复码自助解绑。关闭后无法再次查看。</p>
+        <p class="form-hint mb-8">认证器丢失时，可在登录页用其中一枚恢复码登录，登录后必须重新绑定动态令牌；已使用的码和剩余未使用码都会失效并签发新的一套。关闭后无法再次查看。</p>
         <div class="tag-group">
           <span v-for="code in recoveryCodes" :key="code" class="tag tag-info text-mono">{{ code }}</span>
         </div>

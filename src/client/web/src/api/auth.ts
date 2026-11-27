@@ -87,10 +87,10 @@ export function logout() {
 }
 
 /** 开始绑定 TOTP。stepUpProof 是口令核验或解绑成功后的一次性证明。 */
-export function totpStart(stepUpProof: string) {
+export function totpStart(stepUpProof: string, algorithm: 'SM3' | 'SHA1' = 'SM3') {
   return request<TotpStartResult>('/auth/totp/start', {
     method: 'POST',
-    body: { step_up_proof: stepUpProof },
+    body: { step_up_proof: stepUpProof, algorithm },
   })
 }
 
@@ -103,10 +103,10 @@ export function totpConfirm(code: string, stepUpProof: string) {
 }
 
 /** 登录后强制绑定：只使用口令登录发放的短期证明，不携带业务会话。 */
-export function totpEnrollStart(userId: number, stepUpProof: string) {
+export function totpEnrollStart(userId: number, stepUpProof: string, algorithm: 'SM3' | 'SHA1' = 'SM3') {
   return request<TotpStartResult>('/auth/totp/enroll/start', {
     method: 'POST',
-    body: { user_id: userId, step_up_proof: stepUpProof },
+    body: { user_id: userId, step_up_proof: stepUpProof, algorithm },
     auth: false,
   })
 }

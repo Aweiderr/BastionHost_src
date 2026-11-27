@@ -458,7 +458,8 @@ func (s *AuthService) BeginStepUp(ctx context.Context, req StepUpRequest) (*Step
 		if err != nil {
 			return nil, err
 		}
-		ok, step := auth.MatchTOTP(secret, req.TOTPCode, auth.TOTPAlgoSHA1, time.Now())
+		algo, digits, period := totpParamsOf(actor)
+		ok, step := auth.MatchTOTPWithParams(secret, req.TOTPCode, algo, digits, period, time.Now())
 		if !ok {
 			return nil, deny(reasonFactorMismatch)
 		}

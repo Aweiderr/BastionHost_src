@@ -4,7 +4,13 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { loginFactorDialog } from './loginFactor.ts'
-import { TOTP_CLOCK_HINT, shouldShowTotp } from './loginTotp.ts'
+import {
+  isRecoveryCodeInput,
+  normalizeRecoveryCode,
+  TOTP_CLOCK_HINT,
+  TOTP_RECOVERY_HINT,
+  shouldShowTotp,
+} from './loginTotp.ts'
 
 const srcRoot = dirname(fileURLToPath(import.meta.url))
 
@@ -46,4 +52,41 @@ test('时间偏差提示写明 30 秒周期，同步失败会导致口令无效'
   assert.match(TOTP_CLOCK_HINT, /时间/)
   assert.match(TOTP_CLOCK_HINT, /动态口令/)
   assert.doesNotMatch(TOTP_CLOCK_HINT, /60 秒/)
+})
+
+test('恢复码入口只接受 8 位十六进制，并给出管理员兜底提示', () => {
+  assert.equal(normalizeRecoveryCode(' ab12-cd34 '), 'AB12CD34')
+  assert.equal(normalizeRecoveryCode('AB12 CD34'), 'AB12CD34')
+  assert.equal(isRecoveryCodeInput('ab12-cd34'), true)
+  assert.equal(isRecoveryCodeInput('AB12CD34'), true)
+  assert.equal(isRecoveryCodeInput('123456'), false)
+  assert.equal(isRecoveryCodeInput('ZZZZ-ZZZZ'), false)
+  assert.match(TOTP_RECOVERY_HINT, /恢复码/)
+  assert.match(TOTP_RECOVERY_HINT, /管理员/)
+  assert.match(TOTP_RECOVERY_HINT, /解绑|重置/)
+
+  const login = readFileSync(join(srcRoot, '../components/TotpLoginDialog.vue'), 'utf8')
+  assert.match(login, /使用恢复码/)
+  assert.match(login, /TOTP_RECOVERY_HINT/)
+  assert.match(login, /isRecoveryCodeInput/)
+
+  const enroll = readFileSync(join(srcRoot, '../components/TotpEnrollDialog.vue'), 'utf8')
+  assert.match(enroll, /SM3/)
+  assert.match(enroll, /SHA1/)
+  assert.match(enroll, /algorithm/)
+  assert.match(enroll, /位数/)
+  assert.match(enroll, /步长/)
+
+  const account = readFileSync(join(srcRoot, '../components/AccountDialog.vue'), 'utf8')
+  assert.match(account, /SM3/)
+  assert.match(account, /SHA1/)
+  assert.match(account, /totpAlgorithm/)
+
+  const store = readFileSync(join(srcRoot, '../stores/auth.ts'), 'utf8')
+  assert.match(store, /res\.login\.access_token && !res\.login\.enrollment_required/)
+})
+
+test('时间偏差文案仍属于动态口令错误，不能被图形验证码分支吞掉', () => {
+  assert.equal(shouldShowTotp('动态口令不正确。检测到认证器时间偏差约 2 分钟，请校准手机或电脑时间后重试'), true)
+  assert.equal(shouldShowTotp('动态口令不正确'), true)
 })

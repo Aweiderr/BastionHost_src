@@ -303,6 +303,15 @@ async function onTotpSubmit(code: string): Promise<void> {
   try {
     const { result } = await auth.verifyMfa(totpChallengeId.value, code)
     showTotpMfa.value = false
+    totpChallengeId.value = ''
+    // 恢复码登录成功：认证器已失效，不签发业务令牌，先重新绑定动态令牌。
+    if (result.enrollment_required) {
+      enrollUserId.value = result.user_id || 0
+      enrollProof.value = result.step_up_proof || ''
+      enrollHint.value = result.mfa_hint || '认证器已不可用，请重新绑定动态令牌后再登录'
+      showEnroll.value = true
+      return
+    }
     await afterLoginSuccess(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : '验证失败'

@@ -121,6 +121,10 @@ type Server struct {
 	// lives 按管理面 session_id 登记在途会话，供管理员强制中断。
 	lives map[int64]*liveSession
 
+	// displayCache 缓存管理面下发的脱敏规则和水印，避免每次回放都回源。
+	displayMu    sync.Mutex
+	displayCache map[int64]cachedPolicy
+
 	// admit 是新会话准入检查（集群维护状态）。
 	//
 	// 以回调注入而不是内建心跳依赖：数据面不应该为了"能不能接单"

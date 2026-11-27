@@ -40,6 +40,9 @@ func registerInternalRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/finish", h(s.handleSessionFinish))
 	// 节点心跳：代理节点定期上报负载，并取回"是否允许接收新会话"
 	mux.HandleFunc("POST /internal/v1/nodes/heartbeat", h(s.handleNodeHeartbeat))
+	mux.HandleFunc("GET /internal/v1/audit/display-policy", h(s.handleInternalDisplayPolicy))
+	mux.HandleFunc("POST /internal/v1/audit/watermark-bypass", h(s.handleInternalWatermarkBypass))
+	mux.HandleFunc("POST /internal/v1/audit/reveal", h(s.handleInternalReveal))
 }
 
 // handleNodeHeartbeat 处理代理节点心跳。

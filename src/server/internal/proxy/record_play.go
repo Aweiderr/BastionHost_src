@@ -1,17 +1,21 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"bastion.local/server/internal/managerclient"
 	"bastion.local/server/internal/record"
+	"bastion.local/shared/auditmask"
 	"bastion.local/shared/errcode"
 	"bastion.local/shared/httpx"
 )
@@ -50,6 +54,10 @@ func (s *Server) RecordPlayHandler() http.HandlerFunc {
 			httpx.FailCode(w, "API_4030")
 			return
 		}
+		// 去掉水印的查询不会生效，但必须留下审计。即使后面录像读失败也要记。
+		if watermarkDisabled(r) {
+			s.noteWatermarkBypass(r.Context(), ident, sessionNo, clientIPOf(r), "回放请求携带 watermark=off")
+		}
 
 		path, plain, info, err := s.readRecording(r.Context(), sessionNo)
 		if err != nil {
@@ -83,12 +91,126 @@ func (s *Server) RecordPlayHandler() http.HandlerFunc {
 		if isGraphicalRecord(plain) {
 			kind = "graphical"
 		}
+		policy := s.playbackPolicy(r.Context(), ident.TenantID)
+		reveal := false
+		if r.URL.Query().Get("reveal") == "1" {
+			reveal = s.askReveal(r.Context(), ident, sessionNo, clientIPOf(r))
+		}
+		body, redacted := applyPlayback(plain, policy.Rules, reveal)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("X-Record-Kind", kind)
 		w.Header().Set("X-Record-Digest", info.Digest)
 		w.Header().Set("X-Record-Chunks", fmt.Sprint(info.Chunks))
-		_, _ = w.Write(plain)
+		// 水印正文可能含中文，不放进响应头。头只声明必须展示，样式用 ASCII。
+		w.Header().Set("X-Watermark-Required", "1")
+		if policy.Watermark.Style != "" {
+			w.Header().Set("X-Watermark-Style", policy.Watermark.Style)
+		} else {
+			w.Header().Set("X-Watermark-Style", auditmask.StyleDiagonal)
+		}
+		if redacted {
+			w.Header().Set("X-Record-Redacted", "1")
+		}
+		if reveal {
+			w.Header().Set("X-Record-Reveal", "1")
+		}
+		_, _ = w.Write(body)
 	}
+}
+
+// playbackAuditor 是回放时向管理面要脱敏规则、并记录绕过的能力。
+// 管理面不可用时回放仍按内置规则脱敏，不把原文直接送出。
+type playbackAuditor interface {
+	DisplayPolicy(ctx context.Context, tenantID int64) (auditmask.Policy, error)
+	NoteWatermarkBypass(ctx context.Context, userID int64, username string, tenantID int64, sessionNo, clientIP, reason string) error
+	AskReveal(ctx context.Context, userID int64, username string, tenantID int64, sessionNo, clientIP string) (bool, error)
+}
+
+type cachedPolicy struct {
+	at     time.Time
+	policy auditmask.Policy
+}
+
+func (s *Server) auditor() playbackAuditor {
+	a, _ := s.client.(playbackAuditor)
+	return a
+}
+
+func (s *Server) playbackPolicy(ctx context.Context, tenantID int64) auditmask.Policy {
+	fallback := auditmask.Policy{Rules: auditmask.BuiltinRules(), Watermark: auditmask.DefaultWatermark()}
+	s.displayMu.Lock()
+	if item, ok := s.displayCache[tenantID]; ok && time.Since(item.at) < 15*time.Second {
+		s.displayMu.Unlock()
+		return item.policy
+	}
+	s.displayMu.Unlock()
+	auditor := s.auditor()
+	if auditor == nil {
+		return fallback
+	}
+	policy, err := auditor.DisplayPolicy(ctx, tenantID)
+	if err != nil {
+		return fallback
+	}
+	if _, nerr := policy.Watermark.Normalize(); nerr != nil {
+		policy.Watermark = auditmask.DefaultWatermark()
+	}
+	s.displayMu.Lock()
+	if s.displayCache == nil {
+		s.displayCache = map[int64]cachedPolicy{}
+	}
+	s.displayCache[tenantID] = cachedPolicy{at: time.Now(), policy: policy}
+	s.displayMu.Unlock()
+	return policy
+}
+
+func (s *Server) noteWatermarkBypass(ctx context.Context, ident *managerclient.OpsIdentity, sessionNo, ip, reason string) {
+	auditor := s.auditor()
+	if auditor == nil || ident == nil {
+		slog.Warn("回放请求试图关闭水印", "session_no", sessionNo, "reason", reason)
+		return
+	}
+	if err := auditor.NoteWatermarkBypass(ctx, ident.UserID, ident.Username, ident.TenantID, sessionNo, ip, reason); err != nil {
+		slog.Warn("水印绕过审计写入失败", "session_no", sessionNo, "err", err)
+	}
+}
+
+func (s *Server) askReveal(ctx context.Context, ident *managerclient.OpsIdentity, sessionNo, ip string) bool {
+	auditor := s.auditor()
+	if auditor == nil || ident == nil {
+		return false
+	}
+	ok, err := auditor.AskReveal(ctx, ident.UserID, ident.Username, ident.TenantID, sessionNo, ip)
+	if err != nil {
+		slog.Warn("原文查看授权失败，按脱敏回放", "session_no", sessionNo, "err", err)
+		return false
+	}
+	return ok
+}
+
+func applyPlayback(plain []byte, rules []auditmask.Rule, reveal bool) ([]byte, bool) {
+	if reveal {
+		return plain, false
+	}
+	out := auditmask.RedactPlayback(plain, rules)
+	return out, !bytes.Equal(out, plain)
+}
+
+func watermarkDisabled(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("watermark"))) {
+	case "0", "off", "false":
+		return true
+	default:
+		return false
+	}
+}
+
+func clientIPOf(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // readRecording 读取并校验录像。共享存储优先：对象不在本机时仍能打开。

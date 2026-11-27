@@ -3,6 +3,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"time"
@@ -108,6 +110,7 @@ type Server struct {
 	// sessionKiller 强制中断进行中的运维会话
 	sessionKiller *service.SessionKiller
 	oracle        *service.OracleConsole
+	auditDisplay  *service.AuditDisplay
 }
 
 // NewRouter 装配管理服务的全部路由。
@@ -128,6 +131,7 @@ func NewRouter(deps Deps) http.Handler {
 		ukey:          deps.UKey,
 		sessionKiller: deps.SessionKiller,
 		oracle:        deps.Oracle,
+		auditDisplay:  newAuditDisplay(deps),
 	}
 
 	mux := http.NewServeMux()
@@ -146,6 +150,7 @@ func NewRouter(deps Deps) http.Handler {
 	registerPolicyRoutes(mux, s)
 	registerTicketRoutes(mux, s)
 	registerAuditRoutes(mux, s)
+	registerAuditDisplayRoutes(mux, s)
 	registerAlertRoutes(mux, s)
 	registerOracleRoutes(mux, s)
 
@@ -170,6 +175,32 @@ func NewRouter(deps Deps) http.Handler {
 	}
 
 	return withRecovery(withRequestLog(mux))
+}
+
+// newAuditDisplay 在数据库可用时装配展示层服务。没有连接池时相关接口返回未就绪。
+func newAuditDisplay(deps Deps) *service.AuditDisplay {
+	if deps.Pool == nil || deps.OplogRepo == nil {
+		return nil
+	}
+	base := ""
+	if deps.Config != nil {
+		base = deps.Config.RecordPlayURL
+	}
+	digest := func(b []byte) string {
+		if deps.Crypto != nil {
+			if sum := deps.Crypto.SM3Sum(b); len(sum) > 0 {
+				return hex.EncodeToString(sum)
+			}
+		}
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:])
+	}
+	return service.NewAuditDisplay(
+		repo.NewAuditDisplayRepo(deps.Pool),
+		deps.OplogRepo,
+		service.HTTPRecordingFetcher{Base: base},
+		digest,
+	)
 }
 
 // handleHealthz 返回服务与依赖组件的健康状况。

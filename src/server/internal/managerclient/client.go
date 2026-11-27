@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"bastion.local/shared/auditmask"
 	"bastion.local/shared/internalauth"
 	"bastion.local/shared/policy"
 )
@@ -514,6 +515,37 @@ func (c *Client) AddFile(ctx context.Context, sessionID int64, payload *SessionF
 func (c *Client) FinishSession(ctx context.Context, sessionID int64, payload map[string]any) error {
 	path := "/internal/v1/sessions/" + strconv.FormatInt(sessionID, 10) + "/finish"
 	return c.do(ctx, http.MethodPost, path, payload, nil)
+}
+
+// DisplayPolicy 读取回放要用的脱敏规则和水印。
+func (c *Client) DisplayPolicy(ctx context.Context, tenantID int64) (auditmask.Policy, error) {
+	var out auditmask.Policy
+	path := "/internal/v1/audit/display-policy?tenant_id=" + strconv.FormatInt(tenantID, 10)
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
+// NoteWatermarkBypass 记录一次关闭水印的回放请求。管理面仍要求展示水印。
+func (c *Client) NoteWatermarkBypass(ctx context.Context, userID int64, username string, tenantID int64, sessionNo, clientIP, reason string) error {
+	return c.do(ctx, http.MethodPost, "/internal/v1/audit/watermark-bypass", map[string]any{
+		"user_id": userID, "username": username, "tenant_id": tenantID,
+		"session_no": sessionNo, "client_ip": clientIP, "reason": reason,
+	}, nil)
+}
+
+// AskReveal 询问是否允许回放未脱敏原文，并让管理面记审计。
+func (c *Client) AskReveal(ctx context.Context, userID int64, username string, tenantID int64, sessionNo, clientIP string) (bool, error) {
+	var out struct {
+		Allowed bool `json:"allowed"`
+	}
+	err := c.do(ctx, http.MethodPost, "/internal/v1/audit/reveal", map[string]any{
+		"user_id": userID, "username": username, "tenant_id": tenantID,
+		"session_no": sessionNo, "client_ip": clientIP,
+	}, &out)
+	if err != nil {
+		return false, err
+	}
+	return out.Allowed, nil
 }
 
 // Healthz 探测管理服务可用性（用于服务端启动自检）。

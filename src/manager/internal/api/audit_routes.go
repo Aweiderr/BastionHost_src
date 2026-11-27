@@ -175,10 +175,14 @@ func (s *Server) handleAuditSessionDetail(w http.ResponseWriter, r *http.Request
 		httpx.FailCode(w, "API_4040")
 		return
 	}
+	s.maskCommands(r, sess.Commands)
+	wm, wmText := s.sessionWatermark(r, sess)
 	rec := map[string]any{
-		"session":  sess,
-		"commands": sess.Commands,
-		"files":    sess.Files,
+		"session":        sess,
+		"commands":       sess.Commands,
+		"files":          sess.Files,
+		"watermark":      wm,
+		"watermark_text": wmText,
 	}
 	// 录像回放地址：录像文件在代理节点本地，由服务端提供解密流。
 	// 主机名必须取**当前请求的 Host**：若直接用配置里的地址（默认 127.0.0.1），
@@ -218,6 +222,8 @@ func (s *Server) handleAuditCommands(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, err)
 		return
 	}
+	// 关键字已经在 command_text 原文上匹配。这里只改返回给页面的副本。
+	s.maskCommands(r, list)
 	httpx.OK(w, map[string]any{
 		"items": list, "total": total, "page": f.Page, "page_size": f.PageSize,
 	})

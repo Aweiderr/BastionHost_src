@@ -22,6 +22,7 @@ import {
   type ReplayCommand,
   type TerminalSize,
 } from '@/utils/replay'
+import { showCharacterReplayControls } from '@/utils/replayControls'
 import { DEFAULT_WATERMARK, type WatermarkSpec } from '@/utils/watermark'
 
 const props = withDefaults(
@@ -34,8 +35,10 @@ const props = withDefaults(
     watermark?: WatermarkSpec | null
     vars?: Record<string, string>
     canReveal?: boolean
+    /** 会话协议。RDP/VNC 在录像正文返回前就隐藏字符控件。 */
+    protocol?: string
   }>(),
-  { title: '会话录像回放', commands: () => [], canReveal: false },
+  { title: '会话录像回放', commands: () => [], canReveal: false, protocol: '' },
 )
 
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void }>()
@@ -110,6 +113,8 @@ const modalSize = computed<'lg' | 'xl'>(() => {
 })
 
 const clockLabel = computed(() => `${formatReplayClock(currentMs.value)} / ${formatReplayClock(durationMs.value)}`)
+
+const showCharacterControls = computed(() => showCharacterReplayControls(graphical.value, props.protocol))
 
 function stopTimer(): void {
   if (timer !== null) {
@@ -376,35 +381,35 @@ onBeforeUnmount(disposeTerm)
     :size="modalSize"
     @update:model-value="emit('update:modelValue', $event)"
   >
-    <div class="flex-between mb-12 replay-toolbar">
-      <div class="flex-center gap-8 replay-controls">
-        <span
-          class="tag"
-          :class="state === 'done' ? 'tag-success' : state === 'error' ? 'tag-danger' : 'tag-info'"
-        >
-          {{ stateText[state] }}
-        </span>
-        <button class="btn btn-sm" type="button" :disabled="state === 'loading' || state === 'error'" @click="togglePlay">
-          {{ state === 'playing' ? '暂停' : '播放' }}
-        </button>
-        <label class="text-secondary">
-          倍速
-          <select class="select" :value="speed" @change="onSpeed">
-            <option v-for="item in PLAYBACK_SPEEDS" :key="item" :value="item">{{ item }}x</option>
-          </select>
-        </label>
-        <select class="select" @change="jumpCommand">
+    <div class="replay-toolbar">
+      <span
+        class="tag"
+        :class="state === 'done' ? 'tag-success' : state === 'error' ? 'tag-danger' : 'tag-info'"
+      >
+        {{ stateText[state] }}
+      </span>
+      <button class="btn btn-sm" type="button" :disabled="state === 'loading' || state === 'error'" @click="togglePlay">
+        {{ state === 'playing' ? '暂停' : '播放' }}
+      </button>
+      <label class="replay-speed text-secondary">
+        倍速
+        <select class="select" :value="speed" @change="onSpeed">
+          <option v-for="item in PLAYBACK_SPEEDS" :key="item" :value="item">{{ item }}x</option>
+        </select>
+      </label>
+      <div v-if="showCharacterControls" class="replay-jump-wrap">
+        <select class="select replay-jump" @change="jumpCommand">
           <option value="">跳到命令…</option>
           <option v-for="cmd in commands" :key="cmd.seq_no" :value="cmd.seq_no">
             {{ cmd.seq_no }} {{ cmd.command_text }}
           </option>
         </select>
-        <span v-if="redacted" class="tag">已脱敏</span>
-        <span v-if="revealed" class="tag tag-danger">原文（已记审计）</span>
       </div>
-      <div class="flex-center gap-8">
+      <span v-if="redacted" class="tag">已脱敏</span>
+      <span v-if="revealed" class="tag tag-danger">原文（已记审计）</span>
+      <div class="replay-actions">
         <button
-          v-if="canReveal && !revealed"
+          v-if="showCharacterControls && canReveal && !revealed"
           class="btn btn-sm"
           type="button"
           :disabled="state === 'loading'"
@@ -452,12 +457,60 @@ onBeforeUnmount(disposeTerm)
 
 <style scoped>
 .replay-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
   gap: 8px;
-  flex-wrap: wrap;
+  margin-bottom: 12px;
+  min-width: 0;
 }
 
-.replay-controls {
-  flex-wrap: wrap;
+.replay-toolbar .tag,
+.replay-toolbar .btn {
+  flex: 0 0 auto;
+  height: 28px;
+}
+
+.replay-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.replay-speed .select {
+  width: 4.75rem;
+  min-width: 4.75rem;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 6px;
+  font-size: 13px;
+}
+
+.replay-jump-wrap {
+  flex: 0 1 11rem;
+  width: 11rem;
+  min-width: 8.75rem;
+  max-width: 16rem;
+  overflow: hidden;
+}
+
+.replay-jump {
+  width: 100%;
+  max-width: 100%;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.replay-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .replay-timeline {

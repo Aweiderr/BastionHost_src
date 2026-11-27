@@ -489,6 +489,7 @@ onMounted(load)
       :watermark="detail?.watermark"
       :vars="watermarkVars"
       :can-reveal="canReveal"
+      :protocol="detail?.session.protocol"
     />
   </div>
 </template>
